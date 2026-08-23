@@ -457,7 +457,9 @@ TRANSLATIONS = {
         "  > WARNING: {0} figure(s) in this PDF used mock/default review because real multimodal review could not start at startup{1}. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片因真实多模态复核在启动时无法开始{1}，而使用了 mock/default 复核，因此被放入 Review，而不是真正接受。",
         "  > WARNING: {0} figure(s) in this PDF used mock/default review because real multimodal review was not actually configured at startup{1}. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片因启动时并未真正配置真实多模态复核{1}，而使用了 mock/default 复核，因此被放入 Review，而不是真正接受。",
         "  > WARNING: Real multimodal review did not fully run for this PDF. {0} figure(s) fell back to mock/default review after runtime failures, so they were placed into Review instead of true acceptance.": "  > 警告：该 PDF 的真实多模态复核未完整运行。{0} 张图片在运行时失败后回退到 mock/default 复核，因此被放入 Review，而不是真正接受。",
-        "  > WARNING: {0} figure(s) in this PDF did not receive real multimodal review. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片未获得真实多模态复核，因此被放入 Review，而不是真正接受。"
+        "  > WARNING: {0} figure(s) in this PDF did not receive real multimodal review. They were placed into Review instead of true acceptance.": "  > 警告：该 PDF 中有 {0} 张图片未获得真实多模态复核，因此被放入 Review，而不是真正接受。",
+        "  > WARNING: The PDF database results were saved, but the import-ready figure export failed. Re-run the same PDF to retry and repair only this export. Error: {0}": "  > 警告：该 PDF 的数据库结果已保存，但可导入图片导出失败。重新运行同一 PDF 将只重试并修复这项导出。错误：{0}",
+        "  > WARNING: The import-ready figure export was published, but temporary backup cleanup was incomplete. Remove the directory after confirming the export is usable: {0}. Error: {1}": "  > 警告：可导入图片已经发布，但临时备份清理不完整。确认导出可用后，请删除目录：{0}。错误：{1}"
     }
 }
 
@@ -2218,6 +2220,24 @@ class PDFWorker(QThread):
             self.log_signal.emit(message)
 
     def _log_extract_pdf_warnings(self, stats):
+        cleanup_warning = str(stats.get("import_ready_cleanup_warning", "") or "").strip()
+        if cleanup_warning:
+            cleanup_directory = str(stats.get("import_ready_cleanup_directory", "") or "").strip()
+            self.log_signal.emit(
+                self.tr(
+                    "  > WARNING: The import-ready figure export was published, but temporary backup cleanup was incomplete. Remove the directory after confirming the export is usable: {0}. Error: {1}"
+                ).format(cleanup_directory, cleanup_warning)
+            )
+
+        export_status = str(stats.get("import_ready_export_status", "") or "").strip().lower()
+        if export_status in {"error", "failed"}:
+            export_error = str(stats.get("import_ready_export_error", "") or "unknown error").strip()
+            self.log_signal.emit(
+                self.tr(
+                    "  > WARNING: The PDF database results were saved, but the import-ready figure export failed. Re-run the same PDF to retry and repair only this export. Error: {0}"
+                ).format(export_error)
+            )
+
         startup_mock_count = int(stats.get("startup_mock_review_figures", 0) or 0)
         runtime_fallback_count = int(stats.get("runtime_fallback_review_figures", 0) or 0)
         non_real_count = int(stats.get("non_real_multimodal_figures", 0) or 0)
@@ -2388,7 +2408,8 @@ class PDFWorker(QThread):
                 accepted_dir = str(stats.get("accepted_figures_dir", "") or "")
                 accepted_exported = int(stats.get("accepted_exported_figures", 0) or 0)
                 review_exported = int(stats.get("review_exported_figures", 0) or 0)
-                if accepted_dir:
+                export_status = str(stats.get("import_ready_export_status", "") or "").strip().lower()
+                if accepted_dir and export_status not in {"error", "failed"}:
                     self.log_signal.emit(
                         self.tr("  > Import-ready accepted figures: {0} -> {1}").format(
                             accepted_exported,

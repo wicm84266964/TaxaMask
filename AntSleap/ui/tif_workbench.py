@@ -3951,7 +3951,10 @@ class TifWorkbenchWidget(QWidget):
         return False
 
     def load_specimen(self, specimen_id):
-        if specimen_id != self.current_specimen_id and self.working_edit_dirty:
+        if (
+            specimen_id != self.current_specimen_id
+            and self.annotation_workflow_controller.has_unsaved_changes()
+        ):
             if not self.annotation_workflow_controller.confirm_discard_or_save():
                 return
         specimen = self.project.get_specimen(specimen_id, default=None)
@@ -4031,6 +4034,7 @@ class TifWorkbenchWidget(QWidget):
             self._update_status_labels(specimen)
             self._apply_default_volume_mask_mode()
             self._sync_mode_sections()
+            self.annotation_workflow_controller.restore_pending_unsaved_edit()
             if not self.part_mask_workflow_controller._ensure_current_metadata_materializing_for_slice_review(specimen):
                 self.render_current_slice()
             if self.display_mode == "volume":
@@ -4041,7 +4045,7 @@ class TifWorkbenchWidget(QWidget):
             self.volume_render_controller.flush_selection_render()
 
     def load_part(self, specimen_id, part_id, selected_reslice_id=""):
-        if self.working_edit_dirty:
+        if self.annotation_workflow_controller.has_unsaved_changes():
             if not self.annotation_workflow_controller.confirm_discard_or_save():
                 return
         specimen = self.project.get_specimen(specimen_id, default=None)
@@ -5132,7 +5136,8 @@ class TifWorkbenchWidget(QWidget):
             return True
         if reason == "auto_save":
             return self.annotation_workflow_controller.start_auto_save(reason=reason)
-        self.annotation_workflow_controller.wait_for_auto_save()
+        if not self.annotation_workflow_controller.wait_for_auto_save():
+            return False
         if self.current_volume_scope == "part":
             return self._save_part_editable_label(show_message=show_message, reason=reason)
         specimen = self.project.get_specimen(self.current_specimen_id, default=None)
@@ -5154,8 +5159,8 @@ class TifWorkbenchWidget(QWidget):
                     if 0 <= int(z_index) < int(target.shape[0]):
                         target[int(z_index)] = self.edit_volume[int(z_index)]
             metadata = flush_volume_array(edit_path, target)
-            self.annotation_workflow_controller.reset_dirty_tracking()
             self._finalize_full_edit_save_metadata(metadata, refresh_volumes=True)
+            self.annotation_workflow_controller.reset_dirty_tracking()
             self._update_save_status()
         except Exception as exc:
             self.annotation_workflow_controller.set_dirty(True)
@@ -5195,8 +5200,8 @@ class TifWorkbenchWidget(QWidget):
                     if 0 <= int(z_index) < int(target.shape[0]):
                         target[int(z_index)] = self.edit_volume[int(z_index)]
             metadata = flush_volume_array(edit_path, target)
-            self.annotation_workflow_controller.reset_dirty_tracking()
             self._finalize_part_editable_save_metadata(metadata, refresh_volumes=True)
+            self.annotation_workflow_controller.reset_dirty_tracking()
             self._update_save_status()
         except Exception as exc:
             self.annotation_workflow_controller.set_dirty(True)
@@ -5217,8 +5222,6 @@ class TifWorkbenchWidget(QWidget):
         return self.annotation_workflow_controller.promote_working_edit()
 
     def copy_latest_model_draft_to_working_edit(self):
-        if not self.coordinator.guard_backend_write_lock():
-            return
         if not self.current_specimen_id:
             return
         if self.current_volume_scope == "part":
@@ -5233,22 +5236,106 @@ class TifWorkbenchWidget(QWidget):
                 tt("No model draft is available for this specimen.", self.lang),
             )
             return
-        specimen_id = self.current_specimen_id
-        self.release_loaded_volume_arrays()
-        if not self.project_lifecycle_controller.wait_for_volume_array_releases():
-            self.load_specimen(specimen_id)
+        controller = self.annotation_workflow_controller
+
+        def resume_auto_save_if_needed():
+            if controller.state.dirty and self.auto_save_check.isChecked():
+                self.auto_save_timer.start()
+
+        self.auto_save_timer.stop()
+        if not controller.wait_for_auto_save():
+            return
+        if not self.coordinator.guard_backend_write_lock():
+            resume_auto_save_if_needed()
+            return
+        if controller.state.dirty and not controller.state.dirty_slices:
             QMessageBox.warning(
                 self,
                 tt("TIF backend", self.lang),
-                tt("Previous volume data is still being released. Wait a moment, then try again.", self.lang),
+                tt(
+                    "Current labels are marked unsaved, but the changed slices are unknown. Save or discard them before copying a model draft.",
+                    self.lang,
+                ),
+            )
+            resume_auto_save_if_needed()
+            return
+        specimen_id = self.current_specimen_id
+        pending_snapshot = controller.pending_unsaved_edit_recovery
+        if pending_snapshot is not None and dict(pending_snapshot.get("context") or {}) != controller._current_edit_context():
+            QMessageBox.warning(
+                self,
+                tt("TIF backend", self.lang),
+                tt("Unsaved current labels could not be restored after the model draft copy failed.", self.lang),
+            )
+            resume_auto_save_if_needed()
+            return
+        unsaved_snapshot = controller.snapshot_unsaved_edit()
+        if unsaved_snapshot is None:
+            unsaved_snapshot = pending_snapshot
+        if unsaved_snapshot is not None:
+            reply = QMessageBox.question(
+                self,
+                tt("Replace current labels?", self.lang),
+                tt(
+                    "Copy the latest model draft over the current labels? Unsaved changes will be discarded if the copy succeeds.",
+                    self.lang,
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                resume_auto_save_if_needed()
+                return
+            self.auto_save_timer.stop()
+            if not controller.wait_for_auto_save():
+                return
+            if not self.coordinator.guard_backend_write_lock():
+                resume_auto_save_if_needed()
+                return
+            latest_snapshot = controller.snapshot_unsaved_edit()
+            if latest_snapshot is not None:
+                unsaved_snapshot = latest_snapshot
+            elif controller.pending_unsaved_edit_recovery is not None:
+                unsaved_snapshot = controller.pending_unsaved_edit_recovery
+
+        controller.stash_unsaved_edit_recovery(unsaved_snapshot)
+
+        def reload_after_failure():
+            self.load_specimen(specimen_id)
+            if unsaved_snapshot is not None and controller.pending_unsaved_edit_recovery is not None:
+                if controller.restore_pending_unsaved_edit():
+                    return
+                raise RuntimeError(
+                    tt("Unsaved current labels could not be restored after the model draft copy failed.", self.lang)
+                )
+
+        self.release_loaded_volume_arrays()
+        if not self.project_lifecycle_controller.wait_for_volume_array_releases():
+            try:
+                reload_after_failure()
+                detail = tt("Previous volume data is still being released. Wait a moment, then try again.", self.lang)
+            except Exception as exc:
+                detail = "{0}\n\n{1}".format(
+                    tt("Previous volume data is still being released. Wait a moment, then try again.", self.lang),
+                    str(exc),
+                )
+            QMessageBox.warning(
+                self,
+                tt("TIF backend", self.lang),
+                detail,
             )
             return
         try:
             self.project.copy_label_layer_to_working_edit(specimen_id, source_role="model_draft")
         except Exception as exc:
-            self.load_specimen(specimen_id)
-            QMessageBox.warning(self, tt("TIF backend", self.lang), str(exc))
+            detail = str(exc)
+            try:
+                reload_after_failure()
+            except Exception as restore_exc:
+                detail = "{0}\n\n{1}".format(detail, str(restore_exc))
+            QMessageBox.warning(self, tt("TIF backend", self.lang), detail)
             return
+        controller.clear_unsaved_edit_recovery()
         index = self.label_role_combo.findData("working_edit")
         if index >= 0:
             self.label_role_combo.setCurrentIndex(index)

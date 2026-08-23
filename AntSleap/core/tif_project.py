@@ -1,12 +1,24 @@
 import copy
+import hashlib
 import json
+import logging
+import ntpath
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime
 
-from .safe_io import atomic_write_json, backup_file
-from .path_identity import canonical_path
+from .safe_io import (
+    AdvisoryFileLock,
+    UnsafeFilesystemPath,
+    atomic_write_json,
+    atomic_write_json_in_root,
+    backup_file,
+    isolate_regular_file_in_root,
+    read_json_bounded_in_root,
+)
+from .path_identity import canonical_path, paths_overlap, paths_refer_to_same_file
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .tif_label_guard import can_write_label_role
 from .tif_materials import has_trainable_material, read_material_map, write_material_map
@@ -14,7 +26,6 @@ from .tif_truth_policy import can_promote_to_manual_truth, can_use_role_for_trai
 from .tif_volume_io import (
     VOLUME_SIDECAR_FORMAT,
     begin_volume_sidecar_replacement,
-    copy_volume_sidecar,
     read_volume_metadata,
     volume_sidecar_exists,
 )
@@ -32,6 +43,13 @@ TIF_PROJECT_TYPE = "tif_volume"
 DEFAULT_TIF_PROJECT_FILENAME = "project.json"
 TIF_PROJECT_BACKUP_LIMIT = 30
 TIF_PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
+TIF_VOLUME_CLEANUP_WARNING_LIMIT = 100
+TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES = 8 * 1024 * 1024
+TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION = "taxamask_tif_volume_cleanup_warnings_v1"
+TIF_VOLUME_CLEANUP_WARNING_RELATIVE_PATH = os.path.join(
+    "logs", "tif_volume_cleanup_warnings.json"
+)
+TIF_VOLUME_CLEANUP_WARNING_LOCK_TIMEOUT_SECONDS = 5.0
 TIF_REVIEW_STATUSES = {"not_started", "in_progress", "fully_annotated", "reviewed", "train_ready"}
 TIF_PART_STATUSES = {"draft", "roi_confirmed", "mask_preview", "mask_in_progress", "reviewed", "ready_for_labeling", "predicted_pending_review", "train_ready", "failed"}
 TIF_PART_SYSTEM_STATUSES = {"cut_pending_labeling", "predicted_pending_review", "verified_train_ready", "failed"}
@@ -39,6 +57,9 @@ TIF_PART_LABEL_ROLES = {"manual_truth", "editable_ai_result", "raw_ai_prediction
 TIF_PART_ROI_STATUSES = {"draft", "confirmed", "part_created", "cancelled"}
 LOCAL_AXIS_PROPOSAL_STATUSES = {"proposed", "needs_review", "accepted", "rejected", "exported"}
 TIF_LABEL_SCHEMA_EXPORT_SCHEMA_VERSION = "taxamask_tif_label_schema_v1"
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _now_iso():
@@ -122,6 +143,8 @@ class TifProjectManager:
         self._pending_project_data_version_id = ""
         self._pending_integrity_dirty_assets = set()
         self._traceability_backfill_needed = False
+        self.volume_cleanup_warnings = []
+        self._volume_cleanup_warning_dirty_ids = set()
 
     @property
     def project_dir(self):
@@ -130,6 +153,38 @@ class TifProjectManager:
         if not self.current_project_path:
             return os.getcwd()
         return os.path.dirname(os.path.abspath(self.current_project_path))
+
+    def _snapshot_runtime_state(self):
+        return {
+            "project_data": copy.deepcopy(self.project_data),
+            "current_project_path": self.current_project_path,
+            "current_storage_backend": self.current_storage_backend,
+            "current_database_path": self.current_database_path,
+            "current_asset_root": self.current_asset_root,
+            "legacy_json_write_enabled": self._legacy_json_write_enabled,
+            "pending_project_data_version_id": self._pending_project_data_version_id,
+            "pending_integrity_dirty_assets": set(self._pending_integrity_dirty_assets),
+            "traceability_backfill_needed": self._traceability_backfill_needed,
+            "volume_cleanup_warnings": copy.deepcopy(self.volume_cleanup_warnings),
+            "volume_cleanup_warning_dirty_ids": set(
+                self._volume_cleanup_warning_dirty_ids
+            ),
+        }
+
+    def _restore_runtime_state(self, state):
+        self.project_data = state["project_data"]
+        self.current_project_path = state["current_project_path"]
+        self.current_storage_backend = state["current_storage_backend"]
+        self.current_database_path = state["current_database_path"]
+        self.current_asset_root = state["current_asset_root"]
+        self._legacy_json_write_enabled = state["legacy_json_write_enabled"]
+        self._pending_project_data_version_id = state["pending_project_data_version_id"]
+        self._pending_integrity_dirty_assets = state["pending_integrity_dirty_assets"]
+        self._traceability_backfill_needed = state["traceability_backfill_needed"]
+        self.volume_cleanup_warnings = state["volume_cleanup_warnings"]
+        self._volume_cleanup_warning_dirty_ids = state[
+            "volume_cleanup_warning_dirty_ids"
+        ]
 
     def _remove_sqlite_artifacts(self, database_path):
         base = os.path.abspath(str(database_path or ""))
@@ -157,11 +212,12 @@ class TifProjectManager:
             raise FileExistsError(database_path)
 
         conn = None
-        manifest_created = False
+        manifest_owned = False
         try:
             conn = create_tif_project_database(database_path)
             conn.close()
             conn = None
+            manifest_owned = True
             write_project_manifest(
                 manifest_path,
                 TIF_PROJECT_TYPE,
@@ -172,7 +228,6 @@ class TifProjectManager:
                     "created_as": "sqlite_default",
                 },
             )
-            manifest_created = True
             self.current_project_path = canonical_path(manifest_path)
             self.current_database_path = canonical_path(database_path)
             self.current_storage_backend = SQLITE_BACKEND
@@ -185,7 +240,7 @@ class TifProjectManager:
                     conn.close()
                 except Exception:
                     pass
-            if manifest_created:
+            if manifest_owned:
                 try:
                     os.remove(manifest_path)
                 except OSError:
@@ -198,11 +253,26 @@ class TifProjectManager:
             raise
 
     def create_project(self, name, project_dir, project_id=None, storage_backend=SQLITE_BACKEND):
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._create_project_in_place(
+                name,
+                project_dir,
+                project_id=project_id,
+                storage_backend=storage_backend,
+            )
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _create_project_in_place(self, name, project_dir, project_id=None, storage_backend=SQLITE_BACKEND):
         os.makedirs(project_dir, exist_ok=True)
         self.project_data = _default_project_data(name=name, project_id=project_id)
         self._pending_project_data_version_id = ""
         self._pending_integrity_dirty_assets = set()
         self._traceability_backfill_needed = False
+        self.volume_cleanup_warnings = []
+        self._volume_cleanup_warning_dirty_ids = set()
         if storage_backend == SQLITE_BACKEND:
             return self._create_sqlite_project_storage(name, project_dir)
         if storage_backend not in (LEGACY_JSON_BACKEND, "json"):
@@ -216,7 +286,18 @@ class TifProjectManager:
         return self.current_project_path
 
     def load_project(self, path):
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._load_project_in_place(path)
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _load_project_in_place(self, path):
+        self._pending_project_data_version_id = ""
         self._pending_integrity_dirty_assets = set()
+        self.volume_cleanup_warnings = []
+        self._volume_cleanup_warning_dirty_ids = set()
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if not isinstance(payload, dict):
@@ -242,6 +323,7 @@ class TifProjectManager:
             if self._traceability_backfill_needed:
                 self.save_project()
                 self._traceability_backfill_needed = False
+            self._load_volume_cleanup_warnings()
             return self.project_data
         self.current_storage_backend = LEGACY_JSON_BACKEND
         self.current_database_path = ""
@@ -253,6 +335,7 @@ class TifProjectManager:
             raise ValueError(f"not_tif_volume_project:{payload.get('project_type')}")
         self.current_project_path = canonical_path(path)
         self.project_data = self._normalize_loaded_project_data(payload)
+        self._load_volume_cleanup_warnings()
         return self.project_data
 
     def _is_sqlite_manifest_payload(self, payload):
@@ -574,6 +657,453 @@ class TifProjectManager:
             self._pending_integrity_dirty_assets = pending_assets_snapshot
             raise
 
+    @property
+    def volume_cleanup_warning_path(self):
+        if not self.current_project_path:
+            return ""
+        return os.path.join(
+            self.project_dir,
+            TIF_VOLUME_CLEANUP_WARNING_RELATIVE_PATH,
+        )
+
+    @staticmethod
+    def _bounded_cleanup_warning_text(value, limit):
+        text = str(value or "")
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(0, limit - 14)]}...<truncated>"
+
+    def _cleanup_warning_path_reference(self, path):
+        text = str(path or "").strip()
+        if not text:
+            return ""
+
+        def external_reference(candidate=""):
+            digest_source = str(candidate or text).replace("\\", "/")
+            basename = digest_source.rstrip("/").rsplit("/", 1)[-1]
+            safe_basename = _safe_record_id(basename, "path")[:96]
+            digest = hashlib.sha256(
+                digest_source.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()
+            return f"external_path_{safe_basename}_sha256_{digest}"
+
+        windows_drive, _windows_tail = ntpath.splitdrive(text)
+        if text.startswith(("~/", "~\\")) or (
+            windows_drive and not ntpath.isabs(text)
+        ):
+            return external_reference()
+
+        if not self.current_project_path:
+            return external_reference()
+
+        # Treat Windows paths as paths even when a sidecar is opened on POSIX.
+        # This prevents a foreign absolute path from being mistaken for a safe
+        # project-relative filename after a project is moved across platforms.
+        if os.name != "nt":
+            if windows_drive or text.startswith("\\"):
+                return external_reference()
+
+        native_text = text.replace("\\", os.sep).replace("/", os.sep)
+        candidate = ""
+        try:
+            project_root = canonical_path(self.project_dir)
+            if not project_root:
+                return external_reference()
+            candidate = canonical_path(
+                native_text
+                if os.path.isabs(native_text)
+                else os.path.join(project_root, native_text)
+            )
+            common = os.path.commonpath([project_root, candidate])
+            if os.path.normcase(common) != os.path.normcase(project_root):
+                return external_reference(candidate)
+            relative = os.path.relpath(candidate, project_root).replace("\\", "/")
+            if (
+                os.path.isabs(relative)
+                or relative == ".."
+                or relative.startswith("../")
+            ):
+                return external_reference(candidate)
+            return self._bounded_cleanup_warning_text(relative, 4096)
+        except (OSError, TypeError, ValueError):
+            return external_reference(candidate)
+
+    @staticmethod
+    def _looks_like_absolute_path(value):
+        text = str(value or "").strip()
+        if not text:
+            return False
+        drive, _tail = ntpath.splitdrive(text)
+        native_text = text.replace("\\", os.sep).replace("/", os.sep)
+        normalized = text.replace("\\", "/")
+        return (
+            bool(drive)
+            or ntpath.isabs(text)
+            or os.path.isabs(native_text)
+            or normalized.startswith("../")
+            or normalized.startswith("~/")
+        )
+
+    def _cleanup_warning_error_text(
+        self,
+        value,
+        *,
+        target_path="",
+        rollback_path="",
+    ):
+        text = str(value or "")
+        known_paths = []
+        for candidate in (target_path, rollback_path):
+            raw = str(candidate or "").strip()
+            if not raw:
+                continue
+            reference = self._cleanup_warning_path_reference(raw)
+            variants = {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+            try:
+                canonical = canonical_path(raw)
+            except (OSError, TypeError, ValueError):
+                canonical = ""
+            if canonical:
+                variants.update(
+                    {
+                        canonical,
+                        canonical.replace("\\", "/"),
+                        canonical.replace("/", "\\"),
+                    }
+                )
+            for variant in sorted(variants, key=len, reverse=True):
+                if variant:
+                    known_paths.append((variant, reference))
+        for raw, reference in sorted(
+            known_paths,
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            flags = re.IGNORECASE if ntpath.splitdrive(raw)[0] else 0
+            text = re.sub(re.escape(raw), reference, text, flags=flags)
+
+        quoted_path = re.compile(
+            r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
+        )
+
+        def replace_quoted(match):
+            candidate = match.group("value")
+            if not self._looks_like_absolute_path(candidate):
+                return match.group(0)
+            quote = match.group("quote")
+            reference = self._cleanup_warning_path_reference(candidate)
+            return f"{quote}{reference}{quote}"
+
+        text = quoted_path.sub(replace_quoted, text)
+
+        windows_token = re.compile(
+            r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\{1,2})[^\s,;'\"]+"
+        )
+        posix_token = re.compile(r"(?<![:A-Za-z0-9_.~])/(?:[^\s,;'\"<>]+)")
+        relative_external_token = re.compile(
+            r"(?<![A-Za-z0-9_])(?:\.\.[\\/]|~[\\/]|[A-Za-z]:(?![\\/]))"
+            r"[^\s,;'\"<>]+"
+        )
+        text = windows_token.sub(
+            lambda match: self._cleanup_warning_path_reference(match.group(0)),
+            text,
+        )
+        text = posix_token.sub(
+            lambda match: self._cleanup_warning_path_reference(match.group(0)),
+            text,
+        )
+        text = relative_external_token.sub(
+            lambda match: self._cleanup_warning_path_reference(match.group(0)),
+            text,
+        )
+        return self._bounded_cleanup_warning_text(text, 4096)
+
+    def _normalize_volume_cleanup_warning(self, warning):
+        source = warning if isinstance(warning, dict) else {}
+        target_path = source.get("target_path")
+        rollback_path = source.get("rollback_path")
+        record = {
+            "recorded_at": self._bounded_cleanup_warning_text(
+                source.get("recorded_at") or _now_iso(), 64
+            ),
+            "status": "committed_cleanup_incomplete",
+            "data_commit_status": "committed",
+            "cleanup_scope": "rollback_backup_only",
+            "operation": self._bounded_cleanup_warning_text(
+                source.get("operation") or "volume_replacement_commit", 160
+            ),
+            "role": self._bounded_cleanup_warning_text(source.get("role"), 160),
+            "target_path": self._cleanup_warning_path_reference(
+                target_path
+            ),
+            "rollback_path": self._cleanup_warning_path_reference(
+                rollback_path
+            ),
+            "error": self._cleanup_warning_error_text(
+                source.get("error"),
+                target_path=target_path,
+                rollback_path=rollback_path,
+            ),
+        }
+        warning_id = str(source.get("warning_id") or "").strip()
+        if (
+            not warning_id
+            or len(warning_id) > 160
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", warning_id)
+        ):
+            identity_source = {
+                key: str(source.get(key) or "")
+                for key in (
+                    "recorded_at",
+                    "operation",
+                    "role",
+                    "target_path",
+                    "rollback_path",
+                    "error",
+                )
+            }
+            digest = hashlib.sha256(
+                json.dumps(
+                    identity_source,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            warning_id = f"cleanup_warning_legacy_{digest}"
+        record["warning_id"] = warning_id
+        return record
+
+    def _merge_volume_cleanup_warnings(self, *warning_groups):
+        merged = {}
+        for group in warning_groups:
+            for item in group or []:
+                if not isinstance(item, dict):
+                    continue
+                warning = self._normalize_volume_cleanup_warning(item)
+                warning_id = warning["warning_id"]
+                if warning_id in merged:
+                    del merged[warning_id]
+                merged[warning_id] = warning
+        return list(merged.values())[-TIF_VOLUME_CLEANUP_WARNING_LIMIT:]
+
+    def _validated_volume_cleanup_warning_payload(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("maintenance_warning_payload_not_object")
+        if (
+            payload.get("schema_version")
+            != TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION
+        ):
+            raise ValueError("maintenance_warning_schema_unsupported")
+        if payload.get("record_type") not in {
+            None,
+            "tif_volume_cleanup_maintenance_warnings",
+        }:
+            raise ValueError("maintenance_warning_record_type_unsupported")
+        stored_project_id = payload.get("project_id")
+        current_project_id = self.project_data.get("project_id")
+        if (
+            not isinstance(current_project_id, str)
+            or not current_project_id.strip()
+        ):
+            raise ValueError("maintenance_warning_current_project_id_missing")
+        if (
+            not isinstance(stored_project_id, str)
+            or not stored_project_id.strip()
+        ):
+            raise ValueError("maintenance_warning_stored_project_id_missing")
+        if stored_project_id != current_project_id:
+            raise ValueError("maintenance_warning_project_mismatch")
+        records = payload.get("warnings", [])
+        if not isinstance(records, list):
+            raise ValueError("maintenance_warning_records_not_list")
+        return self._merge_volume_cleanup_warnings(
+            records[-TIF_VOLUME_CLEANUP_WARNING_LIMIT:]
+        )
+
+    def _runtime_log_volume_cleanup_warning(self, event, warning, **extra):
+        try:
+            try:
+                from AntSleap.app_runtime import runtime_log_event
+            except ImportError:
+                from app_runtime import runtime_log_event
+            fields = dict(warning or {})
+            fields.update(extra)
+            runtime_log_event(event, **fields)
+        except Exception:
+            return
+
+    def _persist_volume_cleanup_warnings(self):
+        path = self.volume_cleanup_warning_path
+        if not path:
+            return ""
+        pending_warnings = self._merge_volume_cleanup_warnings(
+            self.volume_cleanup_warnings
+        )
+        self.volume_cleanup_warnings = pending_warnings
+        self._volume_cleanup_warning_dirty_ids.intersection_update(
+            warning["warning_id"] for warning in pending_warnings
+        )
+        try:
+            current_project_id = self.project_data.get("project_id")
+            if (
+                not isinstance(current_project_id, str)
+                or not current_project_id.strip()
+            ):
+                raise ValueError("maintenance_warning_current_project_id_missing")
+            lock_path = f"{path}.lock"
+            with AdvisoryFileLock(
+                lock_path,
+                trusted_root=self.project_dir,
+                timeout=TIF_VOLUME_CLEANUP_WARNING_LOCK_TIMEOUT_SECONDS,
+            ):
+                persisted_warnings = []
+                if os.path.lexists(path):
+                    try:
+                        persisted_payload = read_json_bounded_in_root(
+                            path,
+                            trusted_root=self.project_dir,
+                            max_bytes=TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES,
+                        )
+                        persisted_warnings = (
+                            self._validated_volume_cleanup_warning_payload(
+                                persisted_payload
+                            )
+                        )
+                    except UnsafeFilesystemPath:
+                        raise
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        recovery_error = self._cleanup_warning_error_text(
+                            f"{type(exc).__name__}: {exc}",
+                            target_path=path,
+                        )
+                        isolate_regular_file_in_root(
+                            path,
+                            f"{path}.rejected",
+                            trusted_root=self.project_dir,
+                        )
+                        self._runtime_log_volume_cleanup_warning(
+                            "tif_volume_cleanup_warning_sidecar_isolated",
+                            {},
+                            error=recovery_error,
+                            recovery_action="isolate_invalid_regular_sidecar",
+                        )
+                dirty_ids = set(self._volume_cleanup_warning_dirty_ids)
+                new_pending_warnings = [
+                    warning
+                    for warning in pending_warnings
+                    if warning["warning_id"] in dirty_ids
+                ]
+                warnings = self._merge_volume_cleanup_warnings(
+                    persisted_warnings,
+                    new_pending_warnings,
+                )
+                payload = {
+                    "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                    "record_type": "tif_volume_cleanup_maintenance_warnings",
+                    "project_id": current_project_id,
+                    "updated_at": _now_iso(),
+                    "max_records": TIF_VOLUME_CLEANUP_WARNING_LIMIT,
+                    "warnings": warnings,
+                }
+                atomic_write_json_in_root(
+                    path,
+                    payload,
+                    trusted_root=self.project_dir,
+                    max_bytes=TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                self.volume_cleanup_warnings = warnings
+                self._volume_cleanup_warning_dirty_ids.difference_update(
+                    warning["warning_id"] for warning in new_pending_warnings
+                )
+        except Exception as exc:
+            return self._cleanup_warning_error_text(
+                f"{type(exc).__name__}: {exc}",
+                target_path=path,
+            )
+        return ""
+
+    def _load_volume_cleanup_warnings(self):
+        self.volume_cleanup_warnings = []
+        self._volume_cleanup_warning_dirty_ids = set()
+        path = self.volume_cleanup_warning_path
+        if not path or not os.path.lexists(path):
+            return []
+        try:
+            payload = read_json_bounded_in_root(
+                path,
+                trusted_root=self.project_dir,
+                max_bytes=TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES,
+            )
+            self.volume_cleanup_warnings = (
+                self._validated_volume_cleanup_warning_payload(payload)
+            )
+        except Exception as exc:
+            error = self._cleanup_warning_error_text(
+                f"{type(exc).__name__}: {exc}",
+                target_path=path,
+            )
+            _LOGGER.warning("Could not load TIF volume cleanup warnings: %s", error)
+            self._runtime_log_volume_cleanup_warning(
+                "tif_volume_cleanup_warning_load_failed",
+                {},
+                error=error,
+            )
+            self.volume_cleanup_warnings = []
+        return self.volume_cleanup_warnings
+
+    def _commit_volume_replacement_cleanup(self, replacement, *, operation, role=""):
+        try:
+            cleanup_error = str(replacement.commit() or "")
+        except Exception as exc:
+            cleanup_error = f"{type(exc).__name__}: {exc}"
+        if not cleanup_error:
+            return ""
+        warning = self._normalize_volume_cleanup_warning(
+            {
+                "warning_id": f"cleanup_warning_{uuid.uuid4().hex}",
+                "recorded_at": _now_iso(),
+                "operation": str(operation or "volume_replacement_commit"),
+                "role": str(
+                    role
+                    or (getattr(replacement, "metadata", {}) or {}).get("role", "")
+                ),
+                "target_path": str(getattr(replacement, "target", "") or ""),
+                "rollback_path": str(
+                    getattr(replacement, "rollback_path", "") or ""
+                ),
+                "error": cleanup_error,
+            }
+        )
+        self.volume_cleanup_warnings.append(warning)
+        self._volume_cleanup_warning_dirty_ids.add(warning["warning_id"])
+        if len(self.volume_cleanup_warnings) > TIF_VOLUME_CLEANUP_WARNING_LIMIT:
+            del self.volume_cleanup_warnings[:-TIF_VOLUME_CLEANUP_WARNING_LIMIT]
+        self._runtime_log_volume_cleanup_warning(
+            "tif_volume_replacement_cleanup_incomplete",
+            warning,
+        )
+        try:
+            persistence_error = self._persist_volume_cleanup_warnings()
+        except Exception as exc:
+            persistence_error = f"{type(exc).__name__}: {exc}"
+        if persistence_error:
+            _LOGGER.warning(
+                "Could not persist TIF volume cleanup warning: %s",
+                persistence_error,
+            )
+            self._runtime_log_volume_cleanup_warning(
+                "tif_volume_cleanup_warning_persist_failed",
+                warning,
+                persistence_error=persistence_error,
+            )
+        _LOGGER.warning(
+            "Volume replacement committed but backup cleanup was incomplete: %s",
+            warning,
+        )
+        return cleanup_error
+
     def _apply_volume_replacement_transaction(
         self,
         source_path,
@@ -582,6 +1112,7 @@ class TifProjectManager:
         *,
         role,
         integrity_owner_key="",
+        mark_manual_truth_changed=True,
         save=True,
         transactions=None,
     ):
@@ -595,7 +1126,7 @@ class TifProjectManager:
             result = callback(replacement.metadata)
             if integrity_owner_key:
                 self._mark_integrity_asset_dirty(integrity_owner_key, role)
-            else:
+            elif mark_manual_truth_changed:
                 self._mark_manual_truth_data_changed()
             if save:
                 self.save_project()
@@ -613,7 +1144,11 @@ class TifProjectManager:
                     ) from exc
             raise
         if transactions is None:
-            replacement.commit()
+            self._commit_volume_replacement_cleanup(
+                replacement,
+                operation="volume_replacement_commit",
+                role=role,
+            )
         return result
 
     def specimen_dir(self, specimen_id):
@@ -1350,7 +1885,10 @@ class TifProjectManager:
             target_path = os.path.join(self.part_dir(specimen_id, part_id), "reslices", _safe_record_id(reslice_id, "reslice"), "labels", "manual_truth.ome.zarr").replace("\\", "/")
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
-        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+        if paths_refer_to_same_file(source_abs, target_abs):
+            if source_role != "manual_truth":
+                raise ValueError("part_reslice_editable_ai_result_manual_truth_same_path")
+
             def apply_existing_truth():
                 labels["manual_truth"]["status"] = "reviewed"
                 labels["manual_truth"]["review_audit"] = dict(review_audit)
@@ -1359,6 +1897,8 @@ class TifProjectManager:
                 return labels["manual_truth"]
 
             return self._apply_project_mutation_transaction(apply_existing_truth, save=save)
+        if paths_overlap(source_abs, target_abs):
+            raise ValueError("part_reslice_manual_truth_source_target_path_overlap")
         self._ensure_project_write_allowed(
             target_abs,
             source_path=source_abs,
@@ -1456,7 +1996,10 @@ class TifProjectManager:
             target_path = os.path.join(self.part_dir(specimen_id, part_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
-        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+        if paths_refer_to_same_file(source_abs, target_abs):
+            if source_role != "manual_truth":
+                raise ValueError("part_editable_ai_result_manual_truth_same_path")
+
             def apply_existing_truth():
                 labels["manual_truth"]["status"] = "reviewed"
                 labels["manual_truth"]["review_audit"] = dict(review_audit)
@@ -1465,6 +2008,8 @@ class TifProjectManager:
                 return labels["manual_truth"]
 
             return self._apply_project_mutation_transaction(apply_existing_truth, save=save)
+        if paths_overlap(source_abs, target_abs):
+            raise ValueError("part_manual_truth_source_target_path_overlap")
         self._ensure_project_write_allowed(
             target_abs,
             source_path=source_abs,
@@ -1687,7 +2232,11 @@ class TifProjectManager:
                 ) from exc
             raise
         for replacement in replacements:
-            replacement.commit()
+            self._commit_volume_replacement_cleanup(
+                replacement,
+                operation="batch_volume_replacement_commit",
+                role="manual_truth",
+            )
         return {"promoted": promoted, "count": len(promoted)}
 
     def validate_part_label_ids(self, specimen_id, part_id, role="manual_truth", reslice_id=""):
@@ -1750,8 +2299,28 @@ class TifProjectManager:
             target_path = os.path.join(self.specimen_dir(specimen_id), "labels", "working_edit.ome.zarr").replace("\\", "/")
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
-        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+        if paths_refer_to_same_file(source_abs, target_abs):
             raise ValueError(f"source_target_label_same:{source_role}")
+        if paths_overlap(source_abs, target_abs):
+            raise ValueError(f"source_target_label_path_overlap:{source_role}")
+        manual_truth_path = (labels.get("manual_truth") or {}).get("path", "")
+        manual_truth_abs = self.to_absolute(manual_truth_path)
+        if manual_truth_abs and paths_refer_to_same_file(target_abs, manual_truth_abs):
+            raise ValueError("working_edit_manual_truth_same_path")
+        if manual_truth_abs and paths_overlap(target_abs, manual_truth_abs):
+            raise ValueError("working_edit_manual_truth_path_overlap")
+        if (
+            source_role != "manual_truth"
+            and manual_truth_abs
+            and paths_refer_to_same_file(source_abs, manual_truth_abs)
+        ):
+            raise ValueError(f"source_manual_truth_same_path:{source_role}")
+        if (
+            source_role != "manual_truth"
+            and manual_truth_abs
+            and paths_overlap(source_abs, manual_truth_abs)
+        ):
+            raise ValueError(f"source_manual_truth_path_overlap:{source_role}")
         write_guard = can_write_label_role(
             "working_edit",
             operation="copy_label_layer_to_working_edit",
@@ -1769,22 +2338,30 @@ class TifProjectManager:
             allow_overwrite=True,
             audit_metadata={"source_role": source_role},
         )
-        metadata = copy_volume_sidecar(source_abs, target_abs, role="working_edit")
-        specimen["labels"]["working_edit"] = self._volume_payload(
-            target_path,
-            metadata["shape_zyx"],
-            metadata["dtype"],
-            metadata.get("spacing_zyx"),
-            metadata.get("spacing_unit", "unknown"),
-            metadata.get("orientation", "unknown"),
-            metadata.get("format", VOLUME_SIDECAR_FORMAT),
+
+        def apply_replacement(metadata):
+            specimen["labels"]["working_edit"] = self._volume_payload(
+                target_path,
+                metadata["shape_zyx"],
+                metadata["dtype"],
+                metadata.get("spacing_zyx"),
+                metadata.get("spacing_unit", "unknown"),
+                metadata.get("orientation", "unknown"),
+                metadata.get("format", VOLUME_SIDECAR_FORMAT),
+            )
+            specimen["labels"]["working_edit"]["status"] = f"copied_from_{source_role}"
+            specimen["review_status"] = "in_progress"
+            specimen["train_ready"] = False
+            return specimen["labels"]["working_edit"]
+
+        return self._apply_volume_replacement_transaction(
+            source_abs,
+            target_abs,
+            apply_replacement,
+            role="working_edit",
+            mark_manual_truth_changed=False,
+            save=save,
         )
-        specimen["labels"]["working_edit"]["status"] = f"copied_from_{source_role}"
-        specimen["review_status"] = "in_progress"
-        specimen["train_ready"] = False
-        if save:
-            self.save_project()
-        return specimen["labels"]["working_edit"]
 
     def promote_working_edit_to_manual_truth(self, specimen_id, mark_train_ready=True, save=True):
         specimen = self._require_specimen(specimen_id)
@@ -1812,8 +2389,10 @@ class TifProjectManager:
             target_path = os.path.join(self.specimen_dir(specimen_id), "labels", "manual_truth.ome.zarr").replace("\\", "/")
         source_abs = self.to_absolute(source_path)
         target_abs = self.to_absolute(target_path)
-        if os.path.normcase(os.path.abspath(source_abs)) == os.path.normcase(os.path.abspath(target_abs)):
+        if paths_refer_to_same_file(source_abs, target_abs):
             raise ValueError("working_edit_manual_truth_same_path")
+        if paths_overlap(source_abs, target_abs):
+            raise ValueError("working_edit_manual_truth_path_overlap")
         self._ensure_project_write_allowed(
             target_abs,
             source_path=source_abs,

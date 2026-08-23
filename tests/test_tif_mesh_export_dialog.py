@@ -144,6 +144,9 @@ class TifMeshExportDialogTests(unittest.TestCase):
                 widget.image_volume = np.zeros((2, 2, 2), dtype=np.uint8)
                 widget._set_scope_controls_enabled()
                 self.assertTrue(widget.btn_export_reviewed_mesh.isEnabled())
+                widget.task_tabs.setCurrentWidget(widget.training_mode_tabs)
+                widget.training_mode_tabs.setCurrentWidget(widget.result_compare_page)
+                self.app.processEvents()
                 for display_mode in ("slice", "volume"):
                     widget.display_mode = display_mode
                     widget._sync_mode_sections()

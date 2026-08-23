@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -45,6 +46,7 @@ class MainWindowStage8ArchitectureTests(unittest.TestCase):
             "main_window_panel_split.py",
             "main_window_image_grouping.py",
             "main_window_project_lifecycle.py",
+            "main_window_project_switch_support.py",
             "main_window_vlm.py",
             "main_window_training.py",
             "main_window_presentation.py",
@@ -75,6 +77,35 @@ class MainWindowStage8ArchitectureTests(unittest.TestCase):
             self.assertEqual(owner._active_project_bound_background_task(), "Export")
 
         self.assertEqual(translation_calls, ["Export"])
+
+    def test_tif_task_manager_activity_blocks_project_switch(self):
+        import AntSleap.ui.main_window_model_management as model_module
+
+        owner = type("BusyOwner", (model_module.MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        owner.tif_workbench = SimpleNamespace(
+            task_manager=SimpleNamespace(is_running=lambda: True),
+        )
+        translation_calls = []
+        with patch.object(model_module, "tr", side_effect=lambda text, lang: translation_calls.append(text) or text):
+            self.assertEqual(owner._active_project_bound_background_task(), "TIF Volume Workbench")
+
+        self.assertEqual(translation_calls, ["TIF Volume Workbench"])
+
+    def test_finished_tif_thread_does_not_block_without_active_task(self):
+        import AntSleap.ui.main_window_model_management as model_module
+
+        owner = type("BusyOwner", (model_module.MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        thread = FakeThread(False)
+        owner.tif_workbench = SimpleNamespace(
+            _tif_import_thread=thread,
+            task_manager=SimpleNamespace(is_running=lambda: False),
+        )
+
+        self.assertEqual(owner._active_project_bound_background_task(), "")
+        thread.running = True
+        self.assertEqual(owner._active_project_bound_background_task(), "Import Complete TIF Volume")
 
 
 if __name__ == "__main__":

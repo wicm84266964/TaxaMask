@@ -104,6 +104,19 @@ class ValidationSuiteScriptTests(unittest.TestCase):
             self.assertIn(keyword, joined)
         self.assertNotIn("round5_path_safety", module.DEFAULT_ORDER)
 
+    def test_v2410_release_audit_is_loadable_unique_and_keeps_historical_alias(self):
+        spec = importlib.util.spec_from_file_location("run_validation_suite_for_v2410", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        audit = module.SUITES["v2410_release_audit"]
+        self.assertTrue(audit)
+        self.assertEqual(len(audit), len(set(audit)))
+        self.assertEqual(module._test_ids(audit), audit)
+        self.assertEqual(module.SUITES["v249_post_release_audit"], audit)
+        self.assertNotIn("v2410_release_audit", module.DEFAULT_ORDER)
+        self.assertNotIn("v249_post_release_audit", module.DEFAULT_ORDER)
+
     def test_chunked_suite_runs_single_fast_tooling_test(self):
         result = subprocess.run(
             [

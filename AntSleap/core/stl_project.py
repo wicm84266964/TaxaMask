@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import shutil
@@ -55,6 +56,16 @@ class StlRenderedProjectManager:
     def __init__(self):
         self.project_data = _default_project_data("Untitled STL Rendered View Project")
         self.current_project_path = None
+
+    def _snapshot_runtime_state(self):
+        return {
+            "project_data": copy.deepcopy(self.project_data),
+            "current_project_path": self.current_project_path,
+        }
+
+    def _restore_runtime_state(self, state):
+        self.project_data = state["project_data"]
+        self.current_project_path = state["current_project_path"]
 
     @property
     def project_dir(self):

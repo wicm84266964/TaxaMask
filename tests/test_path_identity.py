@@ -2,8 +2,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from AntSleap.core.path_identity import canonical_path, path_identity, paths_refer_to_same_file
+from AntSleap.core.path_identity import canonical_path, path_identity, paths_overlap, paths_refer_to_same_file
 from AntSleap.core.project import ProjectManager
 
 
@@ -86,6 +87,71 @@ class PathIdentityTests(unittest.TestCase):
                 {path_identity(path) for path in manager.project_data["images"]},
                 {path_identity(first), path_identity(second)},
             )
+
+    def test_paths_overlap_uses_physical_ancestor_for_case_insensitive_nonexistent_child(self):
+        root = os.path.abspath(os.path.join("virtual", "case_volume"))
+        source = os.path.join(root, "Labels")
+        target_parent = os.path.join(root, "labels")
+        target = os.path.join(target_parent, "nested.ome.zarr")
+        existing_identities = {root.casefold(), source.casefold()}
+
+        def exists(path):
+            return os.path.abspath(str(path)).casefold() in existing_identities
+
+        def samefile(left, right):
+            return os.path.abspath(str(left)).casefold() == os.path.abspath(str(right)).casefold()
+
+        with patch(
+            "AntSleap.core.path_identity.canonical_path",
+            side_effect=lambda value: os.path.abspath(str(value)),
+        ), patch(
+            "AntSleap.core.path_identity.path_identity",
+            side_effect=lambda value: os.path.abspath(str(value)),
+        ), patch(
+            "AntSleap.core.path_identity.os.path.normcase",
+            side_effect=lambda value: str(value),
+        ), patch(
+            "AntSleap.core.path_identity.os.path.commonpath",
+            return_value=root,
+        ), patch(
+            "AntSleap.core.path_identity.os.path.exists",
+            side_effect=exists,
+        ), patch(
+            "AntSleap.core.path_identity.os.path.samefile",
+            side_effect=samefile,
+        ):
+            self.assertTrue(paths_overlap(source, target))
+
+    def test_paths_overlap_keeps_case_sensitive_sibling_directories_distinct(self):
+        root = os.path.abspath(os.path.join("virtual", "case_volume"))
+        source = os.path.join(root, "Labels")
+        sibling = os.path.join(root, "labels")
+        target = os.path.join(sibling, "nested.ome.zarr")
+        existing_paths = {root, source, sibling}
+
+        def normalized(path):
+            return os.path.abspath(str(path))
+
+        with patch(
+            "AntSleap.core.path_identity.canonical_path",
+            side_effect=normalized,
+        ), patch(
+            "AntSleap.core.path_identity.path_identity",
+            side_effect=normalized,
+        ), patch(
+            "AntSleap.core.path_identity.os.path.normcase",
+            side_effect=lambda value: str(value),
+        ), patch(
+            "AntSleap.core.path_identity.os.path.commonpath",
+            return_value=root,
+        ), patch(
+            "AntSleap.core.path_identity.os.path.exists",
+            side_effect=lambda path: normalized(path) in existing_paths,
+        ), patch(
+            "AntSleap.core.path_identity.os.path.samefile",
+            side_effect=lambda left, right: normalized(left) == normalized(right),
+        ):
+            self.assertFalse(paths_overlap(source, target))
 
 
 if __name__ == "__main__":

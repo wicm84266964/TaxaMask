@@ -19,9 +19,11 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import fitz
 
@@ -56,6 +58,14 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+class ImportReadyProjectionRecoveryRequired(RuntimeError):
+    """Raised when an import-ready projection rollback needs manual recovery."""
+
+    def __init__(self, message: str, recovery_directory: Path):
+        self.recovery_directory = str(Path(recovery_directory).resolve())
+        super().__init__(f"{message}; recovery_directory={self.recovery_directory}")
 
 
 class EnhancedPDFExtractionSystem:
@@ -163,6 +173,9 @@ class EnhancedPDFExtractionSystem:
         )
         self.review_accept_threshold = float(self.multimodal_config.get("accept_threshold", profile_threshold))
         self.db_conn: sqlite3.Connection | None = None
+        self._touched_figure_artifacts: set[str] = set()
+        self._touched_batch_manifests: set[str] = set()
+        self._touched_batch_raw_responses: set[str] = set()
 
         self.artifacts_dir = self.output_dir / f"{self.output_db_path.stem}_v2_artifacts"
         self.figures_dir = self.artifacts_dir / "figure_images"
@@ -631,12 +644,21 @@ class EnhancedPDFExtractionSystem:
 
         file_hash = self._calculate_file_hash(pdf_path_obj)
         file_size = pdf_path_obj.stat().st_size
+        pdf_artifact_scope = self._pdf_artifact_scope(
+            file_name=pdf_path_obj.name,
+            file_hash=file_hash,
+            file_path=str(pdf_path_obj),
+        )
 
         if self.resume_completed_pdfs:
             existing_result = self._resume_existing_pdf_result(str(pdf_path_obj), file_hash)
             if existing_result is not None:
                 return existing_result
 
+        pdf_artifact_run_scope = self._pdf_artifact_run_scope(pdf_artifact_scope)
+        self._reset_pdf_artifact_tracking()
+        doc: fitz.Document | None = None
+        database_committed = False
         try:
             self.db_conn.execute("BEGIN IMMEDIATE")
             self._delete_existing_pdf_records(str(pdf_path_obj), commit=False)
@@ -675,6 +697,7 @@ class EnhancedPDFExtractionSystem:
                         figure_index=page_candidate_index,
                         pdf_file_id=pdf_file_id,
                         pdf_filename=pdf_path_obj.name,
+                        pdf_artifact_scope=pdf_artifact_run_scope,
                         cluster=cluster,
                         page_blocks=page_blocks,
                         document_blocks=document_blocks,
@@ -683,20 +706,66 @@ class EnhancedPDFExtractionSystem:
                         figure_candidates.append(candidate)
                         page_candidate_index += 1
 
-            reviewed_candidates = self._review_all_candidates(figure_candidates, pdf_path_obj.stem)
+            reviewed_candidates = self._review_all_candidates(figure_candidates, pdf_artifact_run_scope)
             stats = self._persist_pdf_results(pdf_file_id, reviewed_candidates, part_extraction_result)
-            export_stats = self._sync_import_ready_figure_exports(pdf_file_id)
-            stats.update(export_stats)
             self.db_conn.commit()
-            doc.close()
+            database_committed = True
+
+            result_status = "success"
+            try:
+                stats.update(self._sync_import_ready_figure_exports(pdf_file_id))
+            except Exception as exc:
+                result_status = "partial_success"
+                export_error = f"{type(exc).__name__}: {exc}"
+                stats.update(
+                    self._import_ready_export_error_stats(
+                        export_error,
+                        recovery_directory=getattr(exc, "recovery_directory", ""),
+                    )
+                )
+                self.logger.error(
+                    "PDF extraction committed, but the import-ready projection could not be synchronized for %s: %s",
+                    pdf_path_obj.name,
+                    export_error,
+                )
+            try:
+                self._cleanup_stale_scoped_audit_artifacts(
+                    scope=pdf_artifact_scope,
+                    figure_names=self._touched_figure_artifacts,
+                    batch_manifest_names=self._touched_batch_manifests,
+                    raw_response_names=self._touched_batch_raw_responses,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "Could not finish stale PDF audit artifact cleanup for scope %s: %s",
+                    pdf_artifact_scope,
+                    exc,
+                )
 
             self.logger.info(
                 f"Figure V2.0 提取完成: {pdf_path_obj.name} | 候选={stats['total_figures']} | 通过={stats['accepted_figures']} | 拒绝={stats['rejected_figures']} | 复核={stats['review_queue_figures']} | 部位描述={stats.get('part_description_records', 0)} | 可导入通过图={stats.get('accepted_exported_figures', 0)}"
             )
-            return {"status": "success", "file_id": pdf_file_id, "stats": stats}
+            return {"status": result_status, "file_id": pdf_file_id, "stats": stats}
         except Exception:
-            self.db_conn.rollback()
+            if not database_committed:
+                try:
+                    self.db_conn.rollback()
+                except Exception as exc:
+                    self.logger.error("Could not roll back failed PDF database transaction: %s", exc)
+                self._cleanup_failed_pdf_run_artifacts(
+                    run_scope=pdf_artifact_run_scope,
+                    figure_names=self._touched_figure_artifacts,
+                    batch_manifest_names=self._touched_batch_manifests,
+                    raw_response_names=self._touched_batch_raw_responses,
+                )
             raise
+        finally:
+            self._reset_pdf_artifact_tracking()
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception as exc:
+                    self.logger.warning("Could not close PDF document %s: %s", pdf_path_obj, exc)
 
     def _resume_existing_pdf_result(self, pdf_path: str, file_hash: str) -> Dict[str, Any] | None:
         if self.db_conn is None:
@@ -722,7 +791,33 @@ class EnhancedPDFExtractionSystem:
         stats = self._existing_pdf_completion_stats(pdf_file_id)
         if not stats:
             return None
-        stats.update(self._sync_import_ready_figure_exports(pdf_file_id))
+        missing_sources = self._missing_import_ready_sources(
+            self._import_ready_figure_rows(pdf_file_id)
+        )
+        if missing_sources:
+            self.logger.warning(
+                "Existing PDF result cannot rebuild its import-ready projection because source images are missing; "
+                "running a full extraction instead: %s",
+                Path(pdf_path).name,
+            )
+            return None
+        result_status = "skipped_existing"
+        try:
+            stats.update(self._sync_import_ready_figure_exports(pdf_file_id))
+        except Exception as exc:
+            result_status = "partial_success"
+            export_error = f"{type(exc).__name__}: {exc}"
+            stats.update(
+                self._import_ready_export_error_stats(
+                    export_error,
+                    recovery_directory=getattr(exc, "recovery_directory", ""),
+                )
+            )
+            self.logger.error(
+                "Existing PDF extraction was reused, but the import-ready projection could not be synchronized for %s: %s",
+                Path(pdf_path).name,
+                export_error,
+            )
         stats["resumed_skip"] = True
         stats.setdefault("total_images", int(stats.get("total_figures", 0) or 0))
         stats.setdefault("taxonomic_images", int(stats.get("accepted_figures", 0) or 0))
@@ -731,7 +826,7 @@ class EnhancedPDFExtractionSystem:
             f"候选={stats.get('total_figures', 0)} | 通过={stats.get('accepted_figures', 0)} | "
             f"部位描述={stats.get('part_description_records', 0)}"
         )
-        return {"status": "skipped_existing", "file_id": pdf_file_id, "stats": stats}
+        return {"status": result_status, "file_id": pdf_file_id, "stats": stats}
 
     def _existing_pdf_completion_stats(self, pdf_file_id: int) -> dict[str, int | str | bool] | None:
         if self.db_conn is None:
@@ -1073,6 +1168,7 @@ class EnhancedPDFExtractionSystem:
         cluster: List[Dict[str, Any]],
         page_blocks: List[Dict[str, Any]],
         document_blocks: List[Dict[str, Any]],
+        pdf_artifact_scope: str = "",
     ) -> Dict[str, Any] | None:
         union_rect = self._union_rects([entry["rect"] for entry in cluster])
         context_bbox = self._expand_rect(union_rect, self.FIGURE_MARGIN, page.rect)
@@ -1088,8 +1184,16 @@ class EnhancedPDFExtractionSystem:
         image_file_name = ""
         figure_hash = self._hash_candidate(page_number, figure_index, clip_bbox, cluster)
         if self.save_images_to_files:
-            image_file_name = self._generate_figure_filename(pdf_filename, page_number, figure_index, caption_block, figure_hash)
+            image_file_name = self._generate_figure_filename(
+                pdf_filename,
+                page_number,
+                figure_index,
+                caption_block,
+                figure_hash,
+                pdf_artifact_scope=pdf_artifact_scope,
+            )
             image_file_path = str(self.figures_dir / image_file_name)
+            self._touched_figure_artifacts.add(Path(image_file_path).name)
             self._save_figure_clip(page, clip_bbox, image_file_path)
 
         caption_text = str(caption_block.get("text_content", "") if caption_block else "")
@@ -1404,6 +1508,25 @@ class EnhancedPDFExtractionSystem:
         text = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(value or "")).strip("_")
         return text[:60].strip("_")
 
+    def _pdf_artifact_scope(self, *, file_name: str, file_hash: str = "", file_path: str = "") -> str:
+        """Return a readable, stable namespace for one logical PDF source."""
+        readable_stem = self._safe_batch_scope(Path(str(file_name or "pdf")).stem)[:24].strip("_") or "pdf"
+        source_path = str(file_path or "")
+        if source_path:
+            # Keep this identity exactly aligned with SQLite's UNIQUE(file_path)
+            # semantics. Resolving or case-folding here could merge two database
+            # rows that SQLite intentionally keeps distinct.
+            identity = f"path\x1f{source_path}"
+        else:
+            identity = "\x1f".join(("name", str(file_name or ""), str(file_hash or "")))
+        identity_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return f"{readable_stem}--{identity_digest}"
+
+    def _pdf_artifact_run_scope(self, pdf_scope: str) -> str:
+        """Return a unique namespace for files written before this run commits."""
+        base_scope = self._safe_batch_scope(pdf_scope)[:42].strip("_") or "pdf"
+        return f"{base_scope}_run_{uuid.uuid4().hex[:12]}"
+
     def _chunk_candidates_for_review(self, candidates: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         if not candidates:
             return []
@@ -1643,28 +1766,100 @@ class EnhancedPDFExtractionSystem:
             ],
         }
         _atomic_write_json(manifest_path, payload)
+        self._touched_batch_manifests.add(manifest_path.name)
         return str(manifest_path)
 
     def _save_batch_raw_response(self, batch_id: str, raw_response: str) -> str:
         raw_path = self.batch_raw_dir / f"{batch_id}.txt"
+        self._touched_batch_raw_responses.add(raw_path.name)
         with open(raw_path, "w", encoding="utf-8") as handle:
             handle.write(str(raw_response or ""))
         return str(raw_path)
 
-    def _sync_import_ready_figure_exports(self, pdf_file_id: int) -> dict[str, int | str]:
-        if self.db_conn is None:
-            return {}
-        cursor = self.db_conn.cursor()
-        cursor.execute("SELECT file_name FROM pdf_files WHERE id = ?", (pdf_file_id,))
-        pdf_row = cursor.fetchone()
-        if not pdf_row:
-            return {}
-        pdf_stem = self._safe_batch_scope(Path(str(pdf_row[0] or "pdf")).stem) or f"pdf_{pdf_file_id}"
-        self.accepted_figures_dir.mkdir(parents=True, exist_ok=True)
-        self.review_figures_dir.mkdir(parents=True, exist_ok=True)
-        self._remove_pdf_exported_files(self.accepted_figures_dir, pdf_stem)
-        self._remove_pdf_exported_files(self.review_figures_dir, pdf_stem)
+    def _reset_pdf_artifact_tracking(self) -> None:
+        self._touched_figure_artifacts = set()
+        self._touched_batch_manifests = set()
+        self._touched_batch_raw_responses = set()
 
+    def _cleanup_failed_pdf_run_artifacts(
+        self,
+        *,
+        run_scope: str,
+        figure_names: set[str],
+        batch_manifest_names: set[str],
+        raw_response_names: set[str],
+    ) -> None:
+        safe_run_scope = self._safe_batch_scope(run_scope)
+        if not safe_run_scope:
+            return
+        cleanup_groups = (
+            (self.figures_dir, set(figure_names or ()), "figure images"),
+            (self.batch_dir, set(batch_manifest_names or ()), "review batch manifests"),
+            (self.batch_raw_dir, set(raw_response_names or ()), "raw review responses"),
+        )
+        for folder, names, label in cleanup_groups:
+            for name in names:
+                if not str(name).startswith(safe_run_scope):
+                    continue
+                path = folder / name
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Could not remove failed PDF run %s artifact %s: %s",
+                        label,
+                        path,
+                        exc,
+                    )
+
+    def _cleanup_stale_scoped_audit_artifacts(
+        self,
+        *,
+        scope: str,
+        figure_names: set[str],
+        batch_manifest_names: set[str],
+        raw_response_names: set[str],
+    ) -> None:
+        safe_scope = self._safe_batch_scope(scope)
+        if not safe_scope:
+            return
+        cleanup_groups = (
+            (self.figures_dir, (f"{safe_scope}_p", f"{safe_scope}_run_"), set(figure_names or ()), "figure images"),
+            (self.batch_dir, (f"{safe_scope}_batch_", f"{safe_scope}_run_"), set(batch_manifest_names or ()), "review batch manifests"),
+            (self.batch_raw_dir, (f"{safe_scope}_batch_", f"{safe_scope}_run_"), set(raw_response_names or ()), "raw review responses"),
+        )
+        for folder, prefixes, keep_names, label in cleanup_groups:
+            try:
+                paths = list(folder.iterdir()) if folder.exists() else []
+            except Exception as exc:
+                self.logger.warning(
+                    "Could not enumerate stale PDF %s for scope %s: %s",
+                    label,
+                    safe_scope,
+                    exc,
+                )
+                continue
+            for path in paths:
+                try:
+                    if (
+                        path.is_file()
+                        and any(path.name.startswith(prefix) for prefix in prefixes)
+                        and path.name not in keep_names
+                    ):
+                        path.unlink()
+                except Exception as exc:
+                    self.logger.warning(
+                        "Could not remove stale PDF %s artifact %s: %s",
+                        label,
+                        path,
+                        exc,
+                    )
+
+    def _import_ready_figure_rows(self, pdf_file_id: int) -> list[tuple[Any, ...]]:
+        if self.db_conn is None:
+            return []
+        cursor = self.db_conn.cursor()
         cursor.execute(
             """
             SELECT
@@ -1676,65 +1871,297 @@ class EnhancedPDFExtractionSystem:
             """,
             (pdf_file_id,),
         )
-        rows = cursor.fetchall()
+        return list(cursor.fetchall())
+
+    @staticmethod
+    def _missing_import_ready_sources(rows: Iterable[tuple[Any, ...]]) -> list[tuple[int, str]]:
+        missing_sources = []
+        for row in rows:
+            source_value = str(row[2] or "")
+            if not Path(source_value).is_file():
+                missing_sources.append((int(row[0]), source_value))
+        return missing_sources
+
+    def _sync_import_ready_figure_exports(self, pdf_file_id: int) -> dict[str, int | str]:
+        if self.db_conn is None:
+            return {}
+        cursor = self.db_conn.cursor()
+        cursor.execute("SELECT file_name, file_hash, file_path FROM pdf_files WHERE id = ?", (pdf_file_id,))
+        pdf_row = cursor.fetchone()
+        if not pdf_row:
+            return {}
+        pdf_scope = self._pdf_artifact_scope(
+            file_name=str(pdf_row[0] or "pdf"),
+            file_hash=str(pdf_row[1] or ""),
+            file_path=str(pdf_row[2] or ""),
+        )
+        self.accepted_figures_dir.mkdir(parents=True, exist_ok=True)
+        self.review_figures_dir.mkdir(parents=True, exist_ok=True)
+
+        rows = self._import_ready_figure_rows(pdf_file_id)
+        missing_sources = self._missing_import_ready_sources(rows)
+        if missing_sources:
+            detail = ", ".join(
+                f"figure_id={figure_id}:path={source_path or '<empty>'}"
+                for figure_id, source_path in missing_sources
+            )
+            raise FileNotFoundError(f"import_ready_source_images_missing:{detail}")
+
         exported_rows: List[Dict[str, Any]] = []
+        staged_exports: List[Tuple[Path, Path]] = []
         accepted_count = 0
         review_count = 0
-        for row in rows:
-            (
-                figure_id,
-                page_number,
-                image_file_path,
-                image_file_name,
-                species_candidate,
-                final_confidence,
-                category,
-                review_status,
-                accepted,
-            ) = row
-            source_path = Path(str(image_file_path or ""))
-            if not source_path.exists():
-                continue
-            target_dir = self.accepted_figures_dir if bool(accepted) else self.review_figures_dir
-            status_prefix = "accepted" if bool(accepted) else "review"
-            target_name = self._export_figure_filename(
-                pdf_stem=pdf_stem,
-                status_prefix=status_prefix,
-                figure_id=int(figure_id),
-                source_name=str(image_file_name or source_path.name),
+        cleanup_warning = ""
+        cleanup_directory = ""
+        manifest_path = self.stats_dir / f"{pdf_scope}_import_ready_figures.csv"
+        stage_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{pdf_scope}_import_ready_",
+                dir=str(self.artifacts_dir),
             )
-            target_path = target_dir / target_name
-            shutil.copy2(source_path, target_path)
-            if bool(accepted):
-                accepted_count += 1
-            else:
-                review_count += 1
-            exported_rows.append(
-                {
-                    "pdf_file_id": pdf_file_id,
-                    "figure_id": int(figure_id),
-                    "status": status_prefix,
-                    "pdf_name": str(pdf_row[0] or ""),
-                    "page_number": int(page_number or 0),
-                    "species_candidate": str(species_candidate or ""),
-                    "final_confidence": float(final_confidence or 0.0),
-                    "category": str(category or ""),
-                    "review_status": str(review_status or ""),
-                    "source_image_path": str(source_path),
-                    "exported_image_path": str(target_path),
-                    "exported_image_name": target_name,
-                }
-            )
+        )
+        try:
+            for row in rows:
+                (
+                    figure_id,
+                    page_number,
+                    image_file_path,
+                    image_file_name,
+                    species_candidate,
+                    final_confidence,
+                    category,
+                    review_status,
+                    accepted,
+                ) = row
+                source_path = Path(str(image_file_path or ""))
+                target_dir = self.accepted_figures_dir if bool(accepted) else self.review_figures_dir
+                stage_dir = stage_root / ("accepted" if bool(accepted) else "review")
+                status_prefix = "accepted" if bool(accepted) else "review"
+                target_name = self._export_figure_filename(
+                    pdf_stem=pdf_scope,
+                    status_prefix=status_prefix,
+                    figure_id=int(figure_id),
+                    source_name=str(image_file_name or source_path.name),
+                )
+                target_path = target_dir / target_name
+                staged_path = stage_dir / target_name
+                staged_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, staged_path)
+                staged_exports.append((staged_path, target_path))
+                if bool(accepted):
+                    accepted_count += 1
+                else:
+                    review_count += 1
+                exported_rows.append(
+                    {
+                        "pdf_file_id": pdf_file_id,
+                        "figure_id": int(figure_id),
+                        "status": status_prefix,
+                        "pdf_name": str(pdf_row[0] or ""),
+                        "page_number": int(page_number or 0),
+                        "species_candidate": str(species_candidate or ""),
+                        "final_confidence": float(final_confidence or 0.0),
+                        "category": str(category or ""),
+                        "review_status": str(review_status or ""),
+                        "source_image_path": str(source_path),
+                        "exported_image_path": str(target_path),
+                        "exported_image_name": target_name,
+                    }
+                )
 
-        manifest_path = self.stats_dir / f"{pdf_stem}_import_ready_figures.csv"
-        self._write_import_ready_manifest(manifest_path, exported_rows)
+            staged_manifest = stage_root / "manifest.csv"
+            self._write_import_ready_manifest(staged_manifest, exported_rows)
+            self._publish_import_ready_export_stage(
+                pdf_scope=pdf_scope,
+                stage_root=stage_root,
+                staged_exports=staged_exports,
+                staged_manifest=staged_manifest,
+                manifest_path=manifest_path,
+            )
+        except ImportReadyProjectionRecoveryRequired:
+            raise
+        except Exception as projection_exc:
+            try:
+                shutil.rmtree(stage_root)
+            except Exception as cleanup_exc:
+                raise ImportReadyProjectionRecoveryRequired(
+                    f"import-ready projection failed ({projection_exc}); staging cleanup failed: {cleanup_exc}",
+                    recovery_directory=stage_root,
+                ) from projection_exc
+            raise
+        else:
+            try:
+                shutil.rmtree(stage_root)
+            except Exception as cleanup_exc:
+                cleanup_warning = f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                cleanup_directory = str(stage_root.resolve())
+                self.logger.warning(
+                    "Import-ready projection was published, but temporary backup cleanup was incomplete at %s: %s",
+                    cleanup_directory,
+                    cleanup_warning,
+                )
+
+        self._remove_unambiguous_legacy_import_ready_artifacts(
+            pdf_file_id=pdf_file_id,
+            current_scope=pdf_scope,
+        )
         return {
             "accepted_exported_figures": accepted_count,
             "review_exported_figures": review_count,
             "accepted_figures_dir": str(self.accepted_figures_dir),
             "needs_review_figures_dir": str(self.review_figures_dir),
             "import_ready_manifest": str(manifest_path),
+            "import_ready_export_status": "success",
+            "import_ready_export_error": "",
+            "import_ready_recovery_directory": "",
+            "import_ready_cleanup_warning": cleanup_warning,
+            "import_ready_cleanup_directory": cleanup_directory,
         }
+
+    def _publish_import_ready_export_stage(
+        self,
+        *,
+        pdf_scope: str,
+        stage_root: Path,
+        staged_exports: List[Tuple[Path, Path]],
+        staged_manifest: Path,
+        manifest_path: Path,
+    ) -> None:
+        """Publish one PDF projection as an all-or-revert filesystem update."""
+        previous_paths: List[Tuple[Path, Path]] = []
+        backup_root = stage_root / "previous"
+        published_paths: List[Path] = []
+
+        for folder, backup_label in (
+            (self.accepted_figures_dir, "accepted"),
+            (self.review_figures_dir, "review"),
+        ):
+            prefix = f"{pdf_scope}__"
+            for path in folder.iterdir() if folder.exists() else ():
+                if path.is_file() and path.name.startswith(prefix):
+                    previous_paths.append((path, backup_root / backup_label / path.name))
+        if manifest_path.is_file():
+            previous_paths.append((manifest_path, backup_root / "stats" / manifest_path.name))
+
+        moved_previous: List[Tuple[Path, Path]] = []
+        try:
+            for original_path, backup_path in previous_paths:
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(original_path, backup_path)
+                moved_previous.append((original_path, backup_path))
+
+            for staged_path, target_path in staged_exports:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged_path, target_path)
+                published_paths.append(target_path)
+
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_manifest, manifest_path)
+            published_paths.append(manifest_path)
+        except Exception as publish_exc:
+            restore_errors: List[str] = []
+            for published_path in reversed(published_paths):
+                try:
+                    if published_path.is_file():
+                        published_path.unlink()
+                except Exception as exc:
+                    restore_errors.append(f"remove {published_path}: {exc}")
+            for original_path, backup_path in reversed(moved_previous):
+                try:
+                    if backup_path.is_file():
+                        original_path.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(backup_path, original_path)
+                except Exception as exc:
+                    restore_errors.append(f"restore {original_path}: {exc}")
+            if restore_errors:
+                detail = "; ".join(restore_errors)
+                raise ImportReadyProjectionRecoveryRequired(
+                    f"import-ready projection publish failed ({publish_exc}); rollback incomplete: {detail}",
+                    recovery_directory=stage_root,
+                ) from publish_exc
+            raise
+
+    def _import_ready_export_error_stats(
+        self,
+        error: str,
+        *,
+        recovery_directory: str = "",
+    ) -> dict[str, int | str]:
+        return {
+            "accepted_exported_figures": 0,
+            "review_exported_figures": 0,
+            "accepted_figures_dir": str(self.accepted_figures_dir),
+            "needs_review_figures_dir": str(self.review_figures_dir),
+            "import_ready_manifest": "",
+            "import_ready_export_status": "error",
+            "import_ready_export_error": str(error or "unknown import-ready export error"),
+            "import_ready_recovery_directory": str(recovery_directory or ""),
+            "import_ready_cleanup_warning": "",
+            "import_ready_cleanup_directory": "",
+        }
+
+    def _remove_unambiguous_legacy_import_ready_artifacts(self, *, pdf_file_id: int, current_scope: str) -> None:
+        """Remove pre-scope import copies only when one database row can own them."""
+        if self.db_conn is None:
+            return
+        cursor = self.db_conn.cursor()
+        cursor.execute("SELECT id, file_name, file_hash, file_path FROM pdf_files")
+        rows = cursor.fetchall()
+        legacy_scopes = {
+            int(row[0]): self._safe_batch_scope(Path(str(row[1] or "pdf")).stem) or f"pdf_{int(row[0])}"
+            for row in rows
+        }
+        legacy_scope = legacy_scopes.get(int(pdf_file_id), "")
+        if not legacy_scope:
+            return
+        # Artifact folders may live on a case-insensitive filesystem even when
+        # the extraction database was created on another platform. Treat
+        # case-only names as ambiguous so cleanup can never delete another
+        # PDF's legacy exports.
+        legacy_identity = os.path.normcase(legacy_scope).casefold()
+        owners = [
+            row_id
+            for row_id, scope in legacy_scopes.items()
+            if os.path.normcase(scope).casefold() == legacy_identity
+        ]
+        current_scopes = {
+            os.path.normcase(
+                self._pdf_artifact_scope(
+                    file_name=str(row[1] or "pdf"),
+                    file_hash=str(row[2] or ""),
+                    file_path=str(row[3] or ""),
+                )
+            ).casefold()
+            for row in rows
+        }
+        current_identity = os.path.normcase(str(current_scope or "")).casefold()
+        if len(owners) != 1 or legacy_identity in current_scopes or legacy_identity == current_identity:
+            return
+
+        cleanup_targets = (
+            ("accepted exports", lambda: self._remove_pdf_exported_files(self.accepted_figures_dir, legacy_scope)),
+            ("review exports", lambda: self._remove_pdf_exported_files(self.review_figures_dir, legacy_scope)),
+        )
+        for label, cleanup in cleanup_targets:
+            try:
+                cleanup()
+            except Exception as exc:
+                self.logger.warning(
+                    "Could not remove legacy PDF %s for scope %s: %s",
+                    label,
+                    legacy_scope,
+                    exc,
+                )
+        legacy_manifest = self.stats_dir / f"{legacy_scope}_import_ready_figures.csv"
+        try:
+            if legacy_manifest.is_file():
+                legacy_manifest.unlink()
+        except Exception as exc:
+            self.logger.warning(
+                "Could not remove legacy PDF import manifest for scope %s: %s",
+                legacy_scope,
+                exc,
+            )
 
     def _remove_pdf_exported_files(self, folder: Path, pdf_stem: str) -> None:
         if not folder.exists():
@@ -2149,12 +2576,14 @@ class EnhancedPDFExtractionSystem:
         figure_index: int,
         caption_block: Dict[str, Any] | None,
         figure_hash: str,
+        *,
+        pdf_artifact_scope: str = "",
     ) -> str:
-        pdf_prefix = re.sub(r"[^A-Za-z0-9_\-]+", "_", Path(pdf_filename).stem)[:40].strip("_") or "pdf"
+        pdf_prefix = self._safe_batch_scope(pdf_artifact_scope) or self._pdf_artifact_scope(file_name=pdf_filename)
         if caption_block:
             caption = str(caption_block.get("text_content", "") or "")
             caption = re.sub(r"[^A-Za-z0-9_\-\s]+", "", caption).strip()
-            caption = re.sub(r"\s+", "_", caption)[:48]
+            caption = re.sub(r"\s+", "_", caption)[:48].strip("_") or "figure"
         else:
             caption = "figure"
         return f"{pdf_prefix}_p{page_number:03d}_f{figure_index:03d}_{caption}_{figure_hash[:8]}.png"

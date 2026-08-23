@@ -26,7 +26,59 @@ class MainWindowModelManagementMixin:
             current_project=str(getattr(getattr(self, "project", None), "current_project_path", "") or ""),
         )
 
+    def _active_tif_project_bound_task(self):
+        workbench = getattr(self, "tif_workbench", None)
+        if workbench is None:
+            return ""
+
+        annotation = getattr(workbench, "annotation_workflow_controller", None)
+        if annotation is not None and bool(getattr(annotation, "saving_working_edit", False)):
+            return tr("TIF Volume Workbench", self.current_lang)
+        reference_checks = (
+            (annotation, "auto_save_thread", "TIF Volume Workbench"),
+            (annotation, "manual_save_thread", "TIF Volume Workbench"),
+            (annotation, "promote_thread", "TIF Volume Workbench"),
+            (workbench, "_label_auto_save_thread", "TIF Volume Workbench"),
+            (workbench, "_label_manual_save_thread", "TIF Volume Workbench"),
+            (workbench, "_promote_thread", "TIF Volume Workbench"),
+            (workbench, "_tif_import_thread", "Import Complete TIF Volume"),
+            (workbench, "_tif_backend_thread", "TIF Volume Workbench"),
+        )
+        for owner, attribute, label_key in reference_checks:
+            if owner is None:
+                continue
+            try:
+                thread = getattr(owner, attribute, None)
+                if thread is None:
+                    continue
+                is_running = getattr(thread, "isRunning", None)
+                if not callable(is_running) or is_running():
+                    return tr(label_key, self.current_lang)
+            except RuntimeError:
+                continue
+
+        backend_controller = getattr(workbench, "backend_panel_controller", None)
+        action_running = getattr(backend_controller, "action_running", None)
+        if callable(action_running):
+            try:
+                if action_running():
+                    return tr("TIF Volume Workbench", self.current_lang)
+            except RuntimeError:
+                pass
+
+        task_manager = getattr(workbench, "task_manager", None)
+        if task_manager is not None:
+            try:
+                if task_manager.is_running():
+                    return tr("TIF Volume Workbench", self.current_lang)
+            except (AttributeError, RuntimeError):
+                pass
+        return ""
+
     def _active_project_bound_background_task(self):
+        tif_task_label = self._active_tif_project_bound_task()
+        if tif_task_label:
+            return tif_task_label
         checks = (
             ("image_import_thread", "Image import"),
             ("batch_panel_split_thread", "Batch Split Plates"),

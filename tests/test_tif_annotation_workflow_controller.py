@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+import numpy as np
+
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -65,6 +67,7 @@ class TifAnnotationWorkflowControllerTests(unittest.TestCase):
         workbench._invalidate_result_region_mask_cache = Mock()
         workbench._update_save_status = Mock()
         workbench.auto_save_timer = Mock()
+        workbench.auto_save_timer.isActive.return_value = False
         workbench.canvas = SimpleNamespace(_refresh_scaled_pixmap=Mock())
         workbench.lang = "en"
         workbench.current_volume_scope = "top_level"
@@ -157,6 +160,251 @@ class TifAnnotationWorkflowControllerTests(unittest.TestCase):
         workbench._update_save_status.assert_called_once_with(state="saving")
         workbench.auto_save_timer.stop.assert_not_called()
 
+    def test_unsaved_cancel_restores_previously_active_auto_save_timer(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        workbench = self.make_workbench()
+        workbench.auto_save_timer.isActive.return_value = True
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.set_dirty(True)
+
+        with patch(
+            "AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.question",
+            return_value=QMessageBox.Cancel,
+        ):
+            self.assertFalse(controller.confirm_discard_or_save())
+
+        workbench.auto_save_timer.stop.assert_called_once_with()
+        workbench.auto_save_timer.start.assert_called_once_with()
+
+    def test_failed_save_restores_previously_active_auto_save_timer(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        workbench = self.make_workbench()
+        workbench.auto_save_timer.isActive.return_value = True
+        workbench.save_working_edit = Mock(return_value=False)
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.set_dirty(True)
+
+        with patch(
+            "AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.question",
+            return_value=QMessageBox.Save,
+        ):
+            self.assertFalse(controller.confirm_discard_or_save())
+
+        workbench.save_working_edit.assert_called_once_with(show_message=True)
+        workbench.auto_save_timer.start.assert_called_once_with()
+
+    def test_unrestorable_pending_recovery_blocks_close_without_discarding_snapshot(self):
+        workbench = self.make_workbench()
+        workbench.edit_volume = None
+        workbench.project = SimpleNamespace(current_project_path="project.tif_sqlite_manifest.json")
+        workbench.current_specimen_id = "specimen"
+        workbench.current_part_id = ""
+        workbench.current_reslice_id = ""
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        pending = {
+            "context": controller._current_edit_context(),
+            "slices": {0: np.ones((2, 2), dtype=np.uint16)},
+            "dirty_slices": {0},
+        }
+        controller.pending_unsaved_edit_recovery = pending
+
+        with patch(
+            "AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.warning"
+        ) as warning, patch(
+            "AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.question"
+        ) as question:
+            self.assertFalse(controller.confirm_discard_or_save())
+
+        self.assertIs(controller.pending_unsaved_edit_recovery, pending)
+        warning.assert_called_once()
+        question.assert_not_called()
+        workbench.auto_save_timer.stop.assert_not_called()
+
+    def test_auto_save_wait_timeout_preserves_running_task_references(self):
+        workbench = self.make_workbench()
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        thread = SimpleNamespace(
+            isRunning=Mock(return_value=True),
+            quit=Mock(),
+            wait=Mock(return_value=False),
+        )
+        worker = object()
+        controller.auto_save_thread = thread
+        controller.auto_save_worker = worker
+        controller.auto_save_task_id = "label_auto_save:7"
+
+        self.assertFalse(controller.wait_for_auto_save())
+
+        thread.quit.assert_called_once_with()
+        thread.wait.assert_called_once_with(30000)
+        self.assertIs(controller.auto_save_thread, thread)
+        self.assertIs(controller.auto_save_worker, worker)
+        self.assertEqual(controller.auto_save_task_id, "label_auto_save:7")
+        workbench._update_save_status.assert_called_once_with(state="saving")
+
+    def test_sync_save_stops_when_auto_save_wait_times_out(self):
+        from AntSleap.ui.tif_workbench import TifWorkbenchWidget
+
+        workbench = self.make_workbench()
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.auto_save_thread = SimpleNamespace(
+            isRunning=Mock(return_value=True),
+            quit=Mock(),
+            wait=Mock(return_value=False),
+        )
+        controller.auto_save_worker = object()
+        controller.auto_save_task_id = "label_auto_save:8"
+        workbench.annotation_workflow_controller = controller
+        workbench._saving_working_edit = False
+
+        self.assertFalse(TifWorkbenchWidget.save_working_edit(workbench))
+
+        workbench.coordinator.guard_backend_write_lock.assert_called_once_with(show_message=True)
+        self.assertIsNotNone(controller.auto_save_thread)
+
+    def test_dirty_without_slice_indexes_uses_bounded_recovery_snapshot(self):
+        class UnindexedVolume:
+            shape = (2**31, 4096, 4096)
+
+            def __getitem__(self, _index):
+                raise AssertionError("whole-volume recovery snapshot attempted")
+
+        workbench = self.make_workbench()
+        workbench.edit_volume = UnindexedVolume()
+        workbench.current_specimen_id = "specimen-1"
+        workbench.current_part_id = ""
+        workbench.current_reslice_id = ""
+        workbench.project = SimpleNamespace(current_project_path="project.json")
+        workbench.part_mask_workflow_controller = SimpleNamespace(
+            state=SimpleNamespace(current_material_id=7)
+        )
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.set_dirty(True)
+
+        snapshot = controller.snapshot_unsaved_edit()
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["slices"], {})
+        self.assertEqual(snapshot["dirty_slices"], set())
+        self.assertEqual(snapshot["current_material_id"], 7)
+
+    def test_pending_recovery_restores_slice_history_tool_and_material(self):
+        workbench = self.make_workbench()
+        workbench.edit_volume = np.zeros((2, 3, 3), dtype=np.uint16)
+        workbench.current_specimen_id = "specimen-1"
+        workbench.current_part_id = ""
+        workbench.current_reslice_id = ""
+        workbench.project = SimpleNamespace(current_project_path="project.json")
+        workbench.render_current_slice = Mock()
+        workbench._sync_undo_redo_buttons = Mock()
+        material_state = SimpleNamespace(current_material_id=7)
+
+        def set_material(material_id, **_kwargs):
+            material_state.current_material_id = int(material_id)
+
+        workbench.part_mask_workflow_controller = SimpleNamespace(
+            state=material_state,
+            _set_current_material_id=Mock(side_effect=set_material),
+        )
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.state.tool_mode = "eraser"
+        controller.state.undo_stack = [(0, np.full((3, 3), 2, dtype=np.uint16))]
+        controller.state.redo_stack = [(1, np.full((3, 3), 3, dtype=np.uint16))]
+        workbench.edit_volume[0] = 9
+        controller.mark_slice_dirty(0)
+        snapshot = controller.snapshot_unsaved_edit()
+
+        workbench.edit_volume[:] = 0
+        material_state.current_material_id = 1
+        controller.reset_dirty_tracking()
+        controller.reset_history()
+        controller.set_tool_mode("pan", show_message=False)
+        controller.stash_unsaved_edit_recovery(snapshot)
+
+        self.assertTrue(controller.restore_pending_unsaved_edit())
+
+        np.testing.assert_array_equal(workbench.edit_volume[0], np.full((3, 3), 9, dtype=np.uint16))
+        np.testing.assert_array_equal(controller.state.undo_stack[0][1], np.full((3, 3), 2, dtype=np.uint16))
+        np.testing.assert_array_equal(controller.state.redo_stack[0][1], np.full((3, 3), 3, dtype=np.uint16))
+        self.assertEqual(controller.state.tool_mode, "eraser")
+        self.assertEqual(material_state.current_material_id, 7)
+        self.assertEqual(controller.state.dirty_slices, {0})
+        self.assertIsNone(controller.pending_unsaved_edit_recovery)
+
+    def test_empty_recovery_snapshot_does_not_clear_existing_pending_recovery(self):
+        workbench = self.make_workbench()
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        pending = {"context": {"specimen_id": "specimen-1"}, "slices": {}}
+        controller.pending_unsaved_edit_recovery = pending
+
+        self.assertTrue(controller.stash_unsaved_edit_recovery(None))
+        self.assertIs(controller.pending_unsaved_edit_recovery, pending)
+
+    def test_auto_save_metadata_failure_keeps_dirty_slice_recovery(self):
+        workbench = self.make_workbench()
+        workbench.current_volume_scope = "full"
+        workbench._pending_backend_action_after_save = None
+        workbench._finalize_full_edit_save_metadata = Mock(side_effect=RuntimeError("metadata failed"))
+        workbench._fail_tif_task = Mock()
+        workbench._finish_tif_task = Mock()
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.auto_save_token = 5
+        controller.auto_save_task_id = "label_auto_save:5"
+        controller.auto_save_thread = object()
+        controller.auto_save_worker = object()
+        controller.result_matches_current_view = Mock(return_value=True)
+        controller.mark_slice_dirty(0)
+        revision = controller.state.slice_revisions[0]
+
+        controller.on_auto_save_finished(
+            {"token": 5, "slice_revisions": {0: revision}, "metadata": {}}
+        )
+
+        self.assertTrue(controller.state.dirty)
+        self.assertEqual(controller.state.dirty_slices, {0})
+        workbench._fail_tif_task.assert_called_once()
+        workbench._finish_tif_task.assert_not_called()
+        self.assertIsNone(controller.auto_save_thread)
+
+    def test_manual_save_metadata_failure_keeps_dirty_slice_recovery(self):
+        workbench = self.make_workbench()
+        workbench.current_volume_scope = "full"
+        workbench._pending_backend_action_after_save = None
+        workbench._finalize_full_edit_save_metadata = Mock(side_effect=RuntimeError("metadata failed"))
+        workbench._fail_tif_task = Mock()
+        workbench._finish_tif_task = Mock()
+        workbench._set_scope_controls_enabled = Mock()
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.manual_save_token = 6
+        controller.manual_save_task_id = "label_manual_save:6"
+        controller.manual_save_thread = object()
+        controller.result_matches_current_view = Mock(return_value=True)
+        controller.mark_slice_dirty(1)
+        revision = controller.state.slice_revisions[1]
+
+        with patch("AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.warning"):
+            controller.on_manual_save_finished(
+                {"token": 6, "slice_revisions": {1: revision}, "metadata": {}}
+            )
+
+        self.assertTrue(controller.state.dirty)
+        self.assertEqual(controller.state.dirty_slices, {1})
+        workbench._fail_tif_task.assert_called_once()
+        workbench._finish_tif_task.assert_not_called()
+        self.assertIsNone(controller.manual_save_thread)
+
     def test_stale_manual_save_failure_does_not_mark_new_view_dirty(self):
         workbench = self.make_workbench()
         workbench._fail_tif_task = Mock()
@@ -186,6 +434,25 @@ class TifAnnotationWorkflowControllerTests(unittest.TestCase):
         workbench.log.assert_called_once()
         warning_mock.assert_called_once()
         self.assertIsNone(workbench._pending_backend_action_after_save)
+
+    def test_current_manual_save_failure_restarts_enabled_auto_save_timer(self):
+        workbench = self.make_workbench()
+        workbench.auto_save_check.setChecked(True)
+        workbench._fail_tif_task = Mock()
+        workbench._set_scope_controls_enabled = Mock()
+        workbench._pending_backend_action_after_save = None
+        controller = TifAnnotationWorkflowController(workbench)
+        controller.initialize_compatibility_state()
+        controller.manual_save_token = 8
+        controller.manual_save_task_id = "save-8"
+        controller.manual_save_thread = object()
+        controller.result_matches_current_view = Mock(return_value=True)
+
+        with patch("AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.warning"):
+            controller.on_manual_save_failed({"token": 8, "error": "disk full"})
+
+        self.assertTrue(controller.state.dirty)
+        workbench.auto_save_timer.start.assert_called_once_with()
 
     def test_stale_truth_promotion_refreshes_tree_without_reloading_current_view(self):
         workbench = self.make_workbench()

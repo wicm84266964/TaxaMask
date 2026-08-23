@@ -1,5 +1,6 @@
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportIndexIssue=false
 
+import copy
 import json
 import os
 import shutil
@@ -140,6 +141,31 @@ class ProjectManager:
         self._last_label_journal_fsync = 0.0
         self._image_path_identity_cache = set()
         self._image_path_identity_cache_signature = None
+
+    def _snapshot_runtime_state(self, deep=False):
+        """Snapshot by reference for replace-only flows, or deeply for staged mutation."""
+        state = {
+            "project_data": self.project_data,
+            "current_project_path": self.current_project_path,
+            "current_storage_backend": self.current_storage_backend,
+            "current_database_path": self.current_database_path,
+            "_sqlite_dirty_images": self._sqlite_dirty_images,
+            "_sqlite_deleted_images": self._sqlite_deleted_images,
+            "_sqlite_label_dirty_images": self._sqlite_label_dirty_images,
+            "_sqlite_project_dirty": self._sqlite_project_dirty,
+            "_pending_project_data_version_id": self._pending_project_data_version_id,
+            "_traceability_backfill_needed": self._traceability_backfill_needed,
+            "_legacy_json_write_enabled": self._legacy_json_write_enabled,
+            "known_relocated_roots": self.known_relocated_roots,
+            "_last_label_journal_fsync": self._last_label_journal_fsync,
+            "_image_path_identity_cache": self._image_path_identity_cache,
+            "_image_path_identity_cache_signature": self._image_path_identity_cache_signature,
+        }
+        return copy.deepcopy(state) if deep else state
+
+    def _restore_runtime_state(self, state):
+        for name, value in state.items():
+            setattr(self, name, value)
 
     def set_known_relocated_roots(self, root_mappings):
         clean_mappings = []
@@ -859,6 +885,19 @@ class ProjectManager:
             raise
 
     def create_project(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._create_project_in_place(
+                name,
+                save_dir,
+                template_id=template_id,
+                storage_backend=storage_backend,
+            )
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _create_project_in_place(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
         self.clear()
         os.makedirs(save_dir, exist_ok=True)
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
@@ -1384,7 +1423,30 @@ class ProjectManager:
                 else:
                     self.project_data["image_provenance"][project_key] = dict(provenance)
 
+        labels = self.project_data.get("labels", {})
+        for image_path, provenance in self.project_data["image_provenance"].items():
+            if not isinstance(provenance, dict):
+                continue
+            source_type = str(provenance.get("source_type") or "").strip()
+            if source_type != "stl_rendered_view":
+                continue
+            label_entry = labels.get(image_path) if isinstance(labels, dict) else None
+            if not isinstance(label_entry, dict):
+                continue
+            label_entry["view"] = str(provenance.get("view_name") or "")
+            label_entry["specimen_id"] = str(provenance.get("specimen_id") or "")
+            label_entry["metadata_ref"] = str(provenance.get("metadata_ref") or "")
+            label_entry["review_mode"] = source_type
+
     def load_project(self, path):
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._load_project_in_place(path)
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _load_project_in_place(self, path):
         with open(path, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
 

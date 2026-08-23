@@ -497,6 +497,7 @@ TRANSLATIONS = {
         "TaxaMask Project Entry (*.sqlite_manifest.json *.tif_sqlite_manifest.json *.json);;SQLite Database (*.taxamask.sqlite *.taxamask_tif.sqlite);;All Files (*)": "TaxaMask 项目入口 (*.sqlite_manifest.json *.tif_sqlite_manifest.json *.json);;SQLite 数据库 (*.taxamask.sqlite *.taxamask_tif.sqlite);;所有文件 (*)",
         "Selected a SQLite database file. Opening its project entry instead: {0}": "已选择 SQLite 数据库文件，改为打开对应的项目入口文件：{0}",
         "Project entry file not found": "未找到项目入口文件",
+        "The selected file is not a valid TaxaMask project entry:\n\n{0}": "所选文件不是有效的 TaxaMask 项目入口：\n\n{0}",
         "This is a SQLite database file, but TaxaMask could not find the matching project entry file. Please open the project entry file next to it instead:\n\n2D: *.sqlite_manifest.json\nTIF: *.tif_sqlite_manifest.json\n\nSelected database:\n{0}": "这是 SQLite 数据库文件，但 TaxaMask 没能找到对应的项目入口文件。请改为打开它旁边的项目入口文件：\n\n2D：*.sqlite_manifest.json\nTIF：*.tif_sqlite_manifest.json\n\n当前选择的数据库：\n{0}",
         "Migrate 2D Project to SQLite": "迁移 2D 项目到 SQLite",
         "Migrating 2D project to SQLite...": "正在迁移 2D 项目到 SQLite...",

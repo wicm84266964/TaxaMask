@@ -177,6 +177,36 @@ class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
 
         self.assertEqual(owner._active_project_bound_background_task(), "Training")
 
+    def test_tif_write_threads_block_project_switch(self):
+        from types import SimpleNamespace
+
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        cases = (
+            ("auto_save_thread", "annotation"),
+            ("manual_save_thread", "annotation"),
+            ("promote_thread", "annotation"),
+            ("_tif_import_thread", "workbench"),
+            ("_tif_backend_thread", "workbench"),
+        )
+        for attribute, owner_kind in cases:
+            with self.subTest(attribute=attribute):
+                owner = type("BusyOwner", (MainWindowModelManagementMixin,), {})()
+                owner.current_lang = "en"
+                annotation = SimpleNamespace()
+                workbench = SimpleNamespace(annotation_workflow_controller=annotation)
+                setattr(annotation if owner_kind == "annotation" else workbench, attribute, object())
+                owner.tif_workbench = workbench
+
+                self.assertTrue(owner._active_project_bound_background_task())
+
+        owner = type("BusyOwner", (MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        owner.tif_workbench = SimpleNamespace(
+            annotation_workflow_controller=SimpleNamespace(saving_working_edit=True)
+        )
+        self.assertTrue(owner._active_project_bound_background_task())
+
     def test_stale_parent_preflight_restores_training_controls(self):
         from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
         from AntSleap.ui.main_window_training import MainWindowTrainingMixin

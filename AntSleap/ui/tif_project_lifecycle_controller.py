@@ -126,7 +126,8 @@ class TifProjectLifecycleController:
                     tt("Previous volume data is still being released. Wait a moment, then close the project again.", workbench.lang),
                 )
             return False
-        workbench.annotation_workflow_controller.wait_for_auto_save()
+        if not workbench.annotation_workflow_controller.wait_for_auto_save():
+            return False
         if prompt_unsaved and not workbench.annotation_workflow_controller.confirm_discard_or_save():
             return False
         self._clear_loaded_project_state()
@@ -174,6 +175,7 @@ class TifProjectLifecycleController:
         self.wait_for_volume_array_releases()
         workbench.part_mask_workflow_controller.reset_state()
         workbench.annotation_workflow_controller.reset_dirty_tracking()
+        workbench.annotation_workflow_controller.clear_unsaved_edit_recovery()
         workbench.auto_save_timer.stop()
         if hasattr(workbench, "volume_still_timer"):
             workbench.volume_still_timer.stop()

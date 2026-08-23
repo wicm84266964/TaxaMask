@@ -1,12 +1,14 @@
 try:
     from AntSleap.ui.main_window_project_dependencies import *
     from AntSleap.core.path_identity import canonical_path, path_identity
+    from AntSleap.ui.main_window_project_switch_support import MainWindowProjectSwitchSupportMixin
 except ImportError:
     from ui.main_window_project_dependencies import *
     from core.path_identity import canonical_path, path_identity
+    from ui.main_window_project_switch_support import MainWindowProjectSwitchSupportMixin
 
 
-class MainWindowProjectLifecycleMixin:
+class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
     def _default_outputs_root(self):
         return canonical_path(os.path.join(REPO_ROOT, DEFAULT_OUTPUTS_DIR_NAME))
 
@@ -158,6 +160,9 @@ class MainWindowProjectLifecycleMixin:
             )
             event.ignore()
             return
+        if not self._close_active_tif_workbench_for_project_switch():
+            event.ignore()
+            return
         self._shutdown_background_workers()
         self._flush_pending_project_save(defer_for_navigation=False)
         recent_project_path = self._active_recent_project_path()
@@ -167,51 +172,6 @@ class MainWindowProjectLifecycleMixin:
         event.accept()
         os._exit(0)
 
-    def _active_recent_project_path(self):
-        active_kind = getattr(self, "active_project_kind", "start")
-        if active_kind == "start":
-            active_kind = getattr(self, "last_workbench_kind", "image")
-        source_kind = getattr(self, "active_project_source_kind", active_kind)
-        if active_kind == "tif":
-            return getattr(self.tif_project, "current_project_path", None) or ""
-        if active_kind == "image":
-            if source_kind == "stl":
-                return getattr(self.stl_project, "current_project_path", None) or getattr(self, "active_project_entry_path", "")
-            return getattr(self.project, "current_project_path", None) or getattr(self, "active_project_entry_path", "")
-        return ""
-
-    def _shutdown_background_workers(self):
-        tif_workbench = getattr(self, "tif_workbench", None)
-        if tif_workbench is not None and hasattr(tif_workbench, "release_volume_renderer"):
-            try:
-                tif_workbench.release_volume_renderer()
-            except Exception:
-                pass
-        agent_panel = getattr(self, "agent_panel", None)
-        if agent_panel is not None and hasattr(agent_panel, "shutdown"):
-            try:
-                agent_panel.shutdown()
-            except Exception:
-                pass
-        elif agent_panel is not None and hasattr(agent_panel, "stop_dashboard"):
-            try:
-                agent_panel.stop_dashboard()
-            except Exception:
-                pass
-        if self.sam_thread and self.sam_thread.isRunning():
-            self.sam_thread.quit()
-            self.sam_thread.wait(1000)
-        thread = getattr(self, "image_import_thread", None)
-        if thread is not None and thread.isRunning():
-            thread.wait(30000)
-        thread = getattr(self, "batch_panel_split_thread", None)
-        if thread is not None and thread.isRunning():
-            if hasattr(thread, "cancel"):
-                thread.cancel()
-            thread.wait(30000)
-        thread = getattr(self, "parts_model_preload_thread", None)
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
 
     def destroy(self, destroyWindow=True, destroySubWindows=True):
         self._shutdown_background_workers()
@@ -663,16 +623,58 @@ class MainWindowProjectLifecycleMixin:
                 template = self._choose_project_template()
                 if template is None:
                     return
-                self._flush_pending_project_save(defer_for_navigation=False)
-                self.project.create_project(name, d, template_id=template["template_id"])
-                self.active_project_kind = "image"
-                self.last_workbench_kind = "image"
-                self.active_project_source_kind = "image"
-                self.active_project_entry_path = self.project.current_project_path or ""
-                self.config.set("last_project_path", self.active_project_entry_path)
-                self._refresh_project_bound_views()
-                self.ensure_2d_stl_models_preloaded()
-                self.canvas.load_image("")
+                tif_selection_recovery = self._active_tif_workbench_selection_state()
+                if not self._close_active_tif_workbench_for_project_switch():
+                    return
+                try:
+                    self._flush_pending_project_save(defer_for_navigation=False)
+                except Exception:
+                    try:
+                        self._restore_tif_workbench_selection_state(tif_selection_recovery)
+                        self._refresh_project_bound_views()
+                    except Exception as restore_exc:
+                        runtime_log_event("project_switch_gate_recovery_failed", error=str(restore_exc))
+                    raise
+                switch_recovery = self._active_project_switch_recovery_state(
+                    tif_workbench_selection=tif_selection_recovery,
+                )
+                artifact_transaction = self._new_project_artifact_transaction(self.project, "image", name, d)
+                try:
+                    if artifact_transaction.get("recovery_blocked_reason"):
+                        raise RuntimeError(
+                            f"new_project_recovery_refused:{artifact_transaction['recovery_blocked_reason']}"
+                        )
+                    if artifact_transaction.get("creation_blocked_reason"):
+                        raise RuntimeError(
+                            f"new_project_creation_refused:{artifact_transaction['creation_blocked_reason']}"
+                        )
+                    if artifact_transaction.get("recover_existing"):
+                        self.project.load_project(artifact_transaction["manifest_path"])
+                        artifact_transaction["published"] = True
+                        artifact_transaction["cleanup_safe"] = self._new_project_manifest_matches_transaction(
+                            artifact_transaction
+                        )
+                        self._log_new_project_artifact_event(
+                            "new_project_preserved_recovery_opened",
+                            project_kind="image",
+                            manifest=artifact_transaction["manifest_path"],
+                        )
+                    else:
+                        self.project.create_project(name, d, template_id=template["template_id"])
+                        self._capture_new_project_publication(artifact_transaction, self.project)
+                    self.active_project_kind = "image"
+                    self.last_workbench_kind = "image"
+                    self.active_project_source_kind = "image"
+                    self.active_project_entry_path = self.project.current_project_path or ""
+                    self.config.set("last_project_path", self.active_project_entry_path)
+                    self._refresh_project_bound_views()
+                    self.ensure_2d_stl_models_preloaded()
+                    self.canvas.load_image("")
+                except Exception as exc:
+                    self._restore_active_project_after_failed_switch(switch_recovery)
+                    self._rollback_new_project_publication(artifact_transaction, exc)
+                    raise
+                self._complete_new_project_publication(artifact_transaction)
 
     def new_tif_project(self):
         if not self._ensure_project_switch_available():
@@ -690,15 +692,57 @@ class MainWindowProjectLifecycleMixin:
         name, ok = QInputDialog.getText(self, tr("New TIF Volume Project", self.current_lang), tr("Project Name:", self.current_lang))
         if not ok or not name:
             return
-        self._flush_pending_project_save(defer_for_navigation=False)
-        self.tif_project.create_project(name, d)
-        self.active_project_kind = "tif"
-        self.last_workbench_kind = "tif"
-        self.active_project_source_kind = "tif"
-        self.active_project_entry_path = self.tif_project.current_project_path or ""
-        self.config.set("last_project_path", self.tif_project.current_project_path)
-        self._refresh_project_bound_views()
-        self.log(tr("Created TIF volume project: {0}", self.current_lang).format(self.tif_project.current_project_path))
+        tif_selection_recovery = self._active_tif_workbench_selection_state()
+        if not self._close_active_tif_workbench_for_project_switch():
+            return
+        try:
+            self._flush_pending_project_save(defer_for_navigation=False)
+        except Exception:
+            try:
+                self._restore_tif_workbench_selection_state(tif_selection_recovery)
+                self._refresh_project_bound_views()
+            except Exception as restore_exc:
+                runtime_log_event("project_switch_gate_recovery_failed", error=str(restore_exc))
+            raise
+        switch_recovery = self._active_project_switch_recovery_state(
+            tif_workbench_selection=tif_selection_recovery,
+        )
+        artifact_transaction = self._new_project_artifact_transaction(self.tif_project, "tif", name, d)
+        try:
+            if artifact_transaction.get("recovery_blocked_reason"):
+                raise RuntimeError(
+                    f"new_project_recovery_refused:{artifact_transaction['recovery_blocked_reason']}"
+                )
+            if artifact_transaction.get("creation_blocked_reason"):
+                raise RuntimeError(
+                    f"new_project_creation_refused:{artifact_transaction['creation_blocked_reason']}"
+                )
+            if artifact_transaction.get("recover_existing"):
+                self.tif_project.load_project(artifact_transaction["manifest_path"])
+                artifact_transaction["published"] = True
+                artifact_transaction["cleanup_safe"] = self._new_project_manifest_matches_transaction(
+                    artifact_transaction
+                )
+                self._log_new_project_artifact_event(
+                    "new_project_preserved_recovery_opened",
+                    project_kind="tif",
+                    manifest=artifact_transaction["manifest_path"],
+                )
+            else:
+                self.tif_project.create_project(name, d)
+                self._capture_new_project_publication(artifact_transaction, self.tif_project)
+            self.active_project_kind = "tif"
+            self.last_workbench_kind = "tif"
+            self.active_project_source_kind = "tif"
+            self.active_project_entry_path = self.tif_project.current_project_path or ""
+            self.config.set("last_project_path", self.tif_project.current_project_path)
+            self._refresh_project_bound_views()
+            self.log(tr("Created TIF volume project: {0}", self.current_lang).format(self.tif_project.current_project_path))
+        except Exception as exc:
+            self._restore_active_project_after_failed_switch(switch_recovery)
+            self._rollback_new_project_publication(artifact_transaction, exc)
+            raise
+        self._complete_new_project_publication(artifact_transaction)
 
     def _ensure_tif_project_open(self):
         if getattr(self, "active_project_kind", "image") != "tif" or not self.tif_project.current_project_path:
@@ -772,6 +816,8 @@ class MainWindowProjectLifecycleMixin:
         self.log(tr("Imported AMIRA directory for specimen {0}. Report: {1}", self.current_lang).format(specimen_id, report_path))
 
     def import_stl_rendered_views_action(self):
+        if not self._ensure_project_switch_available():
+            return
         source_dir = QFileDialog.getExistingDirectory(
             self,
             tr("Import STL Rendered Views to Labeling Workbench", self.current_lang),
@@ -779,27 +825,67 @@ class MainWindowProjectLifecycleMixin:
         )
         if not source_dir:
             return
+        tif_selection_recovery = self._active_tif_workbench_selection_state()
+        if not self._close_active_tif_workbench_for_project_switch():
+            return
         try:
-            result = import_stl_rendered_views_into_2d_project(self.project, source_dir)
+            self._flush_pending_project_save(defer_for_navigation=False)
+        except Exception:
+            try:
+                self._restore_tif_workbench_selection_state(tif_selection_recovery)
+                self._refresh_project_bound_views()
+            except Exception as restore_exc:
+                runtime_log_event("project_switch_gate_recovery_failed", error=str(restore_exc))
+            raise
+        switch_recovery = self._active_project_switch_recovery_state(
+            tif_workbench_selection=tif_selection_recovery,
+        )
+        result = None
+        try:
+            result = import_stl_rendered_views_into_2d_project(
+                self.project,
+                source_dir,
+                save=False,
+            )
+            self.active_project_kind = "image"
+            self.last_workbench_kind = "image"
+            self.active_project_source_kind = "image"
+            self.active_project_entry_path = self.project.current_project_path or ""
+            self.config.set("last_project_path", self.active_project_entry_path)
+            self._refresh_project_bound_views()
+            self.tabs.setCurrentWidget(self.workbench_widget)
+            self.ensure_2d_stl_models_preloaded()
+            self.log(
+                tr("Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.", self.current_lang).format(
+                    source_dir,
+                    result.get("registered_count", 0),
+                    result.get("specimen_count", 0),
+                    result.get("unparsed_count", 0),
+                )
+            )
+            self.project.save_project()
         except Exception as exc:
+            rollback_token = result.get("rollback_token") if isinstance(result, dict) else None
+            rollback = getattr(rollback_token, "rollback", None)
+            if callable(rollback):
+                try:
+                    rollback()
+                except Exception as rollback_exc:
+                    runtime_log_event(
+                        "stl_import_rollback_failed",
+                        source=source_dir,
+                        error=str(rollback_exc),
+                    )
+            self._restore_active_project_after_failed_switch(switch_recovery)
             QMessageBox.critical(self, tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), str(exc))
             return
-        self.active_project_kind = "image"
-        self.last_workbench_kind = "image"
-        self.active_project_source_kind = "image"
-        self.active_project_entry_path = self.project.current_project_path or ""
-        self.config.set("last_project_path", self.active_project_entry_path)
-        self._refresh_project_bound_views()
-        self.tabs.setCurrentWidget(self.workbench_widget)
-        self.ensure_2d_stl_models_preloaded()
-        self.log(
-            tr("Imported STL rendered views into the Labeling Workbench from {0}. Registered views: {1}, specimens: {2}, unparsed files: {3}.", self.current_lang).format(
-                source_dir,
-                result.get("registered_count", 0),
-                result.get("specimen_count", 0),
-                result.get("unparsed_count", 0),
-            )
-        )
+        rollback_token = result.get("rollback_token") if isinstance(result, dict) else None
+        finalize = getattr(rollback_token, "finalize", None)
+        if callable(finalize):
+            try:
+                finalize()
+            except Exception as exc:
+                runtime_log_event("stl_import_token_finalize_failed", source=source_dir, error=str(exc))
 
     def open_pdf_evidence_tools(self):
         self._ensure_pdf_widget()
@@ -1067,6 +1153,61 @@ class MainWindowProjectLifecycleMixin:
             runtime_log_event("open_project_sqlite_database_redirected", path=f, manifest=manifest_path)
             f = manifest_path
         payload = self._read_project_probe_payload(f)
+        if payload is None:
+            QMessageBox.warning(
+                self,
+                tr("Open Project", self.current_lang),
+                tr(
+                    "The selected file is not a valid TaxaMask project entry:\n\n{0}",
+                    self.current_lang,
+                ).format(f),
+            )
+            runtime_log_event("open_project_invalid_entry", path=f)
+            return
+
+        project_switch_started = False
+        switch_recovery = None
+        stl_registration_result = None
+        tif_selection_recovery = None
+
+        def close_active_tif_once():
+            nonlocal project_switch_started, switch_recovery, tif_selection_recovery
+            if project_switch_started:
+                return True
+            tif_selection_recovery = self._active_tif_workbench_selection_state()
+            if not self._close_active_tif_workbench_for_project_switch():
+                return False
+            project_switch_started = True
+            try:
+                switch_recovery = self._active_project_switch_recovery_state(
+                    tif_workbench_selection=tif_selection_recovery,
+                )
+            except Exception:
+                try:
+                    self._restore_tif_workbench_selection_state(tif_selection_recovery)
+                    self._refresh_project_bound_views()
+                except Exception as restore_exc:
+                    runtime_log_event(
+                        "project_switch_snapshot_recovery_failed",
+                        error=str(restore_exc),
+                    )
+                raise
+            return True
+
+        def rollback_staged_stl_registration():
+            if not isinstance(stl_registration_result, dict):
+                return True
+            rollback_token = stl_registration_result.get("rollback_token")
+            rollback = getattr(rollback_token, "rollback", None)
+            if not callable(rollback):
+                return True
+            try:
+                rollback()
+                return True
+            except Exception as exc:
+                runtime_log_event("stl_registration_rollback_failed", path=f, error=str(exc))
+                return False
+
         if self._is_legacy_2d_json_project_payload(payload):
             existing_manifest = self._existing_sqlite_manifest_for_legacy_json(f)
             if existing_manifest:
@@ -1079,9 +1220,12 @@ class MainWindowProjectLifecycleMixin:
                 if not self._confirm_legacy_2d_json_migration(f):
                     runtime_log_event("open_project_legacy_json_migration_cancelled", path=f)
                     return
+                if not close_active_tif_once():
+                    return
                 try:
                     migration_result = self._migrate_legacy_2d_project_with_progress(f)
                 except Exception as exc:
+                    self._restore_active_project_after_failed_switch(switch_recovery)
                     runtime_log_exception("open_project_legacy_json_migration_failed", *sys.exc_info())
                     QMessageBox.critical(
                         self,
@@ -1089,21 +1233,25 @@ class MainWindowProjectLifecycleMixin:
                         tr("2D project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
                     )
                     return
-                f = canonical_path(migration_result.manifest_path)
-                runtime_log_event(
-                    "open_project_legacy_json_migrated",
-                    source=migration_result.source_json_path,
-                    manifest=f,
-                    database=migration_result.database_path,
-                    image_count=migration_result.stats.get("image_count", 0),
-                    label_count=migration_result.stats.get("label_count", 0),
-                )
-                self.log(
-                    tr(
-                        "Migrated legacy 2D JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
-                        self.current_lang,
-                    ).format(f, migration_result.database_path, migration_result.report_path)
-                )
+                try:
+                    f = canonical_path(migration_result.manifest_path)
+                    runtime_log_event(
+                        "open_project_legacy_json_migrated",
+                        source=migration_result.source_json_path,
+                        manifest=f,
+                        database=migration_result.database_path,
+                        image_count=migration_result.stats.get("image_count", 0),
+                        label_count=migration_result.stats.get("label_count", 0),
+                    )
+                    self.log(
+                        tr(
+                            "Migrated legacy 2D JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
+                            self.current_lang,
+                        ).format(f, migration_result.database_path, migration_result.report_path)
+                    )
+                except Exception:
+                    self._restore_active_project_after_failed_switch(switch_recovery)
+                    raise
         if self._is_tif_project_file(f):
             if not self._is_tif_workflow_enabled():
                 self._show_tif_workflow_unavailable()
@@ -1123,9 +1271,12 @@ class MainWindowProjectLifecycleMixin:
                     if not self._confirm_legacy_tif_json_migration(f):
                         runtime_log_event("open_tif_legacy_json_migration_cancelled", path=f)
                         return
+                    if not close_active_tif_once():
+                        return
                     try:
                         migration_result = self._migrate_legacy_tif_project_with_progress(f)
                     except Exception as exc:
+                        self._restore_active_project_after_failed_switch(switch_recovery)
                         runtime_log_exception("open_tif_legacy_json_migration_failed", *sys.exc_info())
                         QMessageBox.critical(
                             self,
@@ -1133,58 +1284,102 @@ class MainWindowProjectLifecycleMixin:
                             tr("TIF project migration failed. The old JSON was not modified.\n\n{0}", self.current_lang).format(str(exc)),
                         )
                         return
-                    f = canonical_path(migration_result.manifest_path)
-                    runtime_log_event(
-                        "open_tif_legacy_json_migrated",
-                        source=migration_result.source_json_path,
-                        manifest=f,
-                        database=migration_result.database_path,
-                        specimen_count=migration_result.stats.get("specimen_count", 0),
-                        part_count=migration_result.stats.get("part_count", 0),
-                    )
-                    self.log(
-                        tr(
-                            "Migrated legacy TIF JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
-                            self.current_lang,
-                        ).format(f, migration_result.database_path, migration_result.report_path)
-                    )
-            self.tif_project.load_project(f)
-            self.active_project_kind = "tif"
-            self.last_workbench_kind = "tif"
-            self.active_project_source_kind = "tif"
-            self.active_project_entry_path = f
-            self.config.set("last_project_path", f)
-            self.log(tr("Opened TIF volume project: {0}", self.current_lang).format(f))
+                    try:
+                        f = canonical_path(migration_result.manifest_path)
+                        runtime_log_event(
+                            "open_tif_legacy_json_migrated",
+                            source=migration_result.source_json_path,
+                            manifest=f,
+                            database=migration_result.database_path,
+                            specimen_count=migration_result.stats.get("specimen_count", 0),
+                            part_count=migration_result.stats.get("part_count", 0),
+                        )
+                        self.log(
+                            tr(
+                                "Migrated legacy TIF JSON project to SQLite. Manifest: {0}; database: {1}; report: {2}",
+                                self.current_lang,
+                            ).format(f, migration_result.database_path, migration_result.report_path)
+                        )
+                    except Exception:
+                        self._restore_active_project_after_failed_switch(switch_recovery)
+                        raise
+            if not close_active_tif_once():
+                return
+            try:
+                self.tif_project.load_project(f)
+                self.active_project_kind = "tif"
+                self.last_workbench_kind = "tif"
+                self.active_project_source_kind = "tif"
+                self.active_project_entry_path = f
+                self.config.set("last_project_path", f)
+                self.log(tr("Opened TIF volume project: {0}", self.current_lang).format(f))
+            except Exception:
+                self._restore_active_project_after_failed_switch(switch_recovery)
+                raise
         elif self._is_stl_project_file(f):
-            self.stl_project.load_project(f)
-            result = register_stl_rendered_views_for_2d_review(self.stl_project, self.project)
-            self.active_project_kind = "image"
-            self.last_workbench_kind = "image"
-            self.active_project_source_kind = "stl"
-            self.active_project_entry_path = f
-            self.config.set("last_project_path", f)
-            self._prepare_image_list_for_project_open()
-            self.log(tr("Opened STL rendered-view project and registered it into the Labeling Workbench: {0}", self.current_lang).format(f))
-            self.log(
-                tr("Registered STL rendered-view project into the Labeling Workbench. Views: {0}, missing files: {1}.", self.current_lang).format(
-                    result.get("registered_count", 0),
-                    result.get("missing_count", 0),
+            if not close_active_tif_once():
+                return
+            try:
+                self.stl_project.load_project(f)
+                stl_registration_result = register_stl_rendered_views_for_2d_review(
+                    self.stl_project,
+                    self.project,
+                    save=False,
                 )
-            )
+                self.active_project_kind = "image"
+                self.last_workbench_kind = "image"
+                self.active_project_source_kind = "stl"
+                self.active_project_entry_path = f
+                self.config.set("last_project_path", f)
+                self._prepare_image_list_for_project_open()
+                self.log(tr("Opened STL rendered-view project and registered it into the Labeling Workbench: {0}", self.current_lang).format(f))
+                self.log(
+                    tr("Registered STL rendered-view project into the Labeling Workbench. Views: {0}, missing files: {1}.", self.current_lang).format(
+                        stl_registration_result.get("registered_count", 0),
+                        stl_registration_result.get("missing_count", 0),
+                    )
+                )
+            except Exception:
+                rollback_staged_stl_registration()
+                self._restore_active_project_after_failed_switch(switch_recovery)
+                raise
         else:
-            self.project.load_project(f)
-            self.active_project_kind = "image"
-            self.last_workbench_kind = "image"
-            self.active_project_source_kind = "image"
-            self.active_project_entry_path = f
-            self.config.set("last_project_path", f)
-            self._prepare_image_list_for_project_open()
-        self._refresh_project_bound_views()
-        if hasattr(self.engine, "cascade_manager"):
-            self.engine.cascade_manager.project_manager = self.project
-        self._sync_blink_lab_model_profile_defaults()
-        if getattr(self, "active_project_kind", "image") == "image":
-            self._preload_2d_stl_models_after_open()
+            if not close_active_tif_once():
+                return
+            try:
+                self.project.load_project(f)
+                self.active_project_kind = "image"
+                self.last_workbench_kind = "image"
+                self.active_project_source_kind = "image"
+                self.active_project_entry_path = f
+                self.config.set("last_project_path", f)
+                self._prepare_image_list_for_project_open()
+            except Exception:
+                self._restore_active_project_after_failed_switch(switch_recovery)
+                raise
+        try:
+            self._refresh_project_bound_views()
+            if hasattr(self.engine, "cascade_manager"):
+                self.engine.cascade_manager.project_manager = self.project
+            self._sync_blink_lab_model_profile_defaults()
+            if getattr(self, "active_project_kind", "image") == "image":
+                self._preload_2d_stl_models_after_open()
+            self.canvas.load_image("")
+            if stl_registration_result is not None:
+                self.project.save_project()
+        except Exception:
+            rollback_staged_stl_registration()
+            if project_switch_started:
+                self._restore_active_project_after_failed_switch(switch_recovery)
+            raise
+        if isinstance(stl_registration_result, dict):
+            rollback_token = stl_registration_result.get("rollback_token")
+            finalize = getattr(rollback_token, "finalize", None)
+            if callable(finalize):
+                try:
+                    finalize()
+                except Exception as exc:
+                    runtime_log_event("stl_registration_token_finalize_failed", path=f, error=str(exc))
         runtime_log_event(
             "open_project_ok",
             path=f,
@@ -1193,7 +1388,6 @@ class MainWindowProjectLifecycleMixin:
             image_count=len(self.project.project_data.get("images", []) or []),
             label_count=len(self.project.project_data.get("labels", {}) or {}),
         )
-        self.canvas.load_image("")
 
     def _format_relocation_preview(self, matches, limit=8):
         lines = []

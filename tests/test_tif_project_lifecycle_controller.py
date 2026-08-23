@@ -86,7 +86,7 @@ class TifProjectLifecycleControllerTests(unittest.TestCase):
             cancel_and_wait_preview=Mock(side_effect=lambda: calls.append("part_mask") or True),
         )
         annotation = SimpleNamespace(
-            wait_for_auto_save=Mock(side_effect=lambda: calls.append("auto_save")),
+            wait_for_auto_save=Mock(side_effect=lambda: calls.append("auto_save") or True),
             confirm_discard_or_save=Mock(side_effect=lambda: calls.append("prompt") or False),
         )
         workbench = SimpleNamespace(
@@ -170,6 +170,34 @@ class TifProjectLifecycleControllerTests(unittest.TestCase):
         controller._clear_loaded_project_state = Mock()
 
         self.assertFalse(controller.close_project(prompt_unsaved=False))
+        controller._clear_loaded_project_state.assert_not_called()
+
+    def test_close_project_stops_when_auto_save_wait_times_out(self):
+        annotation = SimpleNamespace(
+            wait_for_auto_save=Mock(return_value=False),
+            confirm_discard_or_save=Mock(return_value=True),
+        )
+        workbench = SimpleNamespace(
+            _tif_import_thread=None,
+            _local_axis_reslice_export_thread=None,
+            roi_workflow_controller=SimpleNamespace(is_confirm_running=Mock(return_value=False)),
+            part_mask_workflow_controller=SimpleNamespace(
+                materialize_thread=None,
+                cancel_and_wait_preview=Mock(return_value=True),
+            ),
+            volume_render_controller=SimpleNamespace(_cancel_and_wait_volume_preview_build=Mock(return_value=True)),
+            annotation_workflow_controller=annotation,
+            _tif_backend_thread=None,
+            _label_auto_save_thread=None,
+            _label_manual_save_thread=None,
+            _promote_thread=None,
+        )
+        controller = TifProjectLifecycleController(workbench)
+        controller._clear_loaded_project_state = Mock()
+
+        self.assertFalse(controller.close_project(prompt_unsaved=True))
+
+        annotation.confirm_discard_or_save.assert_not_called()
         controller._clear_loaded_project_state.assert_not_called()
 
 if __name__ == "__main__":

@@ -97,6 +97,24 @@ class AgentContextRoutesTests(unittest.TestCase):
         self.assertIn("full label-ID scans", context["safety_notes"])
         self.assertIn("volume_lifecycle_summary", context["suggested_agent_action"])
 
+    def test_tif_storage_route_reads_reports_before_any_file_action(self):
+        context = enrich_agent_context(
+            {
+                "source_workbench": "tif_storage",
+                "project_type": "tif_volume",
+                "storage_inventory_report": "C:/project/storage_reports/inventory.md",
+                "storage_cleanup_report": "C:/project/storage_reports/cleanup.md",
+            }
+        )
+
+        self.assertEqual(
+            context["diagnostic_route"], "tif_storage_inventory_and_cleanup"
+        )
+        self.assertIn("storage_inventory_report", context["artifact_hints"])
+        self.assertIn("explicit researcher authorization", context["safety_notes"])
+        self.assertIn("lifecycle manager", context["safety_notes"])
+        self.assertIn("reversible lifecycle quarantine", context["suggested_agent_action"])
+
     def test_pdf_route_keeps_candidate_safety_visible(self):
         context = enrich_agent_context(
             {

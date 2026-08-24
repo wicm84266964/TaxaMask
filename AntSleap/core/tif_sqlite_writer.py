@@ -9,6 +9,7 @@ from .tif_sqlite_migration import (
     _empty_stats,
 )
 from .tif_sqlite_schema import validate_tif_project_schema
+from .tif_storage_schema import insert_run_storage_records
 
 
 TIF_INDEX_TABLES = (
@@ -94,6 +95,15 @@ def _rewrite_tif_project_index_tables(
             stats["run_count"] += int(bool(inserted))
             stats["run_artifact_count"] += _insert_run_artifacts(
                 connection, run_id, run
+            )
+            storage_stats = insert_run_storage_records(connection, run_id, run)
+            stats["run_asset_ref_count"] = (
+                int(stats.get("run_asset_ref_count", 0))
+                + int(storage_stats["run_asset_ref_count"])
+            )
+            stats["materialization_count"] = (
+                int(stats.get("materialization_count", 0))
+                + int(storage_stats["materialization_count"])
             )
     return stats
 

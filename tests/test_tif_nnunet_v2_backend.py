@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import tifffile
@@ -31,6 +32,27 @@ def _absolute_path_values(value):
 
 
 class TifNnunetV2BackendTests(unittest.TestCase):
+    def test_run_relative_path_normalizes_physical_directory_aliases(self):
+        logical_run = os.path.abspath(os.path.join("logical-root", "run"))
+        physical_run = os.path.abspath(os.path.join("physical-root", "run"))
+        target = os.path.join(physical_run, "outputs", "model_manifest.json")
+        contract = {"result_json": os.path.join(logical_run, "result.json")}
+
+        def fake_realpath(path):
+            absolute = os.path.abspath(path)
+            if os.path.normcase(absolute) == os.path.normcase(logical_run):
+                return physical_run
+            return absolute
+
+        with mock.patch.object(
+            tif_nnunet_v2_backend.os.path,
+            "realpath",
+            side_effect=fake_realpath,
+        ):
+            relative = tif_nnunet_v2_backend._as_run_relative(contract, target)
+
+        self.assertEqual(relative, "outputs/model_manifest.json")
+
     def test_taxamask_predictor_resolves_blink_and_delegates_standard_trainers(self):
         class PredictionModule:
             pass
@@ -385,6 +407,36 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                 manifest = json.load(handle)
             self.assertEqual(manifest["label_id_mode"], "compact")
             self.assertEqual(manifest["label_id_mapping"]["source_to_nnunet"]["1"], 1)
+            self.assertFalse((dataset_dir / "part_volumes").exists())
+            self.assertFalse((dataset_dir / "part_labels").exists())
+            self.assertEqual(result["contract"]["dataset_formats"], ["nnunet_nifti"])
+            self.assertEqual(len(result["contract"]["input_assets"]), 2)
+            self.assertEqual(len(result["result"]["materializations"]), 2)
+            self.assertTrue(
+                all(
+                    item["cache_hit"] is False
+                    for item in result["result"]["materializations"]
+                )
+            )
+
+            repeated = runner.run_action(
+                "prepare_dataset",
+                part_refs=[
+                    {
+                        "specimen_id": "01-0101-11",
+                        "part_id": "brain",
+                        "reslice_id": "brain_axis_001",
+                    }
+                ],
+            )
+            self.assertNotEqual(result["run_id"], repeated["run_id"])
+            self.assertEqual(len(repeated["result"]["materializations"]), 2)
+            self.assertTrue(
+                all(
+                    item["cache_hit"] is True
+                    for item in repeated["result"]["materializations"]
+                )
+            )
 
     def test_adapter_train_runs_fake_nnunet_and_writes_usable_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

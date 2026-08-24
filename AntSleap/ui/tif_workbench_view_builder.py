@@ -484,6 +484,9 @@ class TifWorkbenchViewBuilder:
         self.backend_display_edit = QLineEdit()
         self.backend_python_edit = QLineEdit()
         self.backend_formats_edit = QLineEdit()
+        self.backend_formats_edit.setPlaceholderText(
+            "leave empty for backend-required format only"
+        )
         self.backend_prepare_edit = QLineEdit()
         self.backend_train_edit = QLineEdit()
         self.backend_predict_edit = QLineEdit()
@@ -494,6 +497,32 @@ class TifWorkbenchViewBuilder:
         self.btn_use_nnunet_backend_preset.setObjectName("tifUseNnunetV2PresetButton")
         self.btn_save_backend = QPushButton("Save backend settings")
         self.btn_save_backend.setObjectName("tifSaveBackendButton")
+        self.storage_help_label = QLabel(
+            "Occupancy analysis is read-only. Cleanup plans automatically rescan and only include registered, verified caches; historical unregistered files remain protected."
+        )
+        self.storage_help_label.setObjectName("tifStorageHelpText")
+        self.storage_help_label.setWordWrap(True)
+        self.storage_summary_label = QLabel("No storage scan yet.")
+        self.storage_summary_label.setObjectName("tifStorageSummaryText")
+        self.storage_summary_label.setWordWrap(True)
+        self.storage_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.storage_table = QTableWidget(0, 6)
+        self.storage_table.setObjectName("tifStorageTable")
+        self.storage_table.setMinimumHeight(220)
+        self.storage_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.storage_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.storage_table.setAlternatingRowColors(True)
+        self.storage_table.verticalHeader().setVisible(False)
+        self.storage_table.setShowGrid(False)
+        self.storage_table.horizontalHeader().setStretchLastSection(True)
+        self.btn_analyze_storage = QPushButton("Analyze occupancy")
+        self.btn_analyze_storage.setObjectName("tifAnalyzeStorageButton")
+        self.btn_generate_cleanup_plan = QPushButton("Generate cleanup plan")
+        self.btn_generate_cleanup_plan.setObjectName("tifGenerateCleanupPlanButton")
+        self.btn_storage_agent = QPushButton("Ask embedded Agent")
+        self.btn_storage_agent.setObjectName("tifStorageAgentButton")
+        self.btn_open_storage_report = QPushButton("Open latest report")
+        self.btn_open_storage_report.setObjectName("tifOpenStorageReportButton")
         self.btn_prepare_dataset = QPushButton("Prepare dataset")
         self.btn_prepare_dataset.setObjectName("tifPrepareDatasetButton")
         self.btn_train_backend = QPushButton("Train backend")
@@ -760,6 +789,8 @@ class TifWorkbenchViewBuilder:
         self.training_task_layout = task_page_parts["training_task_layout"]
         self.result_compare_page = task_page_parts["result_compare_page"]
         self.result_compare_layout = task_page_parts["result_compare_layout"]
+        self.storage_task_page = task_page_parts["storage_task_page"]
+        self.storage_task_layout = task_page_parts["storage_task_layout"]
         right_layout.addWidget(self.task_tabs, 1)
         self.task_tabs.currentChanged.connect(self.result_review_controller.on_training_mode_tab_changed)
 
@@ -1233,10 +1264,28 @@ class TifWorkbenchViewBuilder:
         result_layout.addWidget(self.result_compare_summary_label)
         result_layout.addWidget(self.result_compare_table)
         self.result_compare_layout.addWidget(result_section)
+        storage_section, storage_layout = self._make_section(
+            "Storage management", "tifStorageSection"
+        )
+        storage_layout.addWidget(self.storage_help_label)
+        storage_layout.addWidget(self.storage_summary_label)
+        storage_button_grid = QGridLayout()
+        storage_button_grid.setHorizontalSpacing(6)
+        storage_button_grid.setVerticalSpacing(6)
+        storage_button_grid.addWidget(self.btn_analyze_storage, 0, 0)
+        storage_button_grid.addWidget(self.btn_generate_cleanup_plan, 0, 1)
+        storage_button_grid.addWidget(self.btn_storage_agent, 1, 0)
+        storage_button_grid.addWidget(self.btn_open_storage_report, 1, 1)
+        storage_button_grid.setColumnStretch(0, 1)
+        storage_button_grid.setColumnStretch(1, 1)
+        storage_layout.addLayout(storage_button_grid)
+        storage_layout.addWidget(self.storage_table)
+        self.storage_task_layout.addWidget(storage_section)
         self.part_task_layout.addStretch(1)
         self.display_task_layout.addStretch(1)
         self.annotation_task_layout.addStretch(1)
         self.training_task_layout.addStretch(1)
+        self.storage_task_layout.addStretch(1)
         self.result_compare_layout.addStretch(1)
         splitter.addWidget(right)
 

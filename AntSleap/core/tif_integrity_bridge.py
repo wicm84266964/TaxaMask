@@ -306,6 +306,89 @@ def _runtime_path(project_manager, value):
         ) from exc
 
 
+def tif_integrity_asset_references(project_manager, owner_keys=None, *, require_all=False):
+    """Return current immutable asset identities without rehashing large volumes."""
+
+    from .project_integrity_registry import get_registry_version_snapshot
+    from .sqlite_storage import connect_sqlite_database_readonly
+
+    requested = {
+        str(value or "").strip()
+        for value in (owner_keys or [])
+        if str(value or "").strip()
+    }
+    if not project_manager.is_sqlite_project():
+        if require_all and requested:
+            raise ValueError("tif_asset_identity_requires_sqlite_project")
+        return []
+    connection = connect_sqlite_database_readonly(
+        project_manager.current_database_path
+    )
+    try:
+        state = registry_state(connection)
+        version_id = str(state.get("current_data_version_id") or "")
+        if not version_id:
+            if require_all and requested:
+                raise ValueError("tif_integrity_baseline_missing")
+            return []
+        snapshot = get_registry_version_snapshot(connection, version_id)
+        latest_verifications = {
+            (str(asset_id), str(revision_id), str(data_version_id)): str(
+                verified_at or ""
+            )
+            for asset_id, revision_id, data_version_id, verified_at in connection.execute(
+                """
+                SELECT asset_id, revision_id, data_version_id, MAX(verified_at)
+                FROM integrity_verification_events
+                WHERE status = 'verified'
+                GROUP BY asset_id, revision_id, data_version_id
+                """
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+    references = []
+    for item in snapshot.get("files", []) or []:
+        if item.get("owner_kind") != "tif_asset":
+            continue
+        owner_key = str(item.get("owner_key") or "")
+        if requested and owner_key not in requested:
+            continue
+        algorithm = str(item.get("hash_algorithm") or "")
+        digest = str(item.get("digest") or "")
+        verification_key = (
+            str(item.get("asset_id") or ""),
+            str(item.get("revision_id") or ""),
+            version_id,
+        )
+        verified_at = latest_verifications.get(verification_key, "")
+        references.append(
+            {
+                "asset_id": str(item.get("asset_id") or ""),
+                "revision_id": str(item.get("revision_id") or ""),
+                "owner_key": owner_key,
+                "role": str(item.get("role") or ""),
+                "content_hash": f"{algorithm}:{digest}" if algorithm and digest else "",
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "verified_at": verified_at,
+                "verification_status": (
+                    "verified"
+                    if verified_at
+                    else "registered_current_head"
+                ),
+                "project_data_version_id": version_id,
+            }
+        )
+    references.sort(key=lambda item: (item["owner_key"], item["role"]))
+    if require_all:
+        found = {item["owner_key"] for item in references}
+        missing = sorted(requested - found)
+        if missing:
+            raise ValueError(f"tif_registered_asset_identity_missing:{','.join(missing)}")
+    return references
+
+
 def relocate_tif_project_asset(project_manager, issue, new_path):
     from .project_integrity_registry import (
         get_registry_version_snapshot,

@@ -3,12 +3,14 @@ import os
 import shutil
 import tempfile
 import uuid
+import zlib
 from datetime import datetime
 
 import numpy as np
 
 from .path_identity import paths_overlap, paths_refer_to_same_file
 from .safe_io import atomic_write_json, replace_directory_safely
+from .tif_storage import ensure_label_value_fits_dtype, label_dtype_for_max_id
 
 
 VOLUME_SIDECAR_SCHEMA_VERSION = "ant3d_volume_sidecar_v1"
@@ -147,7 +149,7 @@ def _write_ome_ngff_zarr(
             "shape": shape,
             "chunks": chunks,
             "dtype": _zarr_dtype(dtype),
-            "compressor": None,
+            "compressor": {"id": "zlib", "level": 6},
             "fill_value": fill_value,
             "order": "C",
             "filters": None,
@@ -193,26 +195,29 @@ def _write_ome_ngff_zarr(
         },
     )
 
-    volume_c = np.ascontiguousarray(volume)
     for z0 in range(0, shape[0], chunks[0]):
         for y0 in range(0, shape[1], chunks[1]):
             for x0 in range(0, shape[2], chunks[2]):
                 chunk = np.ascontiguousarray(
-                    volume_c[
+                    volume[
                         z0 : min(z0 + chunks[0], shape[0]),
                         y0 : min(y0 + chunks[1], shape[1]),
                         x0 : min(x0 + chunks[2], shape[2]),
                     ]
                 )
+                if not np.any(chunk):
+                    continue
                 chunk_name = f"{z0 // chunks[0]}.{y0 // chunks[1]}.{x0 // chunks[2]}"
                 with open(os.path.join(tmp_array_dir, chunk_name), "wb") as handle:
-                    handle.write(chunk.tobytes(order="C"))
+                    handle.write(zlib.compress(chunk.tobytes(order="C"), level=6))
     replace_directory_safely(tmp_array_dir, array_dir)
     return {
         "ome_ngff_version": OME_NGFF_VERSION,
         "zarr_format": 2,
         "zarr_array_path": OME_ZARR_ARRAY_PATH,
         "zarr_chunks_zyx": chunks,
+        "zarr_compressor": {"id": "zlib", "level": 6},
+        "zarr_zero_chunks_omitted": True,
     }
 
 
@@ -447,7 +452,8 @@ def flush_volume_array(sidecar_path, array, update_ome_zarr=False):
 def create_empty_label_sidecar_like(
     image_sidecar_path,
     label_sidecar_path,
-    dtype="uint16",
+    dtype=None,
+    max_label_id=0,
     fill_value=0,
     role="working_edit",
     write_ome_zarr=True,
@@ -458,6 +464,13 @@ def create_empty_label_sidecar_like(
     spacing_zyx = image_meta.get("spacing_zyx") or [1.0, 1.0, 1.0]
     spacing_unit = str(image_meta.get("spacing_unit") or "unknown")
     scale_verified = image_meta.get("scale_verified") is True
+    required_max_label_id = max(int(max_label_id or 0), int(fill_value or 0))
+    label_dtype = (
+        np.dtype(dtype)
+        if dtype is not None
+        else label_dtype_for_max_id(required_max_label_id)
+    )
+    ensure_label_value_fits_dtype(required_max_label_id, label_dtype)
     if source_record is not None:
         record = source_record if isinstance(source_record, dict) else {}
         try:
@@ -488,7 +501,7 @@ def create_empty_label_sidecar_like(
         metadata, array = create_volume_sidecar_memmap(
             label_sidecar_path,
             shape,
-            dtype,
+            label_dtype,
             role=role,
             spacing_zyx=spacing_zyx,
             spacing_unit=spacing_unit,
@@ -500,7 +513,7 @@ def create_empty_label_sidecar_like(
         if hasattr(array, "_mmap"):
             array._mmap.close()
         return metadata
-    array = np.full(shape, fill_value, dtype=np.dtype(dtype))
+    array = np.full(shape, fill_value, dtype=label_dtype)
     return write_volume_sidecar(
         label_sidecar_path,
         array,

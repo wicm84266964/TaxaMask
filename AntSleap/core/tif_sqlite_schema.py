@@ -19,10 +19,16 @@ from .sqlite_storage import (
     migrate_sqlite_database_atomically,
     record_schema_version,
 )
+from .tif_storage_schema import (
+    REQUIRED_TIF_STORAGE_COLUMNS,
+    REQUIRED_TIF_STORAGE_TABLES,
+    initialize_tif_storage_schema,
+    validate_tif_storage_schema,
+)
 
 
 TIF_SQLITE_SCHEMA_NAME = "taxamask_tif_project"
-TIF_SQLITE_SCHEMA_VERSION = 2
+TIF_SQLITE_SCHEMA_VERSION = 3
 TIF_SQLITE_PROJECT_TYPE = "tif_volume"
 
 REQUIRED_TIF_TABLES = {
@@ -42,6 +48,9 @@ REQUIRED_TIF_TABLES = {
     "tif_events",
     "schema_migrations",
 }
+
+LEGACY_TIF_V2_TABLES = set(REQUIRED_TIF_TABLES)
+REQUIRED_TIF_TABLES.update(REQUIRED_TIF_STORAGE_TABLES)
 
 REQUIRED_TIF_COLUMNS = {
     "tif_projects": {
@@ -232,6 +241,12 @@ REQUIRED_TIF_COLUMNS = {
     "tif_events": {"id", "specimen_id", "part_id", "run_id", "event_type", "payload_json"},
 }
 
+LEGACY_TIF_V2_COLUMNS = {
+    table_name: set(columns)
+    for table_name, columns in REQUIRED_TIF_COLUMNS.items()
+}
+REQUIRED_TIF_COLUMNS.update(REQUIRED_TIF_STORAGE_COLUMNS)
+
 
 def _existing_tables(connection):
     cursor = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -265,16 +280,17 @@ def validate_tif_project_schema(connection):
     validate_project_integrity_registry_schema(connection)
     validate_training_run_ledger_schema(connection)
     validate_mesh_export_schema(connection)
+    validate_tif_storage_schema(connection)
     return True
 
 
-def _validate_tif_v1_schema(connection, version):
-    if int(version) != 1:
+def _validate_tif_legacy_schema(connection, version):
+    if int(version) not in {1, 2}:
         raise ValueError(f"unsupported_tif_sqlite_schema_version:{version}")
-    missing = sorted(REQUIRED_TIF_TABLES - _existing_tables(connection))
+    missing = sorted(LEGACY_TIF_V2_TABLES - _existing_tables(connection))
     if missing:
-        raise ValueError(f"missing_tif_v1_sqlite_tables:{','.join(missing)}")
-    for table_name, required_columns in sorted(REQUIRED_TIF_COLUMNS.items()):
+        raise ValueError(f"missing_tif_legacy_sqlite_tables:{','.join(missing)}")
+    for table_name, required_columns in sorted(LEGACY_TIF_V2_COLUMNS.items()):
         existing_columns = {
             str(row[1])
             for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -282,13 +298,13 @@ def _validate_tif_v1_schema(connection, version):
         missing_columns = sorted(required_columns - existing_columns)
         if missing_columns:
             raise ValueError(
-                f"missing_tif_v1_sqlite_columns:{table_name}:{','.join(missing_columns)}"
+                f"missing_tif_legacy_sqlite_columns:{table_name}:{','.join(missing_columns)}"
             )
     row = connection.execute(
         "SELECT schema_version FROM tif_projects WHERE id = 1"
     ).fetchone()
-    if row is None or int(row[0]) != 1:
-        raise ValueError("invalid_tif_v1_project_schema_version")
+    if row is None or int(row[0]) != int(version):
+        raise ValueError("invalid_tif_legacy_project_schema_version")
 
 
 def _migrate_v1_volume_scale_trust(connection):
@@ -341,10 +357,10 @@ def migrate_tif_project_database(db_path):
         db_path,
         schema_name=TIF_SQLITE_SCHEMA_NAME,
         target_version=TIF_SQLITE_SCHEMA_VERSION,
-        source_versions=(1,),
+        source_versions=(1, 2),
         initialize_schema=initialize_tif_project_schema,
         validate_schema=validate_tif_project_schema,
-        validate_source_schema=_validate_tif_v1_schema,
+        validate_source_schema=_validate_tif_legacy_schema,
         unsupported_version_error="unsupported_tif_sqlite_schema_version",
     )
 
@@ -359,6 +375,7 @@ def initialize_tif_project_schema(connection):
             initialize_project_integrity_registry_schema(connection)
             initialize_training_run_ledger_schema(connection)
             initialize_mesh_export_schema(connection)
+            initialize_tif_storage_schema(connection)
         validate_tif_project_schema(connection)
         return current_version
 
@@ -370,7 +387,7 @@ def initialize_tif_project_schema(connection):
                 project_id TEXT NOT NULL DEFAULT '',
                 name TEXT NOT NULL DEFAULT 'Untitled TIF Project',
                 project_type TEXT NOT NULL DEFAULT 'tif_volume',
-                schema_version INTEGER NOT NULL DEFAULT 2,
+                schema_version INTEGER NOT NULL DEFAULT 3,
                 legacy_schema_version TEXT NOT NULL DEFAULT '',
                 settings_json TEXT NOT NULL DEFAULT '{}',
                 view_settings_json TEXT NOT NULL DEFAULT '{}',
@@ -651,6 +668,7 @@ def initialize_tif_project_schema(connection):
         initialize_project_integrity_registry_schema(connection)
         initialize_training_run_ledger_schema(connection)
         initialize_mesh_export_schema(connection)
+        initialize_tif_storage_schema(connection)
         if current_version == 1:
             _migrate_v1_volume_scale_trust(connection)
         connection.execute(

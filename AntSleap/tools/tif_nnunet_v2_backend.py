@@ -18,7 +18,9 @@ from AntSleap.core.tif_backend import (
     TIF_MODEL_MANIFEST_SCHEMA_VERSION,
 )
 from AntSleap.core.tif_export import _sanitize_exchange_metadata, export_nnunet_dataset, export_tif_part_nnunet_dataset, read_nifti_volume, read_nifti_volume_with_metadata, remap_label_ids, write_nifti_volume
+from AntSleap.core.tif_materialization_cache import TifMaterializationCache
 from AntSleap.core.tif_project import TifProjectManager
+from AntSleap.core.tif_storage import label_dtype_for_max_id
 from AntSleap.core.tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sidecar_exists, write_volume_sidecar
 
 
@@ -58,7 +60,7 @@ def _read_json(path):
     return payload
 
 
-def _result_base(contract, started_at, artifacts=None, metrics=None, warnings=None, errors=None, provenance=None, status="success"):
+def _result_base(contract, started_at, artifacts=None, metrics=None, warnings=None, errors=None, provenance=None, materializations=None, status="success"):
     return {
         "schema_version": TIF_BACKEND_RESULT_SCHEMA_VERSION,
         "contract_schema_version": TIF_BACKEND_CONTRACT_SCHEMA_VERSION,
@@ -70,6 +72,9 @@ def _result_base(contract, started_at, artifacts=None, metrics=None, warnings=No
         "metrics": metrics if isinstance(metrics, dict) else {"summary": {}, "by_material": {}},
         "warnings": list(warnings or []),
         "errors": list(errors or []),
+        "materializations": [
+            dict(item) for item in (materializations or []) if isinstance(item, dict)
+        ],
         "provenance": {
             "started_at": started_at,
             "finished_at": _now_iso(),
@@ -85,11 +90,14 @@ def _as_run_relative(contract, path):
     text = str(path or "").strip()
     if not text:
         return ""
-    base = os.path.dirname(os.path.abspath(contract["result_json"]))
+    base = os.path.realpath(
+        os.path.dirname(os.path.abspath(contract["result_json"]))
+    )
+    target = os.path.realpath(os.path.abspath(text))
     try:
-        return os.path.relpath(os.path.abspath(text), base).replace("\\", "/")
+        return os.path.relpath(target, base).replace("\\", "/")
     except ValueError:
-        return os.path.abspath(text)
+        return target
 
 
 def _as_manifest_relative(manifest_path, path):
@@ -537,6 +545,13 @@ def _resolved_effective_config(contract, args, checkpoint_path, split):
 
 def _export_training_dataset(contract, args, raw_root):
     manager = _project_from_contract(contract)
+    asset_references = list(contract.get("input_assets") or [])
+    materialization_cache = (
+        TifMaterializationCache(manager.project_dir)
+        if contract.get("materialization_policy") == "backend_owned"
+        and asset_references
+        else None
+    )
     dataset_folder = _dataset_folder_name(args.dataset_id, args.dataset_name)
     dataset_dir = raw_root / dataset_folder
     if dataset_dir.exists():
@@ -550,6 +565,9 @@ def _export_training_dataset(contract, args, raw_root):
             specimen_ids=_specimen_ids_from_contract(contract, require_label=True),
             dataset_name=dataset_folder,
             require_train_ready=True,
+            file_ending=args.file_ending,
+            materialization_cache=materialization_cache,
+            asset_references=asset_references,
         )
     else:
         refs = _part_refs_from_contract(contract, require_label=True)
@@ -563,6 +581,8 @@ def _export_training_dataset(contract, args, raw_root):
             label_id_mode=args.label_id_mode,
             split_mode=args.split_mode,
             include_images_ts=True,
+            materialization_cache=materialization_cache,
+            asset_references=asset_references,
         )
     return dataset_dir, export
 
@@ -768,7 +788,11 @@ def _write_prediction_sidecars(contract, cases, predictions_dir, manifest):
         prediction_file = _prediction_output_for_case(predictions_dir, case["case_id"])
         prediction = read_nifti_volume(prediction_file)
         if restore_mapping:
-            prediction = remap_label_ids(prediction, restore_mapping, dtype=np.uint16)
+            prediction = remap_label_ids(
+                prediction,
+                restore_mapping,
+                dtype=label_dtype_for_max_id(max(restore_mapping.values())),
+            )
         expected_shape = [int(value) for value in case.get("shape_zyx", [])]
         if list(prediction.shape) != expected_shape:
             raise ValueError(f"prediction_shape_mismatch:{case['case_id']}:{list(prediction.shape)}:{expected_shape}")
@@ -780,7 +804,10 @@ def _write_prediction_sidecars(contract, cases, predictions_dir, manifest):
         exchange_metadata = case.get("exchange_metadata") if isinstance(case.get("exchange_metadata"), dict) else {}
         meta = write_volume_sidecar(
             sidecar_path,
-            prediction.astype(np.uint16, copy=False),
+            prediction.astype(
+                label_dtype_for_max_id(int(np.max(prediction)) if prediction.size else 0),
+                copy=False,
+            ),
             role="editable_ai_result",
             spacing_zyx=exchange_metadata.get("spacing_zyx") or [1.0, 1.0, 1.0],
             spacing_unit=exchange_metadata.get("spacing_unit", "unknown"),
@@ -791,6 +818,7 @@ def _write_prediction_sidecars(contract, cases, predictions_dir, manifest):
                 "nnunet_case_id": case["case_id"],
                 "label_id_mapping": (manifest.get("nnunet") or {}).get("label_id_mapping", {}),
             },
+            write_ome_zarr=False,
         )
         artifacts.append(
             {
@@ -821,6 +849,7 @@ def run_prepare_dataset(contract, args):
         started_at,
         artifacts=artifacts,
         metrics={"summary": {"training_samples": export["exported_count"]}, "by_material": {}},
+        materializations=export.get("materializations") or [],
         provenance={
             "dataset_manifest": _as_run_relative(contract, export["manifest_path"]),
             "dataset_dir": _as_run_relative(contract, dataset_dir),
@@ -918,6 +947,7 @@ def run_train(contract, args):
         artifacts=artifacts,
         metrics={"summary": {"training_samples": export["exported_count"], "usable_for_research_prediction": int(not args.dry_run_commands)}, "by_material": {}},
         warnings=warnings,
+        materializations=export.get("materializations") or [],
         provenance={
             "model_manifest": _as_run_relative(contract, manifest_path),
             "model_output_dir": _as_run_relative(contract, _model_output_dir(args, results_root)),

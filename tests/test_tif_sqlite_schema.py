@@ -50,7 +50,7 @@ class TifSQLiteSchemaTests(unittest.TestCase):
         )
     """
 
-    def test_v1_database_migrates_explicitly_to_v2_with_backup(self):
+    def test_v1_database_migrates_explicitly_to_v3_with_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "legacy_tif.taxamask.sqlite"
             connection = create_tif_project_database(db_path)
@@ -157,14 +157,14 @@ class TifSQLiteSchemaTests(unittest.TestCase):
                     connection.execute(
                         "SELECT schema_version FROM tif_projects WHERE id = 1"
                     ).fetchone()[0],
-                    2,
+                    3,
                 )
                 self.assertEqual(
                     [row[0] for row in connection.execute(
                         "SELECT version FROM schema_migrations WHERE schema_name = ? ORDER BY version",
                         (TIF_SQLITE_SCHEMA_NAME,),
                     ).fetchall()],
-                    [1, 2],
+                    [1, 3],
                 )
                 scale_rows = {
                     row[0]: row[1:]
@@ -221,6 +221,55 @@ class TifSQLiteSchemaTests(unittest.TestCase):
                 self.assertEqual(run_integrity_check(conn), ["ok"])
                 project = conn.execute("SELECT project_type FROM tif_projects WHERE id = 1").fetchone()
                 self.assertEqual(project[0], TIF_SQLITE_PROJECT_TYPE)
+            finally:
+                conn.close()
+
+    def test_v2_database_migrates_to_v3_storage_schema_with_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "tif_project.taxamask.sqlite"
+            conn = create_tif_project_database(db_path)
+            try:
+                for table_name in (
+                    "cleanup_events",
+                    "cleanup_plan_items",
+                    "cleanup_plans",
+                    "retention_pins",
+                    "artifact_materializations",
+                    "run_asset_refs",
+                    "asset_relations",
+                    "asset_chunks",
+                ):
+                    conn.execute(f"DROP TABLE {table_name}")
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE schema_name = ?",
+                    (TIF_SQLITE_SCHEMA_NAME,),
+                )
+                conn.execute(
+                    "INSERT INTO schema_migrations (schema_name, version) VALUES (?, 2)",
+                    (TIF_SQLITE_SCHEMA_NAME,),
+                )
+                conn.execute("UPDATE tif_projects SET schema_version = 2 WHERE id = 1")
+                conn.commit()
+            finally:
+                conn.close()
+
+            result = migrate_tif_project_database(db_path)
+
+            self.assertTrue(result["migrated"])
+            self.assertTrue(Path(result["backup_path"]).is_file())
+            conn = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    get_schema_version(conn, TIF_SQLITE_SCHEMA_NAME),
+                    TIF_SQLITE_SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT schema_version FROM tif_projects WHERE id = 1"
+                    ).fetchone()[0],
+                    3,
+                )
+                validate_tif_project_schema(conn)
             finally:
                 conn.close()
 

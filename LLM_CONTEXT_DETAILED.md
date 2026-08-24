@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-08-05.
+> Last synchronized: 2026-08-24 for TaxaMask v2.5.0.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -35,6 +35,8 @@ Do not recreate older duplicate root context/readme files. Keep this file as the
 
 AI outputs are draft material until a researcher confirms them.
 
+`manual_truth` is a protected storage role, not proof of who operated the confirmation control or of expert biological quality. Automated UI acceptance and agent adjudication must remain explicitly recorded as `agent_adjudicated` with `human_reviewed=false`; no machine execution path may be described as human or expert truth.
+
 Labels restored from the legacy 2D label journal are also drafts. They use the distinct `legacy_journal_recovery` source, are excluded from AI one-click acceptance, and cannot enter training until the researcher explicitly confirms the recovered polygons through the maintenance recovery action.
 
 Do not let automated tools overwrite:
@@ -53,6 +55,8 @@ For Local Axis automation, future model outputs should be proposals that require
 All maintained training entrypoints use verified researcher truth and a SQLite-backed run ledger. Unreviewed 2D drafts, TIF predictions, or Local Axis proposals cannot enter training. There is no separate formal/temporary training mode; editable run notes express purpose and importance without changing immutable configuration, split, hash, artifact, or status facts.
 
 When a required source, reviewed label, configuration snapshot, or model weight is missing or has a different fingerprint, training stops. Recovery must recheck, relocate identical content, restore a verified copy, or register intentional changed content as a new version with a note. There is no bypass that silently accepts current bytes as the old version.
+
+Managed Locator, Base SAM, SAM decoder, and Blink bundles are read once from a trusted root, checked by file identity, size, and SHA-256, and loaded from those verified bytes. Locator scope and output shape, SAM decoder/Base SAM pairing, and Blink parent/child/backend/schema identity remain binding through training, publication, cold loading, and cache reuse. Model or device changes are blocked while training, verification, loading, or project-bound inference is active.
 
 The maintained 2D and Blink GUI paths perform both Registry verification and the final pre-training content recheck in a background worker. Progress includes current file, percentage, read rate, and ETA. Cancellation must prevent training startup and close any created active run as `cancelled`. Selected image-group runs bind and verify only their selected source/label UIDs plus shared schema, effective config, and selected starting weights. The first-pass capability is single-use and bound to the project, data version, run, revisions, and verification events. Before success and weight activation, the bound Registry inputs receive a completion recheck; persistent changes fail the run and leave pending weights inactive. This reduces but does not eliminate TOCTOU without immutable snapshots. Do not replace byte-level rechecks with size/mtime/inode caching unless a future snapshot mechanism provides equivalent guarantees.
 
@@ -163,6 +167,7 @@ Storage state:
 - If a user accidentally selects the SQLite database file itself, the GUI tries to locate the matching manifest and opens that entry file.
 - Project SQLite is also authoritative for integrity versions, training runs, effective configurations, actual train/validation assignments, artifacts, terminal status, recovery state, and run-note links. JSON reports and manifests remain atomic readable artifacts or projections, not a second project-state backend.
 - Supported 2D and TIF schema upgrades create a verified database backup, hold one writer transaction through migration and validation, and commit only after integrity checks pass. Failed upgrades roll back the complete transaction. TIF v1 upgrades explicitly to v2; code must reject a newer unknown schema instead of rewriting its version.
+- Multi-image auto-annotation, external-image registration, project save, and SQLite integrity checks commit as one project transaction. A failed application or save restores memory and durable state while preserving dirty data for retry. Legacy JSON journal publication uses an advisory lock, `fsync`, staged SHA-256 verification, and atomic replacement; journal-only failure is an explicit partial success, not a complete annotation success.
 
 Important semantics:
 
@@ -200,6 +205,8 @@ Main source areas:
 
 PDF processing creates evidence, candidates, captions, figure clips, and provenance. It does not create training truth automatically.
 
+Each PDF extraction uses its exact source identity and a run-scoped namespace. Database extraction commits before import-ready publication, while the projection itself uses staging, publish, and rollback. A projection failure after database commit is `partial_success`; it must preserve the last valid projection and its referenced images. Resume-only projection repair is allowed only while all committed source images still exist, otherwise the PDF is fully re-extracted.
+
 Expected Agent behavior:
 
 - Work one stage at a time: stage 0 literature/PDF source readiness and discovery mode, key/model readiness, screening criteria, figure-review criteria, then run/result diagnosis.
@@ -218,6 +225,11 @@ Main source areas:
 - `AntSleap/core/tif_project.py`
 - `AntSleap/core/tif_volume_io.py`
 - `AntSleap/core/tif_backend.py`
+- `AntSleap/core/tif_storage.py`
+- `AntSleap/core/tif_materialization_cache.py`
+- `AntSleap/core/tif_storage_inventory.py`
+- `AntSleap/core/tif_storage_lifecycle.py`
+- `AntSleap/core/tif_storage_migration.py`
 - `AntSleap/ui/tif_workbench.py`
 - `docs/contracts/ant3d_tif_backend_contract_v1.md`
 - `docs/contracts/tif_local_axis_backend_contract_v1.md`
@@ -229,7 +241,9 @@ Storage state:
 - New TIF projects are SQLite-backed by default.
 - The TIF project entry file is `*.tif_sqlite_manifest.json`; it points to the adjacent `*.taxamask_tif.sqlite` database.
 - Old TIF JSON projects can migrate to SQLite with a progress dialog.
+- TIF SQLite schema v3 adds registered asset identities, run-to-asset references, materialization records, retention pins, cleanup plans/items/events, and cleanup lifecycle audit state. Older supported schemas migrate transactionally; newer unknown schemas remain fail-closed.
 - TIF sidecar volumes, labels, part volumes, masks, contours, and reslice outputs remain in normal project folders. The database stores project index records, paths, metadata, review state, and provenance.
+- `working_edit`, `manual_truth`, part/reslice truth, and model-draft paths are compared by physical platform identity and must not alias or overlap as ancestor/descendant directories. Volume replacement, in-memory lineage updates, and SQLite save form one coordinated transaction; failures restore all three layers. A committed replacement is not rolled back merely because an obsolete backup cannot be deleted; the bounded project maintenance sidecar records that cleanup warning.
 - If a user accidentally selects the TIF SQLite database file itself, the GUI tries to locate and open the matching manifest.
 
 Core records:
@@ -250,6 +264,15 @@ Core records:
 
 Legacy TIF project JSON is now a migration source rather than the preferred active project store. Large volumes live in project sidecar directories.
 
+TIF storage authority and cleanup policy:
+
+- L0 contains source volumes, reviewed truth, and unknown/unregistered files; L1 contains active project working/training data. Both levels are protected from automatic cleanup.
+- L2 contains registered reproducible materializations, preview caches, and staging data; L3 identifies transaction-temporary or partial-download data. Being L2/L3 only means the item may be considered after safety checks, not that it can be deleted immediately.
+- Current cleanup plans include only registered, verified L2 reproducible caches, or legacy caches that an explicit migration scan proved reproducible and hash-verified. Unknown historical files remain L0-protected.
+- Compact-label migration is an explicit maintenance action, not a startup rewrite. It verifies the label-ID range, shape, values, and project state before replacing an old wider label sidecar.
+- The lifecycle is dry-run plan -> recoverable quarantine -> optional restore -> irreversible purge after a grace period. Purge requires the exact plan ID. An explicit grace-period override is additionally required for early purge and records `grace_period_overridden`.
+- The workbench exposes analysis, plan generation, embedded-Agent handoff, and report opening. The Agent may explain and recommend from compact reports, but moving or deleting data requires explicit researcher authorization.
+
 Plain TIFF stack import creates an image volume but not trusted training truth. AMIRA-style imports can provide label volumes, but label shape/material consistency must be checked before treating a specimen as train-ready.
 
 Physical scale is trusted only when the actual volume metadata and the project SQLite record both set `scale_verified: true` and their normalized `spacing_unit` and `spacing_zyx` values match. Missing, legacy, or conflicting evidence keeps the numeric voxel spacing for array operations but sets the unit to `unknown` and derived geometry to `unitless`. NIfTI/NRRD/MHA/OME-TIFF exchange, nnU-Net/MONAI, TIF-Blink, Local Axis, prediction import, and STL export must preserve this downgrade and must never infer millimeters from positive spacing or a historical default.
@@ -260,6 +283,9 @@ Current TIF volume-segmentation training semantics:
 - For `prepare_dataset` and `train`, the workbench first collects all project-wide train-ready part/reslice samples that have reviewed `manual_truth`, matching image/label shape, a bound nonempty label schema, valid label IDs, and verified train-ready status.
 - If there are no train-ready part/reslice samples, it falls back to train-ready top-level specimen volumes.
 - `prepare_dataset` can run with one exported sample for layout inspection. The bundled real nnU-Net v2 train adapter requires at least two exported training samples before calling nnU-Net.
+- Label sidecars select the smallest unsigned dtype that can represent the active label-ID range. Values are checked before assignment/export so a compact dtype cannot silently wrap a material ID.
+- The bundled nnU-Net v2 adapter uses `materialization_policy=backend_owned` and creates only its required NIfTI inputs on demand. Content-addressed cache keys include verified source identities and effective export settings; verified repeats can reuse cache content or a hard link. Generic third-party backends retain `generic_preexport` compatibility and declare `required_formats`.
+- Every backend contract includes an input-asset identity summary and conservative disk peak preflight. Insufficient space stops the run before the external process starts. Training still creates required backend worksets and model outputs; do not describe the architecture as zero-copy or zero-duplication.
 - Prediction import writes a review layer plus `raw_ai_prediction_backup`. For part/reslice targets the review layer is `editable_ai_result`; for top-level specimen targets it is pending-review `working_edit` plus a legacy `model_draft` audit record. It must never auto-overwrite `manual_truth`.
 - Successful train runs register a TIF segmentation model record in the project model library. The record stores model manifest, run/result paths, trained samples, label schema IDs, notes, and usability metadata. Deleting a model-library record removes only the registration, not weights or run artifacts.
 
@@ -296,6 +322,7 @@ The TIF workbench supports:
 - Local Axis Reslice in the right-side work area
 - training-material manifest export for Local Axis data capture
 - TIF backend prepare/train/predict controls
+- storage occupancy analysis, auto-rescanning cleanup-plan generation, embedded-Agent handoff, and latest-report opening
 - train-ready sample diagnostics and top-level fallback
 - trained model library selection, notes, model-manifest handoff, and registration-only deletion
 - reviewed-label STL export with separate raw measurement and optional smoothed preview artifacts
@@ -575,7 +602,7 @@ Ask Agent context should stay compact. It should help the agent know what to ins
 
 For `labeling`, source hints must point to `main_window_agent_context.py`, `main_window_annotation.py`, `main_window_blink_context.py`, and `main_window_vlm.py`, not to removed implementations in `AntSleap/main.py`. The first project artifacts are the 2D SQLite manifest/database, active image, annotation provenance, route records, project task context, and recent log excerpt.
 
-For `tif_volume`, the context should expose label schema ID, train-ready part/reslice count, train-ready top-level count, selected training scope, selected/registered model-library state, backend command presence, active backend action, run folder, result JSON, recent log excerpt, selection-loading state, background preview state, pending post-selection render state, and deferred volume-array release state. This lets the Agent distinguish a blocked selection callback from normal background preview preparation or old-memory release, and explain whether the user is blocked by missing labels, missing review acceptance, missing nnU-Net commands, insufficient sample count, or prediction model selection. Full label-ID scans must remain deferred during selection and run only at manual-truth acceptance or strict training-readiness validation.
+For `tif_volume`, the context should expose label schema ID, train-ready part/reslice count, train-ready top-level count, selected training scope, selected/registered model-library state, backend command presence, active backend action, run folder, result JSON, recent log excerpt, selection-loading state, background preview state, pending post-selection render state, deferred volume-array release state, and compact references to the latest storage inventory/cleanup reports. This lets the Agent distinguish a blocked selection callback from normal background preview preparation or old-memory release, explain whether the user is blocked by missing labels, missing review acceptance, missing nnU-Net commands, insufficient sample count, prediction model selection, or disk headroom, and hand off a cleanup plan without putting full project file lists into the prompt. Full label-ID scans must remain deferred during selection and run only at manual-truth acceptance or strict training-readiness validation.
 
 For `pdf_evidence`, Ask Agent routing must preserve the stage 0 discovery/acquisition context. If the user has no PDF folder yet, the Agent should load `taxonomy-paper-finder` from `vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md`, confirm whether the need is daily monitoring, topic search, selected-paper acquisition, or batch harvest, and ask before downloading. If PDFs already exist, it can continue directly to key/model readiness and screening/extraction setup.
 
@@ -592,11 +619,12 @@ python -m unittest tests.test_tif_workbench tests.test_tif_gpu_volume_canvas
 python -m unittest tests.test_gui_smoke
 python scripts\run_validation_suite.py --suite round5_traceability --timeout 900
 python scripts\run_validation_suite.py --suite round5_inference --suite round5_mesh --suite round5_local_axis_risk --timeout 900
+python scripts\run_validation_suite.py --suite v250_release_audit --timeout 300
 python scripts\run_validation_suite.py --timeout 300
 git diff --check
 ```
 
-Current maintained validation inventory: 22 default suites and 1,629 tests. The accepted v2.4.2 development-repository run has 1,606 passes and 23 platform/environment-dependent skips. The fifth-round groups are traceability (275), inference (9), mesh export (41), and Local Axis risk review (27). The existing core inventory still covers TIF core/storage/services/preview/backends/workbench, GUI smoke, UI polish, layout, PDF safety/literature, validation tooling, TIF round-three architecture, TaxaMask round-four architecture, 2D SQLite, Agent, Blink/locator, and generic VLM/STL/export. A separate 12-test CPU-only `round5_ci_smoke` runs on Windows, macOS, and Linux without real weights, network, Blender, GPU, or private research data. The separate 24-test `round5_path_safety` group exercises junction/symlink/reparse rejection; link-creation cases may skip on restricted Windows accounts, while non-Windows CI first proves link support and then requires the real checks.
+The v2.4.10 baseline remains available as `v2410_release_audit`, with the historical `v249_post_release_audit` alias kept for compatibility. TaxaMask v2.5.0 adds the independent, release-only `v250_release_audit` for compact label storage, asset identity, materialization reuse, disk preflight, SQLite v3, cleanup lifecycle, TIF backend integration, Agent context, and the storage-panel controls. It currently loads 90 unique tests, including physical directory-alias normalization for macOS `/var` and `/private/var`, and is intentionally excluded from `DEFAULT_ORDER` so its module coverage does not inflate the normal validation inventory through duplicate counting. A v2.5.0 release requires a fresh successful run on the frozen commit plus Windows, Ubuntu, macOS, Embedded Agent Center, and Paper Distill checks for that same commit. These results establish tested software integrity and workflow continuity, not biological annotation accuracy.
 
 Embedded Ant-Code tool results are capped at 256 KiB before they enter model context. A large `list_files` result must be marked `truncated` while preserving its tool success/failure metadata; it must not force a new first-turn TaxaMask context into immediate compaction. A gateway response with no visible text and no tool call is an output-health failure and receives one concise repair retry instead of being accepted as a placeholder-only answer.
 

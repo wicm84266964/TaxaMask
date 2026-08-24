@@ -259,7 +259,7 @@ class TifModelSettingsDialog(QDialog):
         self.python_edit = QLineEdit(self.backend_config.get("python_executable", "python"))
         form.addRow(QLabel(tr("Python Executable:", lang)), self.python_edit)
 
-        self.export_formats_edit = QLineEdit(self.backend_config.get("export_formats", "ome_tiff,nrrd,mha,nifti"))
+        self.export_formats_edit = QLineEdit(self.backend_config.get("export_formats", ""))
         form.addRow(QLabel(tr("Export Formats:", lang)), self.export_formats_edit)
         supported = QLabel(tr("Supported export formats: {0}", lang).format(", ".join(sorted(SUPPORTED_TIF_EXPORT_FORMATS))))
         supported.setWordWrap(True)
@@ -351,7 +351,7 @@ class TifModelSettingsDialog(QDialog):
         self.backend_id_edit.setText(config.get("backend_id", ""))
         self.display_name_edit.setText(config.get("display_name", ""))
         self.python_edit.setText(config.get("python_executable", "python"))
-        self.export_formats_edit.setText(config.get("export_formats", "ome_tiff,nrrd,mha,nifti"))
+        self.export_formats_edit.setText(config.get("export_formats", ""))
         self.prepare_command_edit.setPlainText(config.get("prepare_dataset_command", ""))
         self.train_command_edit.setPlainText(config.get("train_command", ""))
         self.predict_command_edit.setPlainText(config.get("predict_command", ""))
@@ -373,8 +373,6 @@ class TifModelSettingsDialog(QDialog):
         if not self.backend_id_edit.text().strip():
             errors.append(tr("TIF backend ID is required.", self.lang))
         export_formats = self._export_formats()
-        if not export_formats:
-            errors.append(tr("TIF backend export formats are required.", self.lang))
         unknown_formats = sorted(set(export_formats) - SUPPORTED_TIF_EXPORT_FORMATS)
         if unknown_formats:
             errors.append(tr("Unsupported TIF export formats: {0}", self.lang).format(", ".join(unknown_formats)))

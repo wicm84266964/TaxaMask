@@ -130,6 +130,24 @@ class TifAgentContextBuilderTests(unittest.TestCase):
         missing_from_prompt = [key for key in builder_keys if key not in prompt_keys]
         self.assertEqual(missing_from_prompt, [])
 
+    def test_storage_agent_handoff_fields_are_compacted_and_prompt_mapped(self):
+        storage_keys = {
+            "storage_inventory_report",
+            "storage_cleanup_report",
+            "storage_report_directory",
+            "storage_logical_bytes",
+            "storage_unique_bytes",
+            "storage_candidate_count",
+            "storage_blocked_count",
+            "storage_unknown_protected_count",
+            "storage_expected_release_bytes",
+            "storage_plan_state",
+            "storage_agent_request",
+        }
+
+        self.assertTrue(storage_keys.issubset(set(self._compact_allowed_keys())))
+        self.assertTrue(storage_keys.issubset(self._panel_mapping_keys()))
+
     def test_public_agent_context_entry_delegates_to_builder_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp))

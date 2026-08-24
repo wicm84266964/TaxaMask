@@ -93,6 +93,18 @@ class TifProjectLifecycleController:
             if prompt_unsaved:
                 self._show_background_task_message()
             return False
+        storage_controller = getattr(workbench, "storage_panel_controller", None)
+        if storage_controller is not None and not storage_controller.cancel_and_wait_scan():
+            if prompt_unsaved:
+                QMessageBox.information(
+                    workbench,
+                    tt("Storage management", workbench.lang),
+                    tt(
+                        "The storage operation is still stopping. Wait a moment, then close the project again.",
+                        workbench.lang,
+                    ),
+                )
+            return False
         cancel_slice_render = getattr(workbench, "_cancel_slice_render", None)
         if callable(cancel_slice_render) and not cancel_slice_render(wait=True):
             if prompt_unsaved:
@@ -194,6 +206,7 @@ class TifProjectLifecycleController:
         workbench.part_mask_workflow_controller.reset_state()
         workbench.annotation_workflow_controller.reset_history()
         workbench.selection_workflow_controller.clear_state()
+        workbench.storage_panel_controller.reset_for_project()
         workbench._sync_undo_redo_buttons()
         workbench._update_save_status()
         workbench.canvas.clear()

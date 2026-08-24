@@ -27,6 +27,16 @@ def _now_iso():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _maximum_material_id(material_map):
+    maximum = 0
+    for item in (material_map or {}).get("materials", []) if isinstance(material_map, dict) else []:
+        try:
+            maximum = max(maximum, int(item.get("id", 0)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return maximum
+
+
 def _safe_filename(value):
     text = str(value or "").strip()
     clean = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text)
@@ -628,6 +638,7 @@ def import_tif_slice_series(
             edit_meta = create_empty_label_sidecar_like(
                 image_abs,
                 working_edit_abs,
+                max_label_id=_maximum_material_id(material_map),
                 role="working_edit",
                 write_ome_zarr=False,
             )
@@ -835,7 +846,13 @@ def import_tif_stack(
                 audit_metadata=import_audit,
                 allow_overwrite=False,
             )
-            edit_meta = create_empty_label_sidecar_like(image_abs, working_edit_abs, role="working_edit", write_ome_zarr=False)
+            edit_meta = create_empty_label_sidecar_like(
+                image_abs,
+                working_edit_abs,
+                max_label_id=_maximum_material_id(material_map),
+                role="working_edit",
+                write_ome_zarr=False,
+            )
             project_manager.register_label_volume(
                 specimen_id,
                 "working_edit",

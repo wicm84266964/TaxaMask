@@ -10,6 +10,7 @@ import tifffile
 
 from .safe_io import atomic_write_json
 from .tif_project import TifProjectManager
+from .tif_storage import label_dtype_for_max_id
 from .tif_volume_io import load_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 
 
@@ -213,18 +214,24 @@ def _shape_xyz(array):
     return [int(array.shape[2]), int(array.shape[1]), int(array.shape[0])]
 
 
-def _read_any_volume(path):
+def _read_any_volume(path, mmap_mode=None):
     abs_path = os.path.abspath(str(path))
     if volume_sidecar_exists(abs_path):
-        array = load_volume_sidecar(abs_path)
+        array = load_volume_sidecar(abs_path, mmap_mode=mmap_mode)
         metadata = read_volume_metadata(abs_path)
-        return np.asarray(array), metadata
+        return array, metadata
     if os.path.exists(abs_path):
         lower = abs_path.lower()
         if lower.endswith(".nii") or lower.endswith(".nii.gz"):
             array, metadata = read_nifti_volume_with_metadata(abs_path)
             return np.asarray(array), metadata
-        array = tifffile.imread(abs_path)
+        if mmap_mode:
+            try:
+                array = tifffile.memmap(abs_path, mode=mmap_mode)
+            except (OSError, TypeError, ValueError):
+                array = tifffile.imread(abs_path)
+        else:
+            array = tifffile.imread(abs_path)
         metadata = {
             "shape_zyx": [int(value) for value in np.asarray(array).shape],
             "dtype": str(np.asarray(array).dtype),
@@ -235,6 +242,45 @@ def _read_any_volume(path):
         }
         return np.asarray(array), metadata
     raise FileNotFoundError(abs_path)
+
+
+def _close_memory_mapped_array(array):
+    current = array
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        memory_map = getattr(current, "_mmap", None)
+        if memory_map is not None:
+            memory_map.close()
+            return
+        current = getattr(current, "base", None)
+
+
+def _inspect_any_volume(path):
+    abs_path = os.path.abspath(str(path))
+    if volume_sidecar_exists(abs_path):
+        metadata = read_volume_metadata(abs_path)
+        return [int(value) for value in metadata.get("shape_zyx", [])], metadata
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(abs_path)
+    if abs_path.lower().endswith((".nii", ".nii.gz")):
+        array, metadata = read_nifti_volume_with_metadata(abs_path)
+        return [int(value) for value in array.shape], metadata
+    with tifffile.TiffFile(abs_path) as tif:
+        if not tif.series:
+            raise ValueError(f"tiff_series_missing:{abs_path}")
+        series = tif.series[0]
+        shape = [int(value) for value in series.shape]
+        dtype = str(np.dtype(series.dtype))
+    return shape, {
+        "shape_zyx": shape,
+        "dtype": dtype,
+        "spacing_zyx": [1.0, 1.0, 1.0],
+        "spacing_unit": "unknown",
+        "scale_verified": False,
+        "orientation": "local_axis_reslice",
+        "format": "tiff",
+    }
 
 
 def _little_endian_array(array):
@@ -357,8 +403,16 @@ def write_mha_volume(path, array, metadata=None):
 
 def write_nifti_volume(path, array, metadata=None):
     metadata = _sanitize_exchange_metadata(metadata)
-    volume = _little_endian_array(array)
-    datatype, bitpix = _dtype_to_nifti(volume.dtype)
+    volume = (
+        array
+        if hasattr(array, "shape")
+        and hasattr(array, "dtype")
+        and hasattr(array, "__getitem__")
+        else np.asarray(array)
+    )
+    volume_dtype = np.dtype(volume.dtype)
+    target_dtype = volume_dtype.newbyteorder("<") if volume_dtype.itemsize > 1 else volume_dtype
+    datatype, bitpix = _dtype_to_nifti(target_dtype)
     size_x, size_y, size_z = _shape_xyz(volume)
     spacing_x, spacing_y, spacing_z = _spacing_xyz(metadata)
 
@@ -386,14 +440,31 @@ def write_nifti_volume(path, array, metadata=None):
         header[123] = 0
     header[344:348] = b"n+1\0"
 
-    payload = bytes(header) + b"\0\0\0\0" + volume.tobytes(order="C")
     _ensure_dir(os.path.dirname(os.path.abspath(path)))
+    def write_payload(handle):
+        handle.write(bytes(header))
+        handle.write(b"\0\0\0\0")
+        for z0 in range(0, int(volume.shape[0]), 16):
+            chunk = np.asarray(volume[z0 : z0 + 16])
+            if chunk.dtype != target_dtype:
+                chunk = chunk.astype(target_dtype, copy=False)
+            if not chunk.flags.c_contiguous:
+                chunk = np.ascontiguousarray(chunk)
+            handle.write(chunk.tobytes(order="C"))
+
     if str(path).lower().endswith(".gz"):
-        with gzip.open(path, "wb") as handle:
-            handle.write(payload)
+        with open(path, "wb") as raw_handle:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                compresslevel=6,
+                fileobj=raw_handle,
+                mtime=0,
+            ) as handle:
+                write_payload(handle)
     else:
         with open(path, "wb") as handle:
-            handle.write(payload)
+            write_payload(handle)
     return path
 
 
@@ -740,44 +811,174 @@ def export_tif_part_training_dataset(project_manager, output_dir, part_refs=None
     }
 
 
-def export_nnunet_dataset(project_manager, output_dir, specimen_ids=None, dataset_name="Dataset001_AntSleap", require_train_ready=True):
-    export = export_tif_training_dataset(
+def export_nnunet_dataset(
+    project_manager,
+    output_dir,
+    specimen_ids=None,
+    dataset_name="Dataset001_AntSleap",
+    require_train_ready=True,
+    file_ending=".nii",
+    materialization_cache=None,
+    asset_references=None,
+):
+    return _export_nnunet_dataset_direct(
         project_manager,
         output_dir,
         specimen_ids=specimen_ids,
-        formats=["nifti"],
+        dataset_name=dataset_name,
         require_train_ready=require_train_ready,
+        file_ending=file_ending,
+        materialization_cache=materialization_cache,
+        asset_references=asset_references,
     )
+
+
+def _asset_refs_by_owner(asset_references, owner_key):
+    return [
+        dict(item)
+        for item in (asset_references or [])
+        if isinstance(item, dict) and str(item.get("owner_key") or "") == str(owner_key)
+    ]
+
+
+def _materialize_nnunet_nifti(
+    destination,
+    array,
+    metadata,
+    *,
+    materialization_cache=None,
+    source_assets=None,
+    artifact_kind,
+    effective_config=None,
+):
+    writer = lambda path: write_nifti_volume(path, array, metadata)
+    if materialization_cache is None or not source_assets:
+        writer(destination)
+        return None
+    return materialization_cache.materialize(
+        destination=destination,
+        suffix=".nii.gz" if str(destination).lower().endswith(".nii.gz") else ".nii",
+        source_assets=source_assets,
+        format_id=f"nnunet_nifti_{artifact_kind}",
+        writer=writer,
+        spacing_zyx=(metadata or {}).get("spacing_zyx"),
+        axis_order="zyx",
+        compression={"id": "gzip", "level": 6}
+        if str(destination).lower().endswith(".gz")
+        else {},
+        effective_config={
+            "artifact_kind": str(artifact_kind),
+            "spacing_unit": str((metadata or {}).get("spacing_unit") or "unknown"),
+            "scale_verified": (metadata or {}).get("scale_verified") is True,
+            **dict(effective_config or {}),
+        },
+        generator="tif_export.write_nifti_volume",
+    )
+
+
+def _export_nnunet_dataset_direct(
+    project_manager,
+    output_dir,
+    specimen_ids=None,
+    dataset_name="Dataset001_AntSleap",
+    require_train_ready=True,
+    file_ending=".nii",
+    materialization_cache=None,
+    asset_references=None,
+):
+    if not isinstance(project_manager, TifProjectManager):
+        raise TypeError("project_manager_must_be_tif_project_manager")
+    file_ending = str(file_ending or ".nii").strip()
+    if file_ending not in {".nii", ".nii.gz"}:
+        raise ValueError(f"unsupported_nnunet_file_ending:{file_ending}")
     root = os.path.abspath(str(output_dir))
     images_tr = os.path.join(root, "imagesTr")
     labels_tr = os.path.join(root, "labelsTr")
     _ensure_dir(images_tr)
     _ensure_dir(labels_tr)
     training = []
-    for idx, specimen in enumerate(export["manifest"].get("specimens", []), start=1):
-        case_id = f"antsleap_{idx:04d}_{_safe_id(specimen['specimen_id'])}"
-        image_src = os.path.join(root, specimen["image_exports"]["nifti"])
-        label_src = os.path.join(root, specimen["label_exports"]["nifti"])
-        image_dst = os.path.join(images_tr, f"{case_id}_0000.nii")
-        label_dst = os.path.join(labels_tr, f"{case_id}.nii")
-        shutil.copy2(image_src, image_dst)
-        shutil.copy2(label_src, label_dst)
-        training.append(
-            {
-                "case_id": case_id,
-                "specimen_id": specimen["specimen_id"],
-                "image": os.path.relpath(image_dst, root).replace("\\", "/"),
-                "label": os.path.relpath(label_dst, root).replace("\\", "/"),
-                "spacing_zyx": specimen.get("spacing_zyx", []),
-                "spacing_unit": specimen.get("spacing_unit", "unknown"),
-                "scale_verified": specimen.get("scale_verified") is True,
-            }
-        )
+    materializations = []
+    ids = [str(item) for item in specimen_ids] if specimen_ids else [
+        item.get("specimen_id") for item in project_manager.project_data.get("specimens", [])
+    ]
+    for idx, specimen_id in enumerate(ids, start=1):
+        source_specimen = project_manager.get_specimen(specimen_id, default=None)
+        if source_specimen is None:
+            raise KeyError(f"unknown_specimen_id:{specimen_id}")
+        readiness = project_manager.evaluate_train_ready(specimen_id)
+        if require_train_ready and not readiness["train_ready"]:
+            raise ValueError(
+                f"specimen_not_train_ready:{specimen_id}:{','.join(readiness['reasons'])}"
+            )
+        image_record = source_specimen.get("working_volume") or {}
+        label_record = (source_specimen.get("labels") or {}).get("manual_truth") or {}
+        image_path = project_manager.to_absolute(image_record.get("path", ""))
+        label_path = project_manager.to_absolute(label_record.get("path", ""))
+        if not volume_sidecar_exists(image_path):
+            raise FileNotFoundError(image_path)
+        if not volume_sidecar_exists(label_path):
+            raise FileNotFoundError(label_path)
+        image = load_volume_sidecar(image_path, mmap_mode="r")
+        label = load_volume_sidecar(label_path, mmap_mode="r")
+        try:
+            if list(image.shape) != list(label.shape):
+                raise ValueError(
+                    f"image_label_shape_mismatch:{specimen_id}:{image.shape}:{label.shape}"
+                )
+            image_meta = _sanitize_exchange_metadata(
+                read_volume_metadata(image_path), image_record
+            )
+            label_meta = _sanitize_exchange_metadata(
+                read_volume_metadata(label_path), label_record
+            )
+            case_id = f"antsleap_{idx:04d}_{_safe_id(specimen_id)}"
+            image_dst = os.path.join(images_tr, f"{case_id}_0000{file_ending}")
+            label_dst = os.path.join(labels_tr, f"{case_id}{file_ending}")
+            image_materialization = _materialize_nnunet_nifti(
+                image_dst,
+                image,
+                image_meta,
+                materialization_cache=materialization_cache,
+                source_assets=_asset_refs_by_owner(
+                    asset_references, f"specimen.{specimen_id}.working"
+                ),
+                artifact_kind="image",
+            )
+            label_materialization = _materialize_nnunet_nifti(
+                label_dst,
+                label,
+                label_meta,
+                materialization_cache=materialization_cache,
+                source_assets=_asset_refs_by_owner(
+                    asset_references, f"specimen.{specimen_id}.manual_truth"
+                ),
+                artifact_kind="label",
+                effective_config={"label_id_mode": "identity"},
+            )
+            materializations.extend(
+                item
+                for item in (image_materialization, label_materialization)
+                if item is not None
+            )
+            training.append(
+                {
+                    "case_id": case_id,
+                    "specimen_id": specimen_id,
+                    "image": os.path.relpath(image_dst, root).replace("\\", "/"),
+                    "label": os.path.relpath(label_dst, root).replace("\\", "/"),
+                    "spacing_zyx": image_meta.get("spacing_zyx", []),
+                    "spacing_unit": image_meta.get("spacing_unit", "unknown"),
+                    "scale_verified": image_meta.get("scale_verified") is True,
+                }
+            )
+        finally:
+            for volume in (image, label):
+                _close_memory_mapped_array(volume)
     dataset_json = {
         "channel_names": {"0": "volume"},
         "labels": {"background": 0, "foreground": 1},
         "numTraining": len(training),
-        "file_ending": ".nii",
+        "file_ending": file_ending,
         "name": dataset_name,
         "description": "AntSleap exported nnU-Net style dataset. Material IDs remain in label volumes; update labels mapping for a specific backend when needed.",
     }
@@ -786,8 +987,9 @@ def export_nnunet_dataset(project_manager, output_dir, specimen_ids=None, datase
         "schema_version": NNUNET_DATASET_SCHEMA_VERSION,
         "created_at": _now_iso(),
         "dataset_name": dataset_name,
-        "source_manifest": os.path.relpath(export["manifest_path"], root).replace("\\", "/"),
+        "source_manifest": "",
         "training": training,
+        "materializations": materializations,
         "notes": [
             "NIfTI files are written without requiring nibabel; verify orientation expectations in the target nnU-Net environment.",
             "AntSleap preserves material IDs. Backend-specific class remapping should be explicit and audited.",
@@ -795,7 +997,12 @@ def export_nnunet_dataset(project_manager, output_dir, specimen_ids=None, datase
     }
     manifest_path = os.path.join(root, "nnunet_manifest.json")
     _write_json(manifest_path, manifest)
-    return {"manifest": manifest, "manifest_path": manifest_path, "exported_count": len(training)}
+    return {
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "exported_count": len(training),
+        "materializations": materializations,
+    }
 
 
 def _schema_labels_for_part_export(project_manager, samples):
@@ -936,6 +1143,132 @@ def remap_label_ids(array, mapping, dtype=None):
     return output
 
 
+class _ChunkRemappedLabelVolume:
+    def __init__(self, source, mapping, dtype):
+        self.source = source
+        self.mapping = {
+            int(source_id): int(target_id)
+            for source_id, target_id in (mapping or {}).items()
+        }
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(value) for value in source.shape)
+
+    def __getitem__(self, key):
+        source_chunk = np.asarray(self.source[key])
+        output = np.zeros(source_chunk.shape, dtype=self.dtype)
+        for source_id, target_id in self.mapping.items():
+            if source_id == 0 and target_id == 0:
+                continue
+            output[source_chunk == source_id] = target_id
+        return output
+
+
+def _collect_part_nnunet_samples(
+    project_manager,
+    part_refs=None,
+    *,
+    require_train_ready=True,
+):
+    refs = []
+    if part_refs is not None:
+        for ref in part_refs:
+            if isinstance(ref, dict):
+                refs.append(
+                    {
+                        "specimen_id": str(ref.get("specimen_id") or ""),
+                        "part_id": str(ref.get("part_id") or ""),
+                        "reslice_id": str(ref.get("reslice_id") or ""),
+                    }
+                )
+    else:
+        for item in project_manager.list_train_ready_parts():
+            refs.append(
+                {
+                    "specimen_id": item["readiness"]["specimen_id"],
+                    "part_id": item["readiness"]["part_id"],
+                    "reslice_id": item["readiness"].get("reslice_id", ""),
+                }
+            )
+    if not refs:
+        raise ValueError("no_part_training_samples")
+
+    samples = []
+    for ref in refs:
+        specimen_id = ref["specimen_id"]
+        part_id = ref["part_id"]
+        readiness = project_manager.evaluate_part_train_ready(
+            specimen_id, part_id, ref.get("reslice_id", "")
+        )
+        if require_train_ready and not readiness["train_ready"]:
+            raise ValueError(
+                f"part_not_train_ready:{specimen_id}:{part_id}:"
+                f"{','.join(readiness['reasons'])}"
+            )
+        specimen = project_manager.get_specimen(specimen_id)
+        part = project_manager.get_part(specimen_id, part_id)
+        reslice_id = str(readiness.get("reslice_id") or "")
+        reslice = project_manager.get_part_reslice(
+            specimen_id, part_id, reslice_id, default=None
+        )
+        if reslice is None:
+            raise ValueError(
+                f"part_reslice_missing:{specimen_id}:{part_id}:{reslice_id}"
+            )
+        image_path = project_manager.to_absolute(reslice.get("image_path", ""))
+        label_record = readiness.get("label_record") or project_manager.part_label_record(
+            specimen_id,
+            part_id,
+            "manual_truth",
+            reslice_id=reslice_id,
+        )
+        label_path = project_manager.to_absolute(label_record.get("path", ""))
+        image_shape, image_meta = _inspect_any_volume(image_path)
+        label_shape, label_meta = _inspect_any_volume(label_path)
+        if image_shape != label_shape:
+            raise ValueError(
+                f"part_image_label_shape_mismatch:{specimen_id}:{part_id}:"
+                f"{image_shape}:{label_shape}"
+            )
+        reslice_audit = {}
+        metadata_path = project_manager.to_absolute(reslice.get("metadata_path", ""))
+        if metadata_path and os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    reslice_audit = loaded
+            except (OSError, TypeError, ValueError):
+                reslice_audit = {}
+        image_meta = _reslice_exchange_metadata(reslice, image_meta, reslice_audit)
+        label_meta = _sanitize_exchange_metadata(label_meta, label_record)
+        training = part.get("training") or {}
+        sample_id = _safe_id(f"{specimen_id}_{part_id}_{reslice_id}")
+        owner_prefix = f"reslice.{specimen_id}.{part_id}.{reslice_id}"
+        samples.append(
+            {
+                "sample_id": sample_id,
+                "specimen_id": specimen_id,
+                "specimen_display_name": specimen.get("display_name", specimen_id),
+                "part_id": part_id,
+                "user_defined_part_name": training.get("user_defined_part_name")
+                or part.get("display_name")
+                or part_id,
+                "reslice_id": reslice_id,
+                "label_schema_id": readiness.get("label_schema_id", ""),
+                "shape_zyx": image_shape,
+                **_manifest_scale_metadata(image_meta),
+                "label_scale": _manifest_scale_metadata(label_meta),
+                "_image_path": image_path,
+                "_label_path": label_path,
+                "_image_meta": image_meta,
+                "_label_meta": label_meta,
+                "_image_owner_key": f"{owner_prefix}.image",
+                "_label_owner_key": f"{owner_prefix}.manual_truth",
+            }
+        )
+    return samples
+
+
 def export_tif_part_nnunet_dataset(
     project_manager,
     output_dir,
@@ -946,17 +1279,17 @@ def export_tif_part_nnunet_dataset(
     label_id_mode="preserve",
     split_mode="all_train",
     include_images_ts=False,
+    materialization_cache=None,
+    asset_references=None,
 ):
     preflight_schema_ids, preflight_labels = _preflight_part_nnunet_labels(
         project_manager,
         part_refs=part_refs,
         require_train_ready=require_train_ready,
     )
-    export = export_tif_part_training_dataset(
+    samples = _collect_part_nnunet_samples(
         project_manager,
-        output_dir,
         part_refs=part_refs,
-        formats=["nifti"],
         require_train_ready=require_train_ready,
     )
     root = os.path.abspath(str(output_dir))
@@ -965,7 +1298,6 @@ def export_tif_part_nnunet_dataset(
     _ensure_dir(images_tr)
     _ensure_dir(labels_tr)
 
-    samples = list(export["manifest"].get("samples", []) or [])
     schema_ids, labels = _schema_labels_for_part_export(project_manager, samples)
     if schema_ids != preflight_schema_ids or labels != preflight_labels:
         raise ValueError("part_nnunet_label_schema_changed_during_export")
@@ -1002,35 +1334,87 @@ def export_tif_part_nnunet_dataset(
             compact_mapping[name] = int(target_id)
         labels_mapping = compact_mapping
     training = []
+    materializations = []
     for idx, sample in enumerate(samples, start=1):
         case_id = f"taxamask_part_{idx:04d}_{_safe_id(sample.get('specimen_id'))}_{_safe_id(sample.get('part_id'))}"
-        image_src = os.path.join(root, sample["image_exports"]["nifti"])
-        label_src = os.path.join(root, sample["label_exports"]["nifti"])
         image_dst = os.path.join(images_tr, f"{case_id}_0000{file_ending}")
         label_dst = os.path.join(labels_tr, f"{case_id}{file_ending}")
-        image, image_meta = _read_any_volume(image_src)
-        label, label_meta = _read_any_volume(label_src)
-        write_nifti_volume(image_dst, image, image_meta)
-        if label_id_mode == "compact":
-            label = remap_label_ids(label, source_to_nnunet, dtype=np.uint16)
-        write_nifti_volume(label_dst, label, label_meta)
-        training.append(
-            {
-                "case_id": case_id,
-                "sample_id": sample.get("sample_id", ""),
-                "specimen_id": sample.get("specimen_id", ""),
-                "part_id": sample.get("part_id", ""),
-                "reslice_id": sample.get("reslice_id", ""),
-                "user_defined_part_name": sample.get("user_defined_part_name", ""),
-                "label_schema_id": sample.get("label_schema_id", ""),
-                "image": os.path.relpath(image_dst, root).replace("\\", "/"),
-                "label": os.path.relpath(label_dst, root).replace("\\", "/"),
-                "shape_zyx": sample.get("shape_zyx", []),
-                "spacing_zyx": sample.get("spacing_zyx", []),
-                "spacing_unit": sample.get("spacing_unit", "unknown"),
-                "scale_verified": sample.get("scale_verified") is True,
-            }
+        image, _loaded_image_meta = _read_any_volume(
+            sample["_image_path"], mmap_mode="r"
         )
+        source_label, _loaded_label_meta = _read_any_volume(
+            sample["_label_path"], mmap_mode="r"
+        )
+        image_meta = sample["_image_meta"]
+        label_meta = sample["_label_meta"]
+        try:
+            if list(image.shape) != sample.get("shape_zyx") or list(
+                source_label.shape
+            ) != sample.get("shape_zyx"):
+                raise ValueError(
+                    f"part_volume_changed_during_export:{sample.get('sample_id', '')}"
+                )
+            image_materialization = _materialize_nnunet_nifti(
+                image_dst,
+                image,
+                image_meta,
+                materialization_cache=materialization_cache,
+                source_assets=_asset_refs_by_owner(
+                    asset_references, sample["_image_owner_key"]
+                ),
+                artifact_kind="image",
+                effective_config={"input_scope": "part_reslice"},
+            )
+            label = source_label
+            if label_id_mode == "compact":
+                label = _ChunkRemappedLabelVolume(
+                    source_label,
+                    source_to_nnunet,
+                    label_dtype_for_max_id(max(source_to_nnunet.values())),
+                )
+            label_materialization = _materialize_nnunet_nifti(
+                label_dst,
+                label,
+                label_meta,
+                materialization_cache=materialization_cache,
+                source_assets=_asset_refs_by_owner(
+                    asset_references, sample["_label_owner_key"]
+                ),
+                artifact_kind="label",
+                effective_config={
+                    "input_scope": "part_reslice",
+                    "label_id_mode": label_id_mode,
+                    "source_to_nnunet": {
+                        str(key): int(value)
+                        for key, value in sorted(source_to_nnunet.items())
+                    },
+                },
+            )
+            materializations.extend(
+                item
+                for item in (image_materialization, label_materialization)
+                if item is not None
+            )
+            training.append(
+                {
+                    "case_id": case_id,
+                    "sample_id": sample.get("sample_id", ""),
+                    "specimen_id": sample.get("specimen_id", ""),
+                    "part_id": sample.get("part_id", ""),
+                    "reslice_id": sample.get("reslice_id", ""),
+                    "user_defined_part_name": sample.get("user_defined_part_name", ""),
+                    "label_schema_id": sample.get("label_schema_id", ""),
+                    "image": os.path.relpath(image_dst, root).replace("\\", "/"),
+                    "label": os.path.relpath(label_dst, root).replace("\\", "/"),
+                    "shape_zyx": sample.get("shape_zyx", []),
+                    "spacing_zyx": sample.get("spacing_zyx", []),
+                    "spacing_unit": sample.get("spacing_unit", "unknown"),
+                    "scale_verified": sample.get("scale_verified") is True,
+                }
+            )
+        finally:
+            _close_memory_mapped_array(image)
+            _close_memory_mapped_array(source_label)
 
     if include_images_ts:
         images_ts = os.path.join(root, "imagesTs")
@@ -1060,7 +1444,7 @@ def export_tif_part_nnunet_dataset(
         "created_at": _now_iso(),
         "dataset_name": dataset_name,
         "dataset_json": os.path.relpath(dataset_json_path, root).replace("\\", "/"),
-        "source_manifest": os.path.relpath(export["manifest_path"], root).replace("\\", "/"),
+        "source_manifest": "",
         "splits_final": os.path.relpath(splits_path, root).replace("\\", "/"),
         "file_ending": file_ending,
         "label_id_mode": label_id_mode,
@@ -1071,6 +1455,7 @@ def export_tif_part_nnunet_dataset(
         "label_schema_ids": schema_ids,
         "labels": labels,
         "training": training,
+        "materializations": materializations,
         "safety": {
             "input_scope": "part_reslice",
             "label_role": "manual_truth",
@@ -1084,7 +1469,12 @@ def export_tif_part_nnunet_dataset(
     }
     manifest_path = os.path.join(root, "nnunet_part_manifest.json")
     _write_json(manifest_path, manifest)
-    return {"manifest": manifest, "manifest_path": manifest_path, "exported_count": len(training)}
+    return {
+        "manifest": manifest,
+        "manifest_path": manifest_path,
+        "exported_count": len(training),
+        "materializations": materializations,
+    }
 
 
 def export_monai_dataset(project_manager, output_dir, specimen_ids=None, require_train_ready=True):

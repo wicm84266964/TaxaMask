@@ -12,12 +12,14 @@ def build_task_pages(lang, translate):
     annotation_task_page, annotation_task_layout = make_task_page("tifAnnotationTaskPage")
     training_task_page, training_task_layout = make_task_page("tifTrainingTaskPage")
     result_compare_page, result_compare_layout = make_task_page("tifResultCompareTaskPage")
+    storage_task_page, storage_task_layout = make_task_page("tifStorageTaskPage")
 
     training_mode_tabs = QTabWidget()
     training_mode_tabs.setObjectName("tifTrainingModeTabs")
     training_mode_tabs.addTab(annotation_task_page, translate("Label review", lang))
     training_mode_tabs.addTab(training_task_page, translate("Train / predict", lang))
     training_mode_tabs.addTab(result_compare_page, translate("Result comparison", lang))
+    training_mode_tabs.addTab(storage_task_page, translate("Storage", lang))
 
     task_tabs.addTab(display_task_page, translate("Import & Preview", lang))
     task_tabs.addTab(part_task_page, translate("Part Extraction", lang))
@@ -36,4 +38,6 @@ def build_task_pages(lang, translate):
         "training_task_layout": training_task_layout,
         "result_compare_page": result_compare_page,
         "result_compare_layout": result_compare_layout,
+        "storage_task_page": storage_task_page,
+        "storage_task_layout": storage_task_layout,
     }

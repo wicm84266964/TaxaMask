@@ -71,6 +71,7 @@ try:
     from AntSleap.core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from AntSleap.core.tif_project import TifProjectManager
     from AntSleap.core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from AntSleap.core.tif_storage import label_dtype_for_max_id
     from AntSleap.core.tif_truth_policy import can_use_role_for_training
     from AntSleap.core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from AntSleap.core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
@@ -180,6 +181,7 @@ except ModuleNotFoundError as exc:
     from core.tif_prediction_import import default_prediction_id_for_tif, import_external_prediction_tif
     from core.tif_project import TifProjectManager
     from core.tif_stack_import import import_tif_stack, materialize_registered_tif_stack, register_tif_stack_metadata
+    from core.tif_storage import label_dtype_for_max_id
     from core.tif_truth_policy import can_use_role_for_training
     from core.tif_roi_preview import DEFAULT_ROI_TEXTURE_BUDGET_BYTES, HIGH_ROI_TEXTURE_BUDGET_BYTES, build_roi_mask_preview, build_roi_volume_preview, normalize_roi_bbox_zyx, roi_shape_zyx
     from core.tif_volume_io import create_empty_label_sidecar_like, create_volume_sidecar_memmap, flush_volume_array, load_volume_sidecar, volume_sidecar_exists
@@ -585,6 +587,10 @@ class TifWorkbenchWidget(QWidget):
             self.btn_move_part_user_tag_up,
             self.btn_move_part_user_tag_down,
             self.btn_apply_part_user_tags,
+            self.btn_analyze_storage,
+            self.btn_generate_cleanup_plan,
+            self.btn_storage_agent,
+            self.btn_open_storage_report,
         ]
         for button in primary_buttons:
             self._style_button(button, "primary", full_width=True)
@@ -857,7 +863,9 @@ class TifWorkbenchWidget(QWidget):
             for index, label in enumerate(("Import & Preview", "Part Extraction", "Annotation / training")):
                 self.task_tabs.setTabText(index, tt(label, self.lang))
         if hasattr(self, "training_mode_tabs"):
-            for index, label in enumerate(("Label review", "Train / predict", "Result comparison")):
+            for index, label in enumerate(
+                ("Label review", "Train / predict", "Result comparison", "Storage")
+            ):
                 self.training_mode_tabs.setTabText(index, tt(label, self.lang))
         if self.image_volume is None:
             specimen = self.project.get_specimen(self.current_specimen_id, default=None) if self.current_specimen_id else None
@@ -1055,6 +1063,9 @@ class TifWorkbenchWidget(QWidget):
         self.backend_display_label.setText(tt("Display name", self.lang))
         self.backend_python_label.setText(tt("Python", self.lang))
         self.backend_formats_label.setText(tt("Export formats", self.lang))
+        self.backend_formats_edit.setPlaceholderText(
+            tt("leave empty for backend-required format only", self.lang)
+        )
         self.backend_prepare_label.setText(tt("Prepare command", self.lang))
         self.backend_train_label.setText(tt("Train command", self.lang))
         self.backend_predict_label.setText(tt("Predict command", self.lang))
@@ -1100,6 +1111,8 @@ class TifWorkbenchWidget(QWidget):
         self.btn_open_result_comparison_target.setText(tt("Open selected in 3D", self.lang))
         self.btn_show_result_region_in_3d.setText(tt("Highlight selected region", self.lang))
         self.result_review_controller.refresh_result_comparison_if_visible()
+        if hasattr(self, "storage_panel_controller"):
+            self.storage_panel_controller.apply_language()
         self.btn_start_center.setText(tt("Start Center", self.lang))
         self.btn_ask_agent.setText(tt("Ask Agent", self.lang))
         self.material_table.setHorizontalHeaderLabels(
@@ -1259,7 +1272,7 @@ class TifWorkbenchWidget(QWidget):
         self.backend_id_edit.setText(config.get("backend_id", ""))
         self.backend_display_edit.setText(config.get("display_name", ""))
         self.backend_python_edit.setText(config.get("python_executable", "python"))
-        self.backend_formats_edit.setText(config.get("export_formats", "ome_tiff,nrrd,mha,nifti"))
+        self.backend_formats_edit.setText(config.get("export_formats", ""))
         self.backend_prepare_edit.setText(config.get("prepare_dataset_command", ""))
         self.backend_train_edit.setText(config.get("train_command", ""))
         self.backend_predict_edit.setText(config.get("predict_command", ""))
@@ -3261,7 +3274,7 @@ class TifWorkbenchWidget(QWidget):
         if not local_frames:
             return None
         local_frames.sort(key=lambda item: item[0])
-        mask = np.zeros(shape, dtype=np.uint16)
+        mask = np.zeros(shape, dtype=np.uint8)
 
         def fill_slice(slice_index, rect_values):
             x0, y0, x1, y1 = [int(value) for value in rect_values]
@@ -3663,6 +3676,7 @@ class TifWorkbenchWidget(QWidget):
             self.annotation_task_page,
             self.training_task_page,
             self.result_compare_page,
+            self.storage_task_page,
             ),
         )
 
@@ -3686,6 +3700,7 @@ class TifWorkbenchWidget(QWidget):
         if not self.close_project(prompt_unsaved=False):
             return
         self.project = project_manager
+        self.storage_panel_controller.reset_for_project()
         self.refresh_project()
 
     def set_config_manager(self, config_manager):
@@ -4240,6 +4255,28 @@ class TifWorkbenchWidget(QWidget):
         if edit_path and volume_sidecar_exists(edit_path):
             self.edit_volume, _load_issue = self.preview_controller.safe_load_volume_sidecar(edit_path, mmap_mode="c", operation="load_working_edit_volume")
 
+    def _current_label_max_id(self):
+        label_ids = [int(self.current_material_id or 0)]
+        for item in (self.material_map or {}).get("materials", []) or []:
+            try:
+                label_ids.append(int(item.get("id", 0)))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        if self.current_volume_scope == "part":
+            part = self.project.get_part(
+                self.current_specimen_id,
+                self.current_part_id,
+                default={},
+            ) or {}
+            schema_id = str((part.get("training") or {}).get("label_schema_id") or "")
+            schema = self.project.get_label_schema(schema_id, default={}) if schema_id else {}
+            for item in (schema.get("labels") or []):
+                try:
+                    label_ids.append(int(item.get("id", 0)))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        return max(label_ids) if label_ids else 0
+
     def _ensure_working_edit_volume(self):
         if not self.coordinator.guard_backend_write_lock():
             return False
@@ -4278,6 +4315,7 @@ class TifWorkbenchWidget(QWidget):
                 metadata = create_empty_label_sidecar_like(
                     image_path,
                     edit_abs,
+                    max_label_id=self._current_label_max_id(),
                     role="editable_ai_result",
                     write_ome_zarr=False,
                     source_record=part.get("image") or {},
@@ -4325,7 +4363,7 @@ class TifWorkbenchWidget(QWidget):
                 metadata, array = create_volume_sidecar_memmap(
                     edit_abs,
                     image_array.shape,
-                    "uint16",
+                    label_dtype_for_max_id(self._current_label_max_id()),
                     role="editable_ai_result",
                     spacing_zyx=spacing_zyx,
                     spacing_unit=spacing_unit,
@@ -4395,6 +4433,7 @@ class TifWorkbenchWidget(QWidget):
         metadata = create_empty_label_sidecar_like(
             image_path,
             edit_abs,
+            max_label_id=self._current_label_max_id(),
             role="working_edit",
             write_ome_zarr=False,
             source_record=specimen.get("working_volume") or {},
@@ -5368,14 +5407,14 @@ class TifWorkbenchWidget(QWidget):
                     self.project,
                     output_dir,
                     part_refs=part_refs,
-                    formats=formats or ["ome_tiff", "nrrd", "mha", "nifti"],
+                    formats=formats or ["nifti"],
                     require_train_ready=True,
                 )
             else:
                 result = export_tif_training_dataset(
                     self.project,
                     output_dir,
-                    formats=formats or ["ome_tiff", "nrrd", "mha", "nifti"],
+                    formats=formats or ["nifti"],
                     require_train_ready=True,
                 )
         except Exception as exc:

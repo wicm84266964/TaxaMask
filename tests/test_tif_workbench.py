@@ -3834,7 +3834,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertFalse(widget.annotation_section.isHidden())
             self.assertTrue(widget.volume_render_section.isHidden())
             self.assertEqual(widget.backend_id_edit.objectName(), "tifBackendIdEdit")
-            self.assertEqual(widget.backend_formats_edit.text(), "ome_tiff,nrrd,mha,nifti")
+            self.assertEqual(widget.backend_formats_edit.text(), "")
             self.assertEqual(widget.training_status_label.objectName(), "tifTrainingStatusText")
             self.assertEqual(widget.operation_status_label.objectName(), "tifOperationStatusText")
             self.assertIsNotNone(widget.findChild(QWidget, "tifOperationStatusSection"))
@@ -3846,10 +3846,11 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertEqual(widget.task_tabs.tabText(0), "Import & Preview")
             self.assertEqual(widget.task_tabs.tabText(1), "Part Extraction")
             self.assertEqual(widget.task_tabs.tabText(2), "Annotation / training")
-            self.assertEqual(widget.training_mode_tabs.count(), 3)
+            self.assertEqual(widget.training_mode_tabs.count(), 4)
             self.assertEqual(widget.training_mode_tabs.tabText(0), "Label review")
             self.assertEqual(widget.training_mode_tabs.tabText(1), "Train / predict")
             self.assertEqual(widget.training_mode_tabs.tabText(2), "Result comparison")
+            self.assertEqual(widget.training_mode_tabs.tabText(3), "Storage")
             self.assertLess(
                 widget.annotation_task_layout.indexOf(widget.label_schema_section),
                 widget.annotation_task_layout.indexOf(widget.material_section),

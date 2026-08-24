@@ -27,6 +27,7 @@ SUITES: dict[str, list[str]] = {
     ],
     "tif_storage_safety": [
         "tests.test_safe_io",
+        "tests.test_tif_storage",
         "tests.test_tif_json_to_sqlite_migration",
         "tests.test_tif_sqlite_loader",
         "tests.test_tif_sqlite_schema",
@@ -621,6 +622,20 @@ SUITES: dict[str, list[str]] = {
 # Keep the historical name as a compatibility alias for the current release audit.
 SUITES["v249_post_release_audit"] = list(SUITES["v2410_release_audit"])
 
+# Release-only v2.5.0 storage and TIF workflow freeze. Keep this outside the
+# default order because these modules are already covered by maintained suites.
+SUITES["v250_release_audit"] = [
+    "tests.test_tif_storage",
+    "tests.test_tif_agent_context",
+    "tests.test_agent_context_routes",
+    "tests.test_tif_sqlite_schema",
+    "tests.test_tif_export",
+    "tests.test_tif_nnunet_v2_backend",
+    "tests.test_tif_workbench_shell",
+    "tests.test_tif_workbench_layout",
+    "tests.test_tif_workbench.TifWorkbenchTests.test_training_handoff_controls_are_visible",
+]
+
 DEFAULT_ORDER = [
     name
     for name in SUITES
@@ -628,6 +643,7 @@ DEFAULT_ORDER = [
         "validation_chunk_sample",
         "v2410_release_audit",
         "v249_post_release_audit",
+        "v250_release_audit",
         "round5_ci_smoke",
         "round5_path_safety",
     }
@@ -638,6 +654,7 @@ SUITE_DEFAULT_CHUNK_SIZES = {
     "ui_polish": 5,
     "v2410_release_audit": 25,
     "v249_post_release_audit": 25,
+    "v250_release_audit": 25,
 }
 
 

@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
         "train_command": "{python} -m AntSleap.tools.tif_nnunet_v2_backend --contract {contract_json}",
         "predict_command": "{python} -m AntSleap.tools.tif_nnunet_v2_backend --contract {contract_json}",
         "model_manifest": "",
-        "export_formats": "ome_tiff,nrrd,mha,nifti",
+        "export_formats": "",
     },
     "tif_local_axis_backend": {
         "backend_id": "external_local_axis",

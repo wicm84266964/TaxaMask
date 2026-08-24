@@ -293,7 +293,10 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
 
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(exit_code, 0, report)
-            self.assertEqual(observed_base_sam_paths, [str(base_sam_path.resolve())])
+            self.assertEqual(
+                [Path(path).resolve() for path in observed_base_sam_paths],
+                [base_sam_path.resolve()],
+            )
             self.assertEqual(
                 observed_base_sam_payloads,
                 [b"registered base sam fixture"],
@@ -407,9 +410,10 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
     def test_headless_training_uses_registered_truth_not_mutated_live_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            manager, image_paths = self._make_registered_project(root, 2)
+            manager, _image_paths = self._make_registered_project(root, 2)
             original_polygon = [[4, 4], [40, 4], [20, 36]]
-            manager.project_data["labels"][image_paths[0]]["parts"]["Head"] = [
+            registered_image_path = manager.project_data["images"][0]
+            manager.project_data["labels"][registered_image_path]["parts"]["Head"] = [
                 [1, 1],
                 [2, 1],
                 [1, 2],

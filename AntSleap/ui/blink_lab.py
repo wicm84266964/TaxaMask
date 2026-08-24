@@ -30,6 +30,7 @@ try:
         sanitize_blink_training_strategy,
     )
     from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
+    from AntSleap.core.path_identity import canonicalize_posix_root_alias
     from AntSleap.core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from AntSleap.core.training_weight_publisher import (
         TRAINING_BUNDLE_DIRECTORY,
@@ -67,6 +68,7 @@ except ImportError:
         sanitize_blink_training_strategy,
     )
     from core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
+    from core.path_identity import canonicalize_posix_root_alias
     from core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from core.training_weight_publisher import (
         TRAINING_BUNDLE_DIRECTORY,
@@ -2016,7 +2018,7 @@ class BlinkLabWidget(QWidget):
     def _is_safe_existing_directory_chain(self, directory_path):
         if not isinstance(directory_path, str) or not directory_path:
             return False
-        current = os.path.abspath(directory_path)
+        current = canonicalize_posix_root_alias(directory_path)
         chain = []
         while True:
             chain.append(current)

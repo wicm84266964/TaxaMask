@@ -28,6 +28,7 @@ from AntSleap.core.integrity_manifest_service import (
     require_verified_training_inputs,
     validate_relative_path,
 )
+from AntSleap.core.path_identity import canonicalize_posix_root_alias
 from AntSleap.core.safe_io import atomic_write_json
 
 
@@ -408,7 +409,7 @@ def _is_reparse_point(stat_result: os.stat_result) -> bool:
 
 
 def _absolute_path_chain(path):
-    absolute = os.path.abspath(os.fspath(path))
+    absolute = canonicalize_posix_root_alias(path)
     drive, tail = os.path.splitdrive(absolute)
     anchor = f"{drive}{os.sep}" if drive else os.sep
     current = anchor
@@ -445,7 +446,7 @@ def _require_safe_filesystem_entry(path, *, expected_kind=None):
 def _resolve_existing_path_after_safety(path, *, expected_kind=None):
     """Canonicalize an existing path only after rejecting redirected components."""
 
-    absolute = os.path.abspath(os.fspath(path))
+    absolute = canonicalize_posix_root_alias(path)
     _require_safe_filesystem_entry(absolute, expected_kind=expected_kind)
     resolved = os.path.abspath(os.path.realpath(absolute))
     _require_safe_filesystem_entry(resolved, expected_kind=expected_kind)
@@ -453,7 +454,7 @@ def _resolve_existing_path_after_safety(path, *, expected_kind=None):
 
 
 def _ensure_safe_directory(path):
-    absolute = os.path.abspath(os.fspath(path))
+    absolute = canonicalize_posix_root_alias(path)
     for current in _absolute_path_chain(absolute):
         if not os.path.lexists(current):
             try:

@@ -1,4 +1,25 @@
 import os
+import stat
+
+
+def canonicalize_posix_root_alias(path):
+    """Resolve only a POSIX filesystem-root alias such as macOS ``/var``."""
+    absolute = os.path.abspath(os.fspath(path))
+    if os.name == "nt":
+        return absolute
+    _drive, tail = os.path.splitdrive(absolute)
+    parts = [item for item in tail.split(os.sep) if item]
+    if not parts:
+        return absolute
+    root_entry = os.path.join(os.sep, parts[0])
+    try:
+        result = os.lstat(root_entry)
+    except OSError:
+        return absolute
+    if not stat.S_ISLNK(result.st_mode):
+        return absolute
+    resolved_root_entry = os.path.abspath(os.path.realpath(root_entry))
+    return os.path.join(resolved_root_entry, *parts[1:])
 
 
 def canonical_path(path):

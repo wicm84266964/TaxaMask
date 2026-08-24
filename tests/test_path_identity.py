@@ -1,14 +1,41 @@
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from AntSleap.core.path_identity import canonical_path, path_identity, paths_overlap, paths_refer_to_same_file
+from AntSleap.core.path_identity import (
+    canonical_path,
+    canonicalize_posix_root_alias,
+    path_identity,
+    paths_overlap,
+    paths_refer_to_same_file,
+)
 from AntSleap.core.project import ProjectManager
 
 
 class PathIdentityTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX root alias test")
+    def test_platform_root_alias_is_canonicalized_without_rewriting_children(self):
+        root_alias = next(
+            (
+                candidate
+                for candidate in ("/var", "/tmp", "/bin", "/sbin", "/lib")
+                if os.path.lexists(candidate)
+                and stat.S_ISLNK(os.lstat(candidate).st_mode)
+            ),
+            None,
+        )
+        if root_alias is None:
+            self.skipTest("no platform root alias is available")
+
+        supplied = os.path.join(root_alias, "folders", "taxamask")
+        self.assertEqual(
+            canonicalize_posix_root_alias(supplied),
+            os.path.join(os.path.realpath(root_alias), "folders", "taxamask"),
+        )
+
     def test_relative_and_absolute_paths_share_an_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

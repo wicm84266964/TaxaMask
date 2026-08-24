@@ -29,6 +29,7 @@ try:
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from AntSleap.core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from AntSleap.core.model_profiles import CHILD_BACKEND_VIT_B
+    from AntSleap.core.path_identity import canonicalize_posix_root_alias
     from AntSleap.core.training_weight_publisher import TRAINING_BUNDLE_DIRECTORY
     from AntSleap.ui.main_window_dialog_support import (
         _route_backend_from_child_backend,
@@ -59,6 +60,7 @@ except ImportError:
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from core.model_profiles import CHILD_BACKEND_VIT_B
+    from core.path_identity import canonicalize_posix_root_alias
     from core.training_weight_publisher import TRAINING_BUNDLE_DIRECTORY
     from ui.main_window_dialog_support import (
         _route_backend_from_child_backend,
@@ -259,7 +261,7 @@ class RouteManagementPanel(QWidget):
         )
 
     def _is_safe_existing_directory_chain(self, directory_path):
-        current = os.path.abspath(str(directory_path or ""))
+        current = canonicalize_posix_root_alias(str(directory_path or ""))
         if not current:
             return False
         chain = []

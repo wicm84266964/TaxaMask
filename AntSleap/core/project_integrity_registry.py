@@ -26,6 +26,7 @@ from .file_integrity import (
     TREE_ALGORITHM,
     compute_fingerprint,
 )
+from .path_identity import canonicalize_posix_root_alias
 from .project_traceability import validate_traceability_id
 from .sqlite_storage import connect_sqlite_database, connect_sqlite_database_readonly
 
@@ -1760,7 +1761,7 @@ def _require_safe_entry(path, *, expected_kind=None):
 
 
 def _absolute_chain(path):
-    absolute = os.path.abspath(os.fspath(path))
+    absolute = canonicalize_posix_root_alias(path)
     drive, tail = os.path.splitdrive(absolute)
     anchor = f"{drive}{os.sep}" if drive else os.sep
     relative = tail.lstrip("\\/")

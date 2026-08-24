@@ -1974,7 +1974,9 @@ class TifProjectTests(unittest.TestCase):
             physical_root = fixture_root / "physical"
             physical_root.mkdir()
             alias_root = fixture_root / "trusted-alias"
+            ancestor_alias = Path(f"{tmp}-ancestor-alias")
             self._create_directory_alias(alias_root, physical_root)
+            self._create_directory_alias(ancestor_alias, fixture_root)
             try:
                 target = alias_root / "nested" / "warning.json"
                 safe_io.atomic_write_json_in_root(
@@ -1999,7 +2001,25 @@ class TifProjectTests(unittest.TestCase):
                     json.loads(canonical_target.read_text(encoding="utf-8")),
                     {"status": "canonical"},
                 )
+
+                ancestor_target = (
+                    ancestor_alias / "physical" / "ancestor-canonical.json"
+                )
+                safe_io.atomic_write_json_in_root(
+                    ancestor_target,
+                    {"status": "ancestor-canonical"},
+                    trusted_root=alias_root,
+                )
+                self.assertEqual(
+                    json.loads(
+                        (physical_root / "ancestor-canonical.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    {"status": "ancestor-canonical"},
+                )
             finally:
+                self._remove_directory_alias(ancestor_alias)
                 self._remove_directory_alias(alias_root)
 
     def test_posix_parent_fstat_failure_closes_new_directory_descriptor(self):

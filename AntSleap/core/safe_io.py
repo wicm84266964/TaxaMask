@@ -57,6 +57,24 @@ def _has_multiple_links(result):
         return False
 
 
+def _relative_path_from_root_identity(path, root):
+    """Preserve root-local components while accepting another spelling of root."""
+    current = os.path.normpath(path)
+    suffix = []
+    while True:
+        if os.path.lexists(current):
+            try:
+                if os.path.samefile(current, root):
+                    return os.path.join(*reversed(suffix)) if suffix else os.curdir
+            except OSError:
+                pass
+        parent, name = os.path.split(current)
+        if not name or parent == current:
+            return None
+        suffix.append(name)
+        current = parent
+
+
 def _safe_path_plan(path, trusted_root):
     lexical_root = os.path.normpath(os.path.abspath(os.fspath(trusted_root)))
     root = os.path.normpath(os.path.realpath(lexical_root))
@@ -75,6 +93,8 @@ def _safe_path_plan(path, trusted_root):
         ):
             relative_target = os.path.relpath(supplied_target, candidate_root)
             break
+    if relative_target is None:
+        relative_target = _relative_path_from_root_identity(supplied_target, root)
     if (
         relative_target is None
         or relative_target == os.pardir

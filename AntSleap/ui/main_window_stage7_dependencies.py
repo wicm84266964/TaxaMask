@@ -54,7 +54,9 @@ try:
     from AntSleap.core.training_run_notes import TrainingRunNoteStore
     from AntSleap.core.training_initial_weights import (
         inspect_initial_weight_registration,
+        read_verified_initial_weight,
         register_initial_weight_version,
+        training_run_initial_weight_evidence,
     )
     from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
     from AntSleap.core.vlm_preannotation import (
@@ -116,7 +118,7 @@ except ImportError:
     from core.training_run_2d import DEFAULT_TRAINING_SEED, prepare_2d_training_run
     from core.training_run_recorder import TrainingRunRecorder
     from core.training_run_notes import TrainingRunNoteStore
-    from core.training_initial_weights import inspect_initial_weight_registration, register_initial_weight_version
+    from core.training_initial_weights import inspect_initial_weight_registration, read_verified_initial_weight, register_initial_weight_version, training_run_initial_weight_evidence
     from core.training_weight_publisher import TrainingWeightPublisher
     from core.vlm_preannotation import (
         default_vlm_prompt_profile,

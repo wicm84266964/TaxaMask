@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QGroupBox, QSlider, QProgressBar, QProgressDialog, QRadioButton, QButtonGroup, QSpinBox, QTreeWidget, QTreeWidgetItem, QMessageBox, QTextEdit, QCheckBox, QDialog, QDialogButtonBox, QLineEdit, QHeaderView, QSizePolicy, QScrollArea, QFrame, QComboBox, QTabWidget, QInputDialog, QTableWidget, QTableWidgetItem, QAbstractItemView)
 import os
 import shutil
+import stat
 import sys
 import csv
 import tempfile
@@ -12,14 +13,16 @@ from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread, QTimer
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
     from AntSleap.core.project import AUTO_BOX_SOURCE_VLM
-    from AntSleap.core.taxonomy_defaults import is_safe_part_name
     from AntSleap.core.cascade_routes import build_expert_id
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from AntSleap.core.blink_expert_manifest import (
         BLINK_EXPERT_BACKEND_HEATMAP,
         BLINK_EXPERT_BACKEND_VIT_B,
         default_manifest_path_for_weights,
+        is_safe_blink_expert_part_name,
         load_blink_expert_manifest,
+        require_safe_blink_expert_part_name,
+        validate_blink_route_identity,
     )
     from AntSleap.core.blink_training_strategy import (
         DEFAULT_BLINK_TRAINING_STRATEGY,
@@ -27,7 +30,12 @@ try:
         sanitize_blink_training_strategy,
     )
     from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
-    from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
+    from AntSleap.core.path_identity import canonicalize_posix_root_alias
+    from AntSleap.core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
+    from AntSleap.core.training_weight_publisher import (
+        TRAINING_BUNDLE_DIRECTORY,
+        TrainingWeightPublisher,
+    )
     from AntSleap.core.training_run_2d import (
         DEFAULT_TRAINING_SEED,
         prepare_blink_training_run,
@@ -43,14 +51,16 @@ try:
     )
 except ImportError:
     from core.project import AUTO_BOX_SOURCE_VLM
-    from core.taxonomy_defaults import is_safe_part_name
     from core.cascade_routes import build_expert_id
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from core.blink_expert_manifest import (
         BLINK_EXPERT_BACKEND_HEATMAP,
         BLINK_EXPERT_BACKEND_VIT_B,
         default_manifest_path_for_weights,
+        is_safe_blink_expert_part_name,
         load_blink_expert_manifest,
+        require_safe_blink_expert_part_name,
+        validate_blink_route_identity,
     )
     from core.blink_training_strategy import (
         DEFAULT_BLINK_TRAINING_STRATEGY,
@@ -58,7 +68,12 @@ except ImportError:
         sanitize_blink_training_strategy,
     )
     from core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
-    from core.training_weight_publisher import TrainingWeightPublisher
+    from core.path_identity import canonicalize_posix_root_alias
+    from core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
+    from core.training_weight_publisher import (
+        TRAINING_BUNDLE_DIRECTORY,
+        TrainingWeightPublisher,
+    )
     from core.training_run_2d import DEFAULT_TRAINING_SEED, prepare_blink_training_run
     from ui.training_integrity_recovery_dialog import TrainingIntegrityRecoveryDialog, is_training_integrity_error
     from ui.training_preflight_worker import TrainingPreflightWorker, format_byte_rate, format_eta
@@ -195,6 +210,8 @@ BLINK_TRANSLATIONS = {
         "Delete cancelled. Current project route branches were kept.": "已取消删除，当前项目中的路由分支已保留。",
         "Select a trained expert file or a child-part bucket first.": "请先选择一个训练好的专家文件，或选择一个子部位专家桶。",
         "Delete the selected expert model file from disk.": "从磁盘删除当前选中的专家模型文件。",
+        "Managed published models cannot be deleted as individual files.": "托管发布模型不能作为单个文件删除。",
+        "This model belongs to an active managed publication. Keep the checkpoint, manifest, and publication record together.": "该模型属于当前有效的托管发布。必须一并保留 checkpoint、manifest 和发布记录。",
         "Delete the selected child-part expert bucket from disk.": "从磁盘删除当前选中的子部位专家桶。",
         "Delete all expert files for {0}?": "要删除 {0} 的整个专家桶吗？",
         "This is a high-risk action. It deletes the expert bucket from disk and can also remove matching route branches in the currently open project.": "这是高风险操作。它会从磁盘删除该专家桶，并且还可以同时删除当前打开项目里匹配的路由分支。",
@@ -213,6 +230,7 @@ BLINK_TRANSLATIONS = {
         "Deleted {0} current-project route branch(es) for {1}.": "已为 {1} 删除当前项目中的 {0} 条路由分支。",
         "Expert bucket deleted, but current-project route cleanup was skipped.": "专家桶已删除，但当前项目的路由清理已跳过。",
         "Failed to delete expert bucket: {0}": "删除专家桶失败：{0}",
+        "This expert bucket contains a reserved, linked, nested, special, or changed filesystem entry and cannot be deleted safely.": "该专家桶包含保留名称、链接、嵌套目录、特殊文件或已变化的文件系统条目，无法安全删除。",
         "Error": "错误",
         "Failed to delete file: {0}": "删除文件失败：{0}",
         "Mode: Draw Polygon": "模式：绘制多边形",
@@ -375,7 +393,7 @@ class BlinkTrainingThread(QThread):
     ):
         super().__init__()
         self.project_path = project_path
-        self.part_name = part_name
+        self.part_name = require_safe_blink_expert_part_name(part_name)
         self.parent_part = parent_part
         self.epochs = epochs
         self.batch_size = batch_size
@@ -1860,34 +1878,85 @@ class BlinkLabWidget(QWidget):
             self._update_delete_expert_tooltip()
             return
         expert_notes = load_expert_notes(self.engine.weights_dir)
-            
-        for part_folder in os.listdir(expert_dir):
+
+        cascade_manager = getattr(self.engine, "cascade_manager", None)
+        list_available = getattr(cascade_manager, "list_available_experts", None)
+        if callable(list_available):
+            try:
+                available_experts = list(list_available() or [])
+            except Exception:
+                available_experts = []
+        else:
+            available_experts = []
+            for part_folder in sorted(os.listdir(expert_dir)):
+                part_path = os.path.join(expert_dir, part_folder)
+                if not self._is_safe_expert_bucket_path(part_path, expected_part_name=part_folder):
+                    continue
+                for filename in sorted(os.listdir(part_path)):
+                    file_path = os.path.join(part_path, filename)
+                    expert_id = build_expert_id(part_folder, filename)
+                    if (
+                        not filename.lower().endswith(".pth")
+                        or not expert_id
+                        or not self._is_safe_expert_file_path(file_path, expected_bucket_path=part_path)
+                    ):
+                        continue
+                    available_experts.append(
+                        {
+                            "expert_part": part_folder,
+                            "expert_filename": filename,
+                            "expert_id": expert_id,
+                            "path": file_path,
+                        }
+                    )
+
+        experts_by_part = {}
+        for expert in available_experts:
+            if not isinstance(expert, dict):
+                continue
+            part_folder = str(expert.get("expert_part") or "").strip()
+            file_path = str(expert.get("path") or "").strip()
+            if (
+                not is_safe_blink_expert_part_name(part_folder)
+                or not self._is_safe_expert_file_path(file_path)
+                or not file_path.lower().endswith(".pth")
+            ):
+                continue
+            expert_record = dict(expert)
+            expert_record["path"] = os.path.abspath(file_path)
+            experts_by_part.setdefault(part_folder, []).append(expert_record)
+
+        for part_folder in sorted(experts_by_part, key=str.casefold):
             part_path = os.path.join(expert_dir, part_folder)
-            if not os.path.isdir(part_path):
-                continue
-            if not self._is_safe_expert_bucket_path(part_path, expected_part_name=part_folder):
-                continue
-            
             part_item = QTreeWidgetItem(self.expert_tree)
             part_item.setText(0, part_folder)
             part_item.setToolTip(0, part_folder)
             part_item.setExpanded(True)
             part_item.setData(0, Qt.UserRole, None)
-            part_item.setData(0, Qt.UserRole + 1, {"bucket_path": part_path, "part_name": part_folder})
-            
-            pth_files = [f for f in os.listdir(part_path) if f.endswith(".pth")]
-            pth_files.sort(reverse=True)
-            
-            for pth in pth_files:
-                file_path = os.path.join(part_path, pth)
-                if not self._is_safe_expert_file_path(file_path, expected_bucket_path=part_path):
-                    continue
+            bucket_info = None
+            if self._is_safe_expert_bucket_path(part_path, expected_part_name=part_folder):
+                bucket_info = {"bucket_path": part_path, "part_name": part_folder}
+            part_item.setData(0, Qt.UserRole + 1, bucket_info)
+
+            records = sorted(
+                experts_by_part[part_folder],
+                key=lambda item: (
+                    str(item.get("expert_filename") or "").casefold(),
+                    str(item.get("path") or "").casefold(),
+                ),
+                reverse=True,
+            )
+            for expert in records:
+                file_path = expert["path"]
+                pth = str(expert.get("expert_filename") or os.path.basename(file_path))
                 size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                
+
                 model_item = QTreeWidgetItem(part_item)
-                
-                full_expert_name = f"{part_folder}/{pth}"
-                note = expert_notes.get(full_expert_name, "")
+
+                full_expert_name = str(expert.get("expert_id") or build_expert_id(part_folder, pth) or "")
+                if not full_expert_name:
+                    continue
+                note = str(expert.get("note") or expert_notes.get(full_expert_name, ""))
                 display_name = format_expert_display_name(full_expert_name, note)
                 model_item.setText(0, display_name)
                 model_item.setText(1, f"{size_mb:.1f} MB")
@@ -1901,6 +1970,7 @@ class BlinkLabWidget(QWidget):
                 model_item.setData(0, Qt.UserRole, file_path)
                 model_item.setData(0, Qt.UserRole + 1, None)
                 model_item.setData(0, Qt.UserRole + 2, full_expert_name)
+                model_item.setData(0, Qt.UserRole + 3, expert)
         self._update_delete_expert_tooltip()
 
     def append_training_log(self, message):
@@ -1922,32 +1992,208 @@ class BlinkLabWidget(QWidget):
         except Exception:
             return False
 
+    @staticmethod
+    def _is_link_or_reparse(stat_result):
+        attributes = int(getattr(stat_result, "st_file_attributes", 0) or 0)
+        reparse_flag = int(
+            getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400) or 0x400
+        )
+        return stat.S_ISLNK(stat_result.st_mode) or bool(
+            attributes & reparse_flag
+        )
+
+    @staticmethod
+    def _entry_identity(stat_result):
+        return {
+            "device": int(getattr(stat_result, "st_dev", 0) or 0),
+            "inode": int(getattr(stat_result, "st_ino", 0) or 0),
+            "mode": int(getattr(stat_result, "st_mode", 0) or 0),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", 0) or 0),
+        }
+
+    @staticmethod
+    def _same_filesystem_object(left, right):
+        return all(left.get(key) == right.get(key) for key in ("device", "inode", "mode"))
+
+    def _is_safe_existing_directory_chain(self, directory_path):
+        if not isinstance(directory_path, str) or not directory_path:
+            return False
+        current = canonicalize_posix_root_alias(directory_path)
+        chain = []
+        while True:
+            chain.append(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        try:
+            for path in reversed(chain):
+                path_stat = os.lstat(path)
+                if (
+                    not stat.S_ISDIR(path_stat.st_mode)
+                    or self._is_link_or_reparse(path_stat)
+                ):
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _expert_manifest_route_reference(self, manifest_path):
+        text = str(manifest_path or "").strip()
+        if not text:
+            return ""
+        expert_root = self._expert_root_dir()
+        target = os.path.abspath(text)
+        try:
+            if os.path.normcase(os.path.commonpath([expert_root, target])) != os.path.normcase(expert_root):
+                return text
+        except ValueError:
+            return text
+        relative = os.path.relpath(target, expert_root)
+        if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+            return text
+        return relative.replace("\\", "/")
+
     def _is_safe_expert_bucket_path(self, bucket_path, expected_part_name=None):
         if not isinstance(bucket_path, str) or not bucket_path:
             return False
-        part_name = os.path.basename(os.path.abspath(bucket_path))
+        expert_root = self._expert_root_dir()
+        bucket_abs = os.path.abspath(bucket_path)
+        part_name = os.path.basename(bucket_abs)
         if expected_part_name is not None and str(expected_part_name) != part_name:
             return False
-        if not is_safe_part_name(part_name):
+        if not is_safe_blink_expert_part_name(part_name):
             return False
-        if not self._is_path_within_expert_root(bucket_path):
+        if os.path.normcase(os.path.dirname(bucket_abs)) != os.path.normcase(
+            expert_root
+        ):
             return False
-        return os.path.isdir(bucket_path)
+        if not self._is_safe_existing_directory_chain(expert_root):
+            return False
+        try:
+            root_stat = os.lstat(expert_root)
+            bucket_stat = os.lstat(bucket_abs)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(root_stat.st_mode)
+            and not self._is_link_or_reparse(root_stat)
+            and stat.S_ISDIR(bucket_stat.st_mode)
+            and not self._is_link_or_reparse(bucket_stat)
+        )
 
     def _is_safe_expert_file_path(self, file_path, expected_bucket_path=None):
         if not isinstance(file_path, str) or not file_path:
             return False
         if not self._is_path_within_expert_root(file_path):
             return False
+        expert_root = self._expert_root_dir()
+        file_abs = os.path.abspath(file_path)
+        if not self._is_safe_existing_directory_chain(expert_root):
+            return False
         if expected_bucket_path is not None:
-            try:
-                bucket_abs = os.path.abspath(expected_bucket_path)
-                file_abs = os.path.abspath(file_path)
-                if os.path.commonpath([bucket_abs, file_abs]) != bucket_abs:
-                    return False
-            except Exception:
+            bucket_abs = os.path.abspath(expected_bucket_path)
+            if (
+                not self._is_safe_expert_bucket_path(bucket_abs)
+                or os.path.normcase(os.path.dirname(file_abs))
+                != os.path.normcase(bucket_abs)
+            ):
                 return False
-        return os.path.isfile(file_path)
+        try:
+            relative = os.path.relpath(file_abs, expert_root)
+            parts = relative.split(os.sep)
+            if relative in {os.curdir, os.pardir} or relative.startswith(
+                os.pardir + os.sep
+            ):
+                return False
+            current = expert_root
+            for part in parts[:-1]:
+                current = os.path.join(current, part)
+                current_stat = os.lstat(current)
+                if (
+                    self._is_link_or_reparse(current_stat)
+                    or not stat.S_ISDIR(current_stat.st_mode)
+                ):
+                    return False
+            file_stat = os.lstat(file_abs)
+        except OSError:
+            return False
+        return stat.S_ISREG(file_stat.st_mode) and not self._is_link_or_reparse(
+            file_stat
+        )
+
+    def _expert_file_snapshot(self, file_path):
+        if (
+            self._is_managed_training_bundle_path(file_path)
+            or not self._is_safe_expert_file_path(file_path)
+        ):
+            return None
+        expert_root = self._expert_root_dir()
+        file_abs = os.path.abspath(file_path)
+        try:
+            relative = os.path.relpath(file_abs, expert_root)
+            current = expert_root
+            directory_identities = []
+            for part in [None, *relative.split(os.sep)[:-1]]:
+                if part is not None:
+                    current = os.path.join(current, part)
+                current_stat = os.lstat(current)
+                if (
+                    not stat.S_ISDIR(current_stat.st_mode)
+                    or self._is_link_or_reparse(current_stat)
+                ):
+                    return None
+                directory_identities.append(
+                    {
+                        "path": os.path.abspath(current),
+                        "identity": self._entry_identity(current_stat),
+                    }
+                )
+            file_before = os.lstat(file_abs)
+            if (
+                not stat.S_ISREG(file_before.st_mode)
+                or self._is_link_or_reparse(file_before)
+            ):
+                return None
+            fingerprint = compute_fingerprint(
+                file_abs,
+                algorithm=FULL_FILE_ALGORITHM,
+            )
+            file_after = os.lstat(file_abs)
+        except Exception:
+            return None
+        if self._entry_identity(file_before) != self._entry_identity(file_after):
+            return None
+        return {
+            "path": file_abs,
+            "directories": directory_identities,
+            "identity": self._entry_identity(file_after),
+            "fingerprint": fingerprint,
+        }
+
+    def _is_managed_training_bundle_path(self, target_path):
+        if not isinstance(target_path, str) or not target_path:
+            return False
+        expert_root = self._expert_root_dir()
+        target_abs = os.path.abspath(target_path)
+        try:
+            relative = os.path.relpath(target_abs, expert_root)
+        except ValueError:
+            return False
+        if relative in {os.curdir, os.pardir} or relative.startswith(
+            os.pardir + os.sep
+        ):
+            return False
+        parts = [
+            part
+            for part in relative.replace("\\", "/").split("/")
+            if part not in {"", "."}
+        ]
+        return bool(
+            parts
+            and parts[0].casefold()
+            == TRAINING_BUNDLE_DIRECTORY.casefold()
+        )
 
     def _selected_expert_bucket_info(self):
         selected = self.expert_tree.selectedItems()
@@ -1962,15 +2208,56 @@ class BlinkLabWidget(QWidget):
                 return {"bucket_path": bucket_path, "part_name": part_name}
         return None
 
+    def _expert_bucket_snapshot(self, bucket_path, expected_part_name=None):
+        if not self._is_safe_expert_bucket_path(
+            bucket_path,
+            expected_part_name=expected_part_name,
+        ):
+            return None
+        bucket_abs = os.path.abspath(bucket_path)
+        try:
+            bucket_before = os.lstat(bucket_abs)
+            records = []
+            for entry in sorted(os.scandir(bucket_abs), key=lambda item: item.name):
+                entry_stat = entry.stat(follow_symlinks=False)
+                if (
+                    entry.is_symlink()
+                    or self._is_link_or_reparse(entry_stat)
+                    or not stat.S_ISREG(entry_stat.st_mode)
+                    or not self._is_safe_expert_file_path(
+                        entry.path,
+                        expected_bucket_path=bucket_abs,
+                    )
+                ):
+                    return None
+                records.append(
+                    {
+                        "name": entry.name,
+                        "path": os.path.abspath(entry.path),
+                        "identity": self._entry_identity(entry_stat),
+                        "fingerprint": compute_fingerprint(
+                            entry.path,
+                            algorithm=FULL_FILE_ALGORITHM,
+                        ),
+                    }
+                )
+            bucket_after = os.lstat(bucket_abs)
+        except Exception:
+            return None
+        if self._entry_identity(bucket_before) != self._entry_identity(bucket_after):
+            return None
+        return {
+            "bucket_path": bucket_abs,
+            "part_name": os.path.basename(bucket_abs),
+            "bucket_identity": self._entry_identity(bucket_after),
+            "files": records,
+        }
+
     def _expert_bucket_files(self, bucket_path):
-        if not self._is_safe_expert_bucket_path(bucket_path):
+        snapshot = self._expert_bucket_snapshot(bucket_path)
+        if not isinstance(snapshot, dict):
             return []
-        files = []
-        for filename in sorted(os.listdir(bucket_path)):
-            file_path = os.path.join(bucket_path, filename)
-            if self._is_safe_expert_file_path(file_path, expected_bucket_path=bucket_path):
-                files.append(file_path)
-        return files
+        return [record["path"] for record in snapshot["files"]]
 
     def _current_project_bucket_route_impacts(self, child_part_name):
         if not hasattr(self.pm, "get_current_project_expert_bucket_impacts"):
@@ -2035,20 +2322,53 @@ class BlinkLabWidget(QWidget):
         confirmed = dialog.exec() == QDialog.DialogCode.Accepted
         return confirmed, dialog
 
-    def _delete_expert_bucket_files(self, bucket_path):
-        if not self._is_safe_expert_bucket_path(bucket_path):
-            raise FileNotFoundError(bucket_path)
+    def _delete_expert_bucket_files(self, bucket_path, expected_snapshot=None):
+        snapshot = self._expert_bucket_snapshot(bucket_path)
+        if not isinstance(snapshot, dict):
+            raise ValueError("unsafe_expert_bucket")
+        if expected_snapshot is not None and snapshot != expected_snapshot:
+            raise RuntimeError("expert_bucket_changed_after_preview")
         deleted_paths = []
-        for file_path in self._expert_bucket_files(bucket_path):
+        for record in snapshot["files"]:
+            file_path = record["path"]
+            if (
+                not self._is_safe_expert_file_path(
+                    file_path,
+                    expected_bucket_path=bucket_path,
+                )
+                or compute_fingerprint(
+                    file_path,
+                    algorithm=FULL_FILE_ALGORITHM,
+                )
+                != record["fingerprint"]
+            ):
+                raise RuntimeError("expert_bucket_changed_during_delete")
             os.remove(file_path)
             deleted_paths.append(file_path)
-        shutil.rmtree(bucket_path)
+        bucket_stat = os.lstat(bucket_path)
+        if not self._same_filesystem_object(
+            self._entry_identity(bucket_stat),
+            snapshot["bucket_identity"],
+        ):
+            raise RuntimeError("expert_bucket_changed_during_delete")
+        os.rmdir(bucket_path)
         return deleted_paths
 
     def _delete_selected_expert_bucket(self, bucket_info):
         part_name = bucket_info.get("part_name")
         bucket_path = bucket_info.get("bucket_path")
-        files_to_delete = self._expert_bucket_files(bucket_path)
+        snapshot = self._expert_bucket_snapshot(
+            bucket_path,
+            expected_part_name=part_name,
+        )
+        if not isinstance(snapshot, dict):
+            message = self.tr(
+                "This expert bucket contains a reserved, linked, nested, special, or changed filesystem entry and cannot be deleted safely."
+            )
+            QMessageBox.critical(self, self.tr("Error"), message)
+            self.lbl_status.setText(message)
+            return
+        files_to_delete = [record["path"] for record in snapshot["files"]]
         route_impact = self._current_project_bucket_route_impacts(part_name)
 
         confirmed_preview, cleanup_routes, preview_dialog = self._show_bucket_delete_preview_dialog(
@@ -2067,7 +2387,10 @@ class BlinkLabWidget(QWidget):
             return
 
         try:
-            self._delete_expert_bucket_files(bucket_path)
+            self._delete_expert_bucket_files(
+                bucket_path,
+                expected_snapshot=snapshot,
+            )
         except Exception as exc:
             QMessageBox.critical(self, self.tr("Error"), self.tr("Failed to delete expert bucket: {0}").format(exc))
             self.lbl_status.setText(self.tr("Failed to delete expert bucket: {0}").format(exc))
@@ -2092,17 +2415,36 @@ class BlinkLabWidget(QWidget):
 
     def _update_delete_expert_tooltip(self):
         file_path = None
+        expert_record = None
         selected = self.expert_tree.selectedItems()
         if selected:
             file_path = selected[0].data(0, Qt.UserRole)
+            expert_record = selected[0].data(0, Qt.UserRole + 3)
+        is_managed_publication = bool(
+            self._is_managed_training_bundle_path(file_path)
+            or (
+                isinstance(expert_record, dict)
+                and str(expert_record.get("publication_run_id") or "").strip()
+            )
+        )
         if file_path:
+            if is_managed_publication:
+                self.btn_delete_expert.setEnabled(False)
+                self.btn_delete_expert.setToolTip(
+                    self.tr("Managed published models cannot be deleted as individual files.")
+                )
+                self.btn_edit_expert_note.setEnabled(True)
+                return
+            self.btn_delete_expert.setEnabled(True)
             self.btn_delete_expert.setToolTip(self.tr("Delete the selected expert model file from disk."))
             self.btn_edit_expert_note.setEnabled(True)
             return
         self.btn_edit_expert_note.setEnabled(False)
         if self._selected_expert_bucket_info():
+            self.btn_delete_expert.setEnabled(True)
             self.btn_delete_expert.setToolTip(self.tr("Delete the selected child-part expert bucket from disk."))
             return
+        self.btn_delete_expert.setEnabled(False)
         self.btn_delete_expert.setToolTip(self.tr("Select a trained expert file or a child-part bucket first."))
 
     def _find_expert_tree_item_by_id(self, expert_id):
@@ -2177,16 +2519,67 @@ class BlinkLabWidget(QWidget):
             QMessageBox.information(self, self.tr("Info"), self.tr("Open a Blink session with a parent ROI before appointing a route expert."))
             return
 
-        expert_filename = os.path.basename(file_path)
-        expert_part = os.path.basename(os.path.dirname(file_path))
-        expert_id = build_expert_id(expert_part, expert_filename)
-        if not expert_id:
+        expert_record = item.data(0, Qt.UserRole + 3)
+        if not isinstance(expert_record, dict):
+            expert_record = {}
+        expert_filename = str(expert_record.get("expert_filename") or os.path.basename(file_path))
+        expert_part = str(expert_record.get("expert_part") or os.path.basename(os.path.dirname(file_path)))
+        expert_id = str(expert_record.get("expert_id") or build_expert_id(expert_part, expert_filename) or "")
+        if not expert_id or not is_safe_blink_expert_part_name(expert_part):
             QMessageBox.critical(self, self.tr("Error"), self.tr("Failed to delete file: {0}").format(file_path))
             return
 
         existing_route = self.pm.get_cascade_route(parent_part, child_part) if hasattr(self.pm, "get_cascade_route") else None
         existing_expert = (existing_route or {}).get("appointed_expert") if isinstance(existing_route, dict) else {}
-        if isinstance(existing_expert, dict) and existing_expert.get("expert_id") == expert_id:
+        existing_manifest = self._expert_manifest_route_reference(
+            existing_expert.get("expert_manifest") if isinstance(existing_expert, dict) else ""
+        )
+        selected_manifest = self._expert_manifest_route_reference(
+            expert_record.get("expert_manifest")
+        )
+        raw_manifest_path = str(expert_record.get("expert_manifest") or "").strip()
+        if raw_manifest_path:
+            manifest_path = raw_manifest_path
+            if not os.path.isabs(manifest_path):
+                manifest_path = os.path.join(self._expert_root_dir(), *manifest_path.replace("\\", "/").split("/"))
+            try:
+                validate_blink_route_identity(
+                    load_blink_expert_manifest(manifest_path),
+                    route_parent_part=parent_part,
+                    route_child_part=child_part,
+                )
+            except (OSError, ValueError) as exc:
+                message = self.tr("This expert cannot be appointed to the current route: {0}").format(str(exc))
+                self.lbl_status.setText(message)
+                QMessageBox.critical(self, self.tr("Appoint to Current Route"), message)
+                return
+
+        cascade_manager = getattr(self.engine, "cascade_manager", None)
+        get_block_reason = getattr(cascade_manager, "get_route_block_reason", None)
+        if callable(get_block_reason):
+            prospective_route = {
+                "parent": parent_part,
+                "child": child_part,
+                "enabled": True,
+                "expert_id": expert_id,
+                "expert_part": expert_part,
+                "expert_filename": expert_filename,
+                "expert_backend": expert_record.get("expert_backend"),
+                "expert_manifest": selected_manifest,
+                "input_size": expert_record.get("input_size"),
+                "backend_params": expert_record.get("backend_params"),
+            }
+            block_reason = get_block_reason(prospective_route)
+            if block_reason:
+                message = self.tr("This expert cannot be appointed to the current route: {0}").format(block_reason)
+                self.lbl_status.setText(message)
+                QMessageBox.critical(self, self.tr("Appoint to Current Route"), message)
+                return
+        if (
+            isinstance(existing_expert, dict)
+            and existing_expert.get("expert_id") == expert_id
+            and os.path.normcase(existing_manifest) == os.path.normcase(selected_manifest)
+        ):
             QMessageBox.information(self, self.tr("Info"), self.tr("This model is already appointed to the current route."))
             return
             
@@ -2202,14 +2595,28 @@ class BlinkLabWidget(QWidget):
                     parent_part,
                     child_part,
                     expert_id=expert_id,
+                    expert_backend=expert_record.get("expert_backend"),
+                    expert_manifest=selected_manifest,
+                    input_size=expert_record.get("input_size"),
+                    backend_params=expert_record.get("backend_params"),
+                    note=expert_record.get("note"),
                     focus_source=(self.active_session.get("focus_roi") or {}).get("source") if self.active_session else None,
                     registration_source="blink_manual_appointment",
                     save=True,
                 )
-            appointed = self.pm.appoint_cascade_route_expert(parent_part, child_part, expert_id=expert_id, save=True)
+            appointed = self.pm.appoint_cascade_route_expert(
+                parent_part,
+                child_part,
+                expert_id=expert_id,
+                expert_backend=expert_record.get("expert_backend"),
+                expert_manifest=selected_manifest,
+                input_size=expert_record.get("input_size"),
+                backend_params=expert_record.get("backend_params"),
+                note=expert_record.get("note"),
+                save=True,
+            )
             if appointed and hasattr(self.pm, "set_cascade_route_enabled"):
                 self.pm.set_cascade_route_enabled(parent_part, child_part, True, save=True)
-            cascade_manager = getattr(self.engine, "cascade_manager", None)
             loaded_experts = getattr(cascade_manager, "loaded_experts", None)
             if isinstance(loaded_experts, dict):
                 loaded_experts.clear()
@@ -2227,7 +2634,25 @@ class BlinkLabWidget(QWidget):
             if bucket_info:
                 self._delete_selected_expert_bucket(bucket_info)
             return # Selected a part folder
+        expert_record = item.data(0, Qt.UserRole + 3)
+        if (
+            self._is_managed_training_bundle_path(file_path)
+            or (
+                isinstance(expert_record, dict)
+                and str(expert_record.get("publication_run_id") or "").strip()
+            )
+        ):
+            message = self.tr(
+                "This model belongs to an active managed publication. Keep the checkpoint, manifest, and publication record together."
+            )
+            self.lbl_status.setText(message)
+            QMessageBox.information(self, self.tr("Delete Model"), message)
+            return
         if not self._is_safe_expert_file_path(file_path):
+            QMessageBox.critical(self, self.tr("Error"), self.tr("Failed to delete file: {0}").format(file_path))
+            return
+        expected_snapshot = self._expert_file_snapshot(file_path)
+        if not isinstance(expected_snapshot, dict):
             QMessageBox.critical(self, self.tr("Error"), self.tr("Failed to delete file: {0}").format(file_path))
             return
         
@@ -2239,6 +2664,8 @@ class BlinkLabWidget(QWidget):
         )
         if reply == QMessageBox.Yes:
             try:
+                if self._expert_file_snapshot(file_path) != expected_snapshot:
+                    raise RuntimeError("expert_file_changed_before_delete")
                 expert_id = item.data(0, Qt.UserRole + 2)
                 if not expert_id:
                     expert_id = build_expert_id(os.path.basename(os.path.dirname(file_path)), os.path.basename(file_path))
@@ -2633,13 +3060,20 @@ class BlinkLabWidget(QWidget):
         if not self.canvas.current_tool_part:
             self.lbl_status.setText(self.tr("Error: Select a part to train!"))
             return
+        try:
+            part = require_safe_blink_expert_part_name(
+                self.session_target_part or self.canvas.current_tool_part
+            )
+        except ValueError as exc:
+            self.lbl_status.setText(str(exc))
+            QMessageBox.critical(self, self.tr("Training"), str(exc))
+            return
         if not self._ensure_blink_training_baseline():
             return
 
         self.integrity_recovery_retry_used = False
         self.pending_blink_retry_request = None
             
-        part = self.session_target_part or self.canvas.current_tool_part
         if (
             self.training_thread
             and self.training_thread.isRunning()
@@ -3060,6 +3494,7 @@ class BlinkLabWidget(QWidget):
         child_part = str(context.get("child_part") or "").strip()
         if not parent_part or not child_part or parent_part == child_part:
             return None
+        child_part = require_safe_blink_expert_part_name(child_part)
 
         expert_filename = os.path.basename(str(save_path or "").strip())
         expert_id = build_expert_id(child_part, expert_filename)
@@ -3068,6 +3503,12 @@ class BlinkLabWidget(QWidget):
 
         manifest_path = default_manifest_path_for_weights(save_path)
         manifest = load_blink_expert_manifest(manifest_path)
+        validate_blink_route_identity(
+            manifest,
+            route_parent_part=parent_part,
+            route_child_part=child_part,
+        )
+        manifest_reference = self._expert_manifest_route_reference(manifest_path)
         input_size = manifest.get("input_size") if isinstance(manifest, dict) else None
         expert_backend = (
             manifest.get("expert_backend")
@@ -3078,6 +3519,24 @@ class BlinkLabWidget(QWidget):
         register_route = getattr(self.pm, "register_cascade_route_candidate", None)
         if not callable(register_route):
             return None
+
+        cascade_manager = getattr(self.engine, "cascade_manager", None)
+        get_block_reason = getattr(cascade_manager, "get_route_block_reason", None)
+        if callable(get_block_reason):
+            prospective_route = {
+                "parent": parent_part,
+                "child": child_part,
+                "enabled": True,
+                "expert_id": expert_id,
+                "expert_part": child_part,
+                "expert_filename": expert_filename,
+                "expert_backend": expert_backend,
+                "expert_manifest": manifest_reference,
+                "input_size": input_size,
+            }
+            block_reason = get_block_reason(prospective_route)
+            if block_reason:
+                raise RuntimeError(block_reason)
 
         focus_source = None
         if self.active_session:
@@ -3091,7 +3550,7 @@ class BlinkLabWidget(QWidget):
                 child_part,
                 expert_id=expert_id,
                 expert_backend=expert_backend,
-                expert_manifest=manifest_path,
+                expert_manifest=manifest_reference,
                 input_size=input_size,
                 focus_source=focus_source,
                 registration_source="blink_training",
@@ -3110,7 +3569,7 @@ class BlinkLabWidget(QWidget):
             child_part,
             expert_id=expert_id,
             expert_backend=expert_backend,
-            expert_manifest=manifest_path,
+            expert_manifest=manifest_reference,
             input_size=input_size,
             focus_source=focus_source,
             registration_source="blink_training",
@@ -3124,12 +3583,36 @@ class BlinkLabWidget(QWidget):
                 child_part,
                 expert_id=expert_id,
                 expert_backend=expert_backend,
-                expert_manifest=manifest_path,
+                expert_manifest=manifest_reference,
                 input_size=input_size,
                 save=True,
             )
         if callable(enable_route):
             enable_route(parent_part, child_part, True, save=True)
+
+        get_route = getattr(self.pm, "get_cascade_route", None)
+        route = get_route(parent_part, child_part) if callable(get_route) else None
+        route_is_usable = getattr(cascade_manager, "route_is_usable", None)
+        resolve_expert_path = getattr(cascade_manager, "resolve_route_expert_path", None)
+        usable = bool(route and callable(route_is_usable) and route_is_usable(route))
+        resolved_path = resolve_expert_path(route) if route and callable(resolve_expert_path) else None
+        try:
+            resolved_matches_publish = bool(
+                resolved_path
+                and os.path.normcase(os.path.abspath(resolved_path))
+                == os.path.normcase(os.path.abspath(save_path))
+            )
+        except (OSError, TypeError, ValueError):
+            resolved_matches_publish = False
+        if not usable or not resolved_matches_publish:
+            if callable(enable_route):
+                enable_route(parent_part, child_part, False, save=True)
+            self.route_registry_refresh_requested.emit()
+            get_block_reason = getattr(cascade_manager, "get_route_block_reason", None)
+            block_reason = get_block_reason(route) if route and callable(get_block_reason) else None
+            if not resolved_matches_publish:
+                block_reason = block_reason or "published_expert_path_mismatch"
+            raise RuntimeError(block_reason or "published_expert_route_unusable")
 
         self.route_registry_refresh_requested.emit()
         return {

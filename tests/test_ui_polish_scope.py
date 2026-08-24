@@ -3,8 +3,10 @@
 import os
 import sys
 import tempfile
+import types
 import unittest
 import copy
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -20,8 +22,9 @@ if str(PROJECT_ROOT) not in sys.path:
 has_pyside6 = False
 
 try:
-    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtCore import QObject, QPointF, QRectF, QThread, Qt, Signal, Slot
     from PySide6.QtGui import QColor, QImage, QPainter
+    from PySide6.QtTest import QSignalSpy
     from PySide6.QtWidgets import QApplication, QWidget, QGridLayout, QDialogButtonBox, QTreeWidget, QTableWidget, QLabel, QPushButton
 except ModuleNotFoundError as exc:
     if exc.name and exc.name.startswith("PySide6"):
@@ -47,6 +50,7 @@ else:
     import AntSleap.ui.main_window_image_navigation as image_navigation_module
     import AntSleap.ui.main_window_model_management as model_management_module
     import AntSleap.ui.main_window_part_tree as part_tree_module
+    import AntSleap.ui.main_window_presentation as presentation_module
     import AntSleap.ui.main_window_prediction as prediction_module
     import AntSleap.ui.main_window_vlm as vlm_module
     import AntSleap.ui.model_settings_dataset as model_settings_dataset_module
@@ -97,6 +101,14 @@ class DummyThread:
         return True
 
 
+class DeferredDummyThread(DummyThread):
+    def start(self):
+        self._running = True
+
+    def release_started(self):
+        self.started.emit()
+
+
 class DummyVlmPreannotationThread(DummyThread):
     instances = []
 
@@ -117,6 +129,8 @@ class DummySamWorker:
 
     def __init__(self, *args, **kwargs):
         type(self).last_instance = self
+        self.device_preference = kwargs.get("device", "auto")
+        self.poly_epsilon = kwargs.get("poly_epsilon", 2.0)
         self.model = None
         self.predict_point_calls = []
         self.predict_box_calls = []
@@ -124,19 +138,160 @@ class DummySamWorker:
         self.model_loaded = DummySignal()
         self.model_load_error = DummySignal()
         self.prompt_failed = DummySignal()
+        self.runtime_apply_succeeded = DummySignal()
+        self.runtime_apply_failed = DummySignal()
+        self.decoder_load_options = []
+        self.loaded_decoder_reference = ""
+        self.loaded_decoder_identity = {}
+        self.loaded_base_identity = {}
+        self.verified_base_sam_identity = {}
+        self._verified_base_checkpoint_bytes = None
+        self.current_results = None
+        base_payload = kwargs.get("base_checkpoint_bytes")
+        if base_payload is not None:
+            self.configure_verified_base_sam(
+                base_payload,
+                reference=kwargs.get("base_reference", ""),
+                fingerprint=kwargs.get("base_fingerprint"),
+            )
 
     def moveToThread(self, thread):
         self.thread = thread
 
     def load_model(self):
         self.model = object()
+        self.current_results = None
+        self.loaded_decoder_reference = ""
+        self.loaded_decoder_identity = {}
+        if self._verified_base_checkpoint_bytes is None:
+            self.loaded_base_identity = {"source": "path"}
+        else:
+            self.loaded_base_identity = {
+                **self.verified_base_sam_identity,
+                "source": "memory",
+            }
         self.model_loaded.emit()
 
     def reload_base_model(self):
         self.load_model()
 
-    def load_decoder_weights(self, weights_path):
+    def configure_verified_base_sam(
+        self,
+        checkpoint_bytes,
+        *,
+        reference="",
+        fingerprint=None,
+    ):
+        stable_bytes = bytes(checkpoint_bytes)
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(stable_bytes),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(stable_bytes).hexdigest(),
+        }
+        if fingerprint and any(
+            fingerprint.get(key) != observed.get(key)
+            for key in ("entry_kind", "size_bytes", "hash_algorithm", "digest")
+        ):
+            raise ValueError("dummy_base_fingerprint_mismatch")
+        self._verified_base_checkpoint_bytes = stable_bytes
+        self.verified_base_sam_identity = {
+            **observed,
+            "reference": str(reference or "sam_b.pt"),
+        }
+        self.model = None
+        return dict(self.verified_base_sam_identity)
+
+    def reload_base_model_with_options(self, options):
+        payload = dict(options or {})
+        self.device_preference = payload.get(
+            "device_preference",
+            self.device_preference,
+        )
+        self.poly_epsilon = payload.get("poly_epsilon", self.poly_epsilon)
+        checkpoint_payload = payload.get("base_checkpoint_payload")
+        if checkpoint_payload is None:
+            self._verified_base_checkpoint_bytes = None
+            self.verified_base_sam_identity = {}
+        else:
+            self.configure_verified_base_sam(
+                checkpoint_payload,
+                reference=payload.get("base_reference", ""),
+                fingerprint=payload.get("base_expected"),
+            )
+        self.load_model()
+
+    def apply_runtime_bundle(self, request):
+        payload = dict(request or {})
+        result = {
+            "request_id": payload.get("request_id"),
+            "reference": payload.get("reference"),
+            "worker_thread_confirmed": True,
+        }
+        try:
+            self.reload_base_model_with_options(payload)
+            self.load_decoder_weights(
+                payload.get("checkpoint_path"),
+                checkpoint_payload=payload.get("checkpoint_payload"),
+                reference=payload.get("reference", ""),
+                raise_on_error=True,
+            )
+            result.update(
+                {
+                    "base_identity": dict(self.loaded_base_identity),
+                    "decoder_identity": dict(self.loaded_decoder_identity),
+                    "loaded_decoder_reference": self.loaded_decoder_reference,
+                }
+            )
+            self.runtime_apply_succeeded.emit(result)
+        except Exception as exc:
+            result["error"] = str(exc)
+            self.runtime_apply_failed.emit(result)
+
+    def load_decoder_weights(
+        self,
+        weights_path,
+        *,
+        checkpoint_bytes=None,
+        checkpoint_payload=None,
+        reference="",
+        raise_on_error=False,
+        expected_base_sam_fingerprint=None,
+        require_base_sam_match=False,
+    ):
         self.decoder_weights = weights_path
+        stable_payload = (
+            checkpoint_bytes
+            if checkpoint_bytes is not None
+            else checkpoint_payload
+        )
+        self.decoder_load_options.append(
+            {
+                "weights_path": weights_path,
+                "checkpoint_bytes": checkpoint_bytes,
+                "checkpoint_payload": checkpoint_payload,
+                "reference": reference,
+                "raise_on_error": raise_on_error,
+                "expected_base_sam_fingerprint": expected_base_sam_fingerprint,
+                "require_base_sam_match": require_base_sam_match,
+            }
+        )
+        self.loaded_decoder_reference = str(reference or weights_path)
+        if stable_payload is None:
+            self.loaded_decoder_identity = {
+                "source": "path",
+                "reference": self.loaded_decoder_reference,
+            }
+        else:
+            stable_bytes = bytes(stable_payload)
+            self.loaded_decoder_identity = {
+                "source": "memory",
+                "reference": self.loaded_decoder_reference,
+                "size_bytes": len(stable_bytes),
+                "hash_algorithm": "sha256",
+                "digest": hashlib.sha256(stable_bytes).hexdigest(),
+            }
+        return True
 
     def set_epsilon(self, epsilon):
         self.poly_epsilon = epsilon
@@ -211,41 +366,148 @@ class DummyCascadeManager:
 class DummyEngine:
     def __init__(self, weights_dir):
         self.weights_dir = weights_dir
+        self.base_sam_path = str(Path(weights_dir) / "sam_b.pt")
+        Path(self.base_sam_path).write_bytes(b"dummy-base-sam")
+        self._verified_base_sam_bytes = None
+        self.verified_base_sam_identity = {}
         self.locator = None
         self.parts_model = DummyPartsModel()
         self.cascade_manager = DummyCascadeManager(weights_dir)
         self.current_num_classes = 3
+        self.current_locator_scope = ["Head", "Mesosoma", "Gaster"]
         self.locator_resolution = (512, 512)
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
         self.loaded_locator_timestamp = None
+        self.loaded_locator_schema_version = ""
+        self.loaded_locator_scope = []
         self.load_locator_calls = []
+        self.load_locator_options = []
+        self.legacy_locator_timestamps = set()
+        self.legacy_locator_uses_512 = set()
         self.load_sam_decoder_calls = []
+        self.load_sam_decoder_options = []
+        self.loaded_sam_decoder_reference = ""
+        self.loaded_sam_decoder_identity = {}
         self.reset_sam_calls = 0
         self.reset_locator_calls = 0
         self.predict_calls = []
+
+    def configure_verified_base_sam(
+        self,
+        checkpoint_bytes,
+        *,
+        reference="",
+        fingerprint=None,
+    ):
+        stable_bytes = bytes(checkpoint_bytes)
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(stable_bytes),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(stable_bytes).hexdigest(),
+        }
+        if fingerprint and any(
+            fingerprint.get(key) != observed.get(key)
+            for key in ("entry_kind", "size_bytes", "hash_algorithm", "digest")
+        ):
+            raise ValueError("dummy_engine_base_fingerprint_mismatch")
+        self._verified_base_sam_bytes = stable_bytes
+        self.verified_base_sam_identity = {
+            **observed,
+            "reference": str(reference or self.base_sam_path),
+        }
+        self.parts_model = None
+        return dict(self.verified_base_sam_identity)
 
     def ensure_locator_loaded(self):
         if self.locator is None:
             self.locator = object()
         return self.locator
 
-    def load_locator(self, timestamp, checkpoint_path=None):
+    def load_locator(
+        self,
+        timestamp,
+        checkpoint_path=None,
+        checkpoint_bytes=None,
+        checkpoint_payload=None,
+        require_complete=False,
+        expected_locator_scope=None,
+    ):
         self.ensure_locator_loaded()
         self.load_locator_calls.append(timestamp)
+        self.load_locator_options.append(
+            {
+                "timestamp": timestamp,
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_bytes": checkpoint_bytes,
+                "checkpoint_payload": checkpoint_payload,
+                "require_complete": require_complete,
+                "expected_locator_scope": list(expected_locator_scope or []),
+            }
+        )
+        self.loaded_locator_timestamp = timestamp
+        is_legacy = str(timestamp) in self.legacy_locator_timestamps
+        self.loaded_locator_schema_version = "" if is_legacy else "taxamask_locator_checkpoint_v2"
+        self.loaded_locator_scope = [] if is_legacy else list(expected_locator_scope or [])
+        self.loaded_locator_requires_legacy_confirmation = is_legacy
+        self.loaded_locator_is_legacy_512 = (
+            str(timestamp) in self.legacy_locator_uses_512
+        )
         return None
 
     def reset_locator_to_base(self):
         self.ensure_locator_loaded()
         self.reset_locator_calls += 1
+        self.loaded_locator_timestamp = None
         return None
 
     def reset_sam_to_base(self):
         self.reset_sam_calls += 1
+        self.loaded_sam_decoder_reference = ""
+        self.loaded_sam_decoder_identity = {}
         return None
 
-    def load_sam_decoder(self, timestamp, checkpoint_path=None):
+    def load_sam_decoder(
+        self,
+        timestamp,
+        checkpoint_path=None,
+        checkpoint_bytes=None,
+        checkpoint_payload=None,
+        expected_base_sam_fingerprint=None,
+        require_base_sam_match=False,
+    ):
         self.load_sam_decoder_calls.append(timestamp)
+        stable_payload = (
+            checkpoint_bytes
+            if checkpoint_bytes is not None
+            else checkpoint_payload
+        )
+        self.load_sam_decoder_options.append(
+            {
+                "timestamp": timestamp,
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_bytes": checkpoint_bytes,
+                "checkpoint_payload": checkpoint_payload,
+                "expected_base_sam_fingerprint": expected_base_sam_fingerprint,
+                "require_base_sam_match": require_base_sam_match,
+            }
+        )
+        self.loaded_sam_decoder_reference = str(timestamp)
+        if stable_payload is None:
+            self.loaded_sam_decoder_identity = {
+                "source": "path",
+                "reference": str(timestamp),
+            }
+        else:
+            stable_bytes = bytes(stable_payload)
+            self.loaded_sam_decoder_identity = {
+                "source": "memory",
+                "reference": str(timestamp),
+                "size_bytes": len(stable_bytes),
+                "hash_algorithm": "sha256",
+                "digest": hashlib.sha256(stable_bytes).hexdigest(),
+            }
         return None
 
     def rebuild_locator(self, num_classes, learning_rate, weight_decay):
@@ -1012,9 +1274,31 @@ class UiPolishScopeTests(unittest.TestCase):
         (self.weights_dir / "experts").mkdir(parents=True, exist_ok=True)
         self.engine = DummyEngine(str(self.weights_dir))
         self.project_manager = DummyProjectManager(self.temp_dir.name)
+
+        def verified_training_base(window, _run_id):
+            path = Path(window.engine.base_sam_path)
+            payload = path.read_bytes()
+            expected = {
+                "entry_kind": "file",
+                "size_bytes": len(payload),
+                "hash_algorithm": "sha256",
+                "digest": hashlib.sha256(payload).hexdigest(),
+            }
+            return {
+                "path": str(path),
+                "payload": payload,
+                "expected": expected,
+                "training_evidence": {"fingerprint": dict(expected)},
+            }
+
         self._runtime_patchers = [
             patch.object(annotation_module, "SAMWorker", DummySamWorker),
             patch.object(annotation_module, "QThread", DummyThread),
+            patch.object(
+                model_management_module.MainWindowModelManagementMixin,
+                "_verified_managed_training_base_sam",
+                verified_training_base,
+            ),
         ]
         for patcher in self._runtime_patchers:
             patcher.start()
@@ -1042,6 +1326,83 @@ class UiPolishScopeTests(unittest.TestCase):
              patch.object(PdfProcessingWidget, "sync_runtime_controls_from_config", lambda self: None), \
              patch.object(main_module.QTimer, "singleShot", lambda *args, **kwargs: None):
             return main_module.MainWindow()
+
+    @staticmethod
+    def _v2_locator_checkpoint(locator_size=(640, 384), locator_scope=None):
+        scope = list(locator_scope or ["Head", "Mesosoma", "Gaster"])
+        return {
+            "schema_version": "taxamask_locator_checkpoint_v2",
+            "state_dict": {},
+            "meta": {
+                "architecture_id": "trait_regressor_unet_wh_v1",
+                "locator_size": list(locator_size),
+                "num_classes": len(scope),
+                "locator_scope": scope,
+            },
+        }
+
+    def _publish_managed_locator_for_ui(
+        self,
+        checkpoint_payload,
+        *,
+        artifact_id="locator_checkpoint",
+    ):
+        staging = Path(self.temp_dir.name) / "managed-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        checkpoint_name = "locator_ui_managed.pth"
+        (staging / checkpoint_name).write_bytes(checkpoint_payload)
+        publisher = model_management_module.TrainingWeightPublisher(self.weights_dir)
+        pending = publisher.publish_pending(
+            "ui_managed_locator",
+            staging,
+            [
+                {
+                    "artifact_id": artifact_id,
+                    "role": "output_weights",
+                    "relative_path": checkpoint_name,
+                    "media_type": "application/octet-stream",
+                }
+            ],
+        )
+        successful_record = {
+            "schema_version": "taxamask_training_run_v1",
+            "run_id": pending["run_id"],
+            "status": "succeeded",
+            "artifacts": [dict(item) for item in pending["artifacts"]],
+        }
+        active = publisher.activate(pending["run_id"], successful_record)
+        artifact = active["artifacts"][0]
+        checkpoint_path = self.weights_dir / Path(artifact["relative_path"])
+        return successful_record, artifact, checkpoint_path
+
+    def _publish_managed_segmenter_for_ui(self, checkpoint_payload):
+        staging = Path(self.temp_dir.name) / "managed-segmenter-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        checkpoint_name = "sam_decoder_lora_ui_managed.pth"
+        (staging / checkpoint_name).write_bytes(checkpoint_payload)
+        publisher = model_management_module.TrainingWeightPublisher(self.weights_dir)
+        pending = publisher.publish_pending(
+            "ui_managed_segmenter",
+            staging,
+            [
+                {
+                    "artifact_id": "sam_decoder_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": checkpoint_name,
+                    "media_type": "application/octet-stream",
+                }
+            ],
+        )
+        successful_record = {
+            "schema_version": "taxamask_training_run_v1",
+            "run_id": pending["run_id"],
+            "status": "succeeded",
+            "artifacts": [dict(item) for item in pending["artifacts"]],
+        }
+        active = publisher.activate(pending["run_id"], successful_record)
+        artifact = active["artifacts"][0]
+        checkpoint_path = self.weights_dir / Path(artifact["relative_path"])
+        return successful_record, artifact, checkpoint_path
 
     def test_pdf_processing_widget_exposes_polish_panels(self):
         with patch.object(PdfProcessingWidget, "load_api_settings", lambda self: None), \
@@ -2790,6 +3151,263 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_route_panel_managed_publication_file_delete_is_disabled_by_path(self):
+        managed_path = (
+            self.weights_dir
+            / "experts"
+            / "training_runs"
+            / "managed-route-panel"
+            / "active"
+            / "Mandible"
+            / "expert_managed.pth"
+        )
+        managed_path.parent.mkdir(parents=True)
+        managed_path.write_bytes(b"managed checkpoint")
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "expert_id": "Mandible/expert_managed.pth",
+                        "expert_part": "training_runs",
+                        "expert_filename": "managed-route-panel/active/Mandible/expert_managed.pth",
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_managed.pth",
+                            "expert_part": "training_runs",
+                            "expert_filename": "managed-route-panel/active/Mandible/expert_managed.pth",
+                        },
+                    }
+                ],
+            }
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            route_panel.route_tree.setCurrentItem(route_item.child(0))
+            route_panel.update_action_buttons()
+
+            self.assertFalse(route_panel.btn_delete_expert_file.isEnabled())
+            with patch.object(route_management_module, "themed_yes_no_question") as confirm, \
+                 patch.object(route_management_module.os, "remove") as remove_file:
+                route_panel.delete_selected_expert_file()
+
+            confirm.assert_not_called()
+            remove_file.assert_not_called()
+            self.assertTrue(managed_path.exists())
+        finally:
+            window.deleteLater()
+
+    def test_route_panel_delete_rechecks_ancestor_after_confirmation(self):
+        expert_dir = self.weights_dir / "experts" / "Mandible"
+        expert_dir.mkdir(parents=True, exist_ok=True)
+        expert_path = expert_dir / "expert_reparse_guard.pth"
+        expert_path.write_bytes(b"must remain")
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "expert_id": "Mandible/expert_reparse_guard.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_reparse_guard.pth",
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_reparse_guard.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_reparse_guard.pth",
+                        },
+                    }
+                ],
+            }
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            route_panel.route_tree.setCurrentItem(route_item.child(0))
+            original_lstat = os.lstat
+            state = {"reparse": False}
+
+            def guarded_lstat(path):
+                observed = original_lstat(path)
+                if state["reparse"] and os.path.normcase(os.path.abspath(path)) == os.path.normcase(str(expert_dir)):
+                    return types.SimpleNamespace(
+                        st_mode=observed.st_mode,
+                        st_dev=observed.st_dev,
+                        st_ino=observed.st_ino,
+                        st_mtime_ns=observed.st_mtime_ns,
+                        st_file_attributes=0x400,
+                    )
+                return observed
+
+            def confirm_then_swap(*_args, **_kwargs):
+                state["reparse"] = True
+                return main_module.QMessageBox.Yes
+
+            with patch.object(route_management_module.os, "lstat", side_effect=guarded_lstat), \
+                 patch.object(route_management_module, "themed_yes_no_question", side_effect=confirm_then_swap), \
+                 patch.object(route_management_module.os, "remove") as remove_file, \
+                 patch.object(route_management_module.QMessageBox, "critical") as critical:
+                route_panel.delete_selected_expert_file()
+
+            remove_file.assert_not_called()
+            critical.assert_called_once()
+            self.assertTrue(expert_path.exists())
+        finally:
+            window.deleteLater()
+
+    def test_route_panel_delete_rechecks_fingerprint_after_confirmation(self):
+        expert_dir = self.weights_dir / "experts" / "Mandible"
+        expert_dir.mkdir(parents=True, exist_ok=True)
+        expert_path = expert_dir / "expert_fingerprint_guard.pth"
+        expert_path.write_bytes(b"before confirmation")
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": True,
+                        "expert_id": "Mandible/expert_fingerprint_guard.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_fingerprint_guard.pth",
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_fingerprint_guard.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_fingerprint_guard.pth",
+                        },
+                    }
+                ],
+            }
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            route_panel.route_tree.setCurrentItem(route_item.child(0))
+
+            def confirm_then_replace(*_args, **_kwargs):
+                expert_path.write_bytes(b"replacement after confirmation")
+                return main_module.QMessageBox.Yes
+
+            with patch.object(route_management_module, "themed_yes_no_question", side_effect=confirm_then_replace), \
+                 patch.object(route_management_module.os, "remove") as remove_file, \
+                 patch.object(route_management_module.QMessageBox, "critical") as critical:
+                route_panel.delete_selected_expert_file()
+
+            remove_file.assert_not_called()
+            critical.assert_called_once()
+            self.assertTrue(expert_path.exists())
+            self.assertEqual(expert_path.read_bytes(), b"replacement after confirmation")
+        finally:
+            window.deleteLater()
+
+    def test_route_panel_rejects_wrong_route_appointment_without_project_write(self):
+        expert_dir = self.weights_dir / "experts" / "Mandible"
+        expert_dir.mkdir(parents=True, exist_ok=True)
+        (expert_dir / "expert_wrong_child.pth").write_bytes(b"expert")
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Eye", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Eye",
+                        "enabled": False,
+                        "appointed_expert": {},
+                        "expert_candidates": [
+                            {
+                                "expert_id": "Mandible/expert_wrong_child.pth",
+                                "expert_part": "Mandible",
+                                "expert_filename": "expert_wrong_child.pth",
+                            }
+                        ],
+                    }
+                ],
+            }
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Eye")
+            route_panel.route_tree.setCurrentItem(route_item.child(0))
+            project_before = copy.deepcopy(self.project_manager.project_data)
+
+            with patch.object(
+                window.engine.cascade_manager,
+                "get_route_block_reason",
+                return_value="blink_route_child_part_mismatch",
+            ), patch.object(
+                self.project_manager,
+                "appoint_cascade_route_expert",
+                wraps=self.project_manager.appoint_cascade_route_expert,
+            ) as appoint, patch.object(
+                route_management_module.QMessageBox,
+                "information",
+            ) as information:
+                route_panel.appoint_selected_route_expert()
+
+            appoint.assert_not_called()
+            information.assert_called_once()
+            self.assertEqual(self.project_manager.project_data, project_before)
+        finally:
+            window.deleteLater()
+
+    def test_route_panel_does_not_enable_blocked_route(self):
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head", "Mandible"]
+            self.project_manager.project_data["cascade_routes"] = {
+                "version": "project-v2",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Mandible",
+                        "enabled": False,
+                        "expert_id": "Mandible/expert_blocked.pth",
+                        "expert_part": "Mandible",
+                        "expert_filename": "expert_blocked.pth",
+                        "appointed_expert": {
+                            "expert_id": "Mandible/expert_blocked.pth",
+                            "expert_part": "Mandible",
+                            "expert_filename": "expert_blocked.pth",
+                        },
+                    }
+                ],
+            }
+            route_panel = window.route_settings_panel
+            route_panel.refresh_route_table()
+            route_item = route_panel._find_route_item("Head", "Mandible")
+            route_panel.route_tree.setCurrentItem(route_item)
+            project_before = copy.deepcopy(self.project_manager.project_data)
+
+            with patch.object(
+                window.engine.cascade_manager,
+                "get_route_block_reason",
+                return_value="blink_checkpoint_kind_missing",
+            ), patch.object(
+                self.project_manager,
+                "set_cascade_route_enabled",
+                wraps=self.project_manager.set_cascade_route_enabled,
+            ) as enable, patch.object(
+                route_management_module.QMessageBox,
+                "information",
+            ) as information:
+                route_panel.toggle_selected_route_enabled()
+
+            enable.assert_not_called()
+            information.assert_called_once()
+            self.assertEqual(self.project_manager.project_data, project_before)
+        finally:
+            window.deleteLater()
+
     def test_route_panel_can_edit_selected_child_expert_note(self):
         expert_dir = self.weights_dir / "experts" / "Mandible"
         expert_dir.mkdir(parents=True, exist_ok=True)
@@ -3280,7 +3898,7 @@ class UiPolishScopeTests(unittest.TestCase):
         locator_timestamp = "20260105_1105"
         segmenter_timestamp = "20260105_1115"
         torch.save(
-            {"state_dict": {}, "meta": {"locator_size": [640, 384]}},
+            self._v2_locator_checkpoint((640, 384)),
             self.weights_dir / f"locator_{locator_timestamp}.pth",
         )
         (self.weights_dir / f"sam_decoder_lora_{segmenter_timestamp}.pth").write_bytes(b"segmenter")
@@ -3334,7 +3952,7 @@ class UiPolishScopeTests(unittest.TestCase):
         locator_timestamp = "20260105_1105"
         segmenter_timestamp = "20260105_1115"
         torch.save(
-            {"state_dict": {}, "meta": {"locator_size": [640, 384]}},
+            self._v2_locator_checkpoint((640, 384)),
             self.weights_dir / f"locator_{locator_timestamp}.pth",
         )
         (self.weights_dir / f"sam_decoder_lora_{segmenter_timestamp}.pth").write_bytes(b"segmenter")
@@ -3395,29 +4013,1590 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
-    def test_main_window_locator_combo_marks_legacy_and_logs_display_state(self):
+    def test_main_window_locator_combo_distinguishes_exact_scope_and_legacy_assumptions(self):
         exact_timestamp = "20260105_1105"
-        legacy_timestamp = "20260105_1115"
+        legacy_resolution_timestamp = "20260105_1115"
+        legacy_512_timestamp = "20260105_1125"
         torch.save(
-            {"state_dict": {}, "meta": {"locator_size": [768, 512]}},
+            self._v2_locator_checkpoint((768, 512)),
             self.weights_dir / f"locator_{exact_timestamp}.pth",
         )
-        torch.save({"state_dict": {}}, self.weights_dir / f"locator_{legacy_timestamp}.pth")
+        torch.save(
+            {"state_dict": {}, "meta": {"locator_size": [768, 512]}},
+            self.weights_dir / f"locator_{legacy_resolution_timestamp}.pth",
+        )
+        torch.save(
+            {"state_dict": {}},
+            self.weights_dir / f"locator_{legacy_512_timestamp}.pth",
+        )
 
         window = self.make_main_window()
         try:
             exact_index = window.combo_locator.findData(exact_timestamp)
-            legacy_index = window.combo_locator.findData(legacy_timestamp)
+            legacy_resolution_index = window.combo_locator.findData(
+                legacy_resolution_timestamp
+            )
+            legacy_512_index = window.combo_locator.findData(legacy_512_timestamp)
             self.assertGreaterEqual(exact_index, 0)
-            self.assertGreaterEqual(legacy_index, 0)
+            self.assertGreaterEqual(legacy_resolution_index, 0)
+            self.assertGreaterEqual(legacy_512_index, 0)
             self.assertEqual(window.combo_locator.itemText(exact_index), f"{exact_timestamp} [exact 768x512]")
-            self.assertEqual(window.combo_locator.itemText(legacy_index), f"{legacy_timestamp} [legacy-512]")
+            self.assertEqual(
+                window.combo_locator.itemText(legacy_resolution_index),
+                f"{legacy_resolution_timestamp} [legacy scope; resolution 768x512]",
+            )
+            self.assertEqual(
+                window.combo_locator.itemText(legacy_512_index),
+                f"{legacy_512_timestamp} [legacy scope; assumed 512x512]",
+            )
+        finally:
+            window.deleteLater()
 
+    def test_managed_locator_load_uses_verified_stable_payload_and_complete_scope_gate(self):
+        original_payload = b"verified-managed-locator"
+        replacement_payload = b"replaced-after-verification"
+        successful_record, artifact, checkpoint_path = (
+            self._publish_managed_locator_for_ui(original_payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-ui.taxa"
+        )
+        self.project_manager.current_database_path = str(
+            Path(self.temp_dir.name) / "managed-ui.taxa.sqlite"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.refresh_model_list()
+                managed_index = window.combo_locator.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+                window.combo_locator.setCurrentIndex(managed_index)
+                window.active_project_kind = "image"
+                original_read = model_management_module.read_bytes_bounded_in_root
+
+                def read_then_replace(*args, **kwargs):
+                    payload = original_read(*args, **kwargs)
+                    checkpoint_path.write_bytes(replacement_payload)
+                    return payload
+
+                with patch.object(
+                    model_management_module,
+                    "read_bytes_bounded_in_root",
+                    side_effect=read_then_replace,
+                ):
+                    self.assertTrue(
+                        window._apply_locator_selection_to_runtime()
+                    )
+
+                options = self.engine.load_locator_options[-1]
+                self.assertEqual(options["timestamp"], managed_reference)
+                self.assertEqual(options["checkpoint_path"], str(checkpoint_path))
+                self.assertEqual(options["checkpoint_payload"], original_payload)
+                self.assertTrue(options["require_complete"])
+                self.assertEqual(
+                    options["expected_locator_scope"],
+                    ["Head", "Mesosoma", "Gaster"],
+                )
+                self.assertEqual(checkpoint_path.read_bytes(), replacement_payload)
+            finally:
+                window.deleteLater()
+
+    def test_managed_locator_discovery_requires_canonical_artifact_identity(self):
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_locator_for_ui(
+                b"not-a-canonical-locator-artifact",
+                artifact_id="diagnostic_weights",
+            )
+        )
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-ui.taxa"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                self.assertEqual(
+                    window.combo_locator.findData(artifact["relative_path"]),
+                    -1,
+                )
+                self.assertEqual(
+                    window._verified_managed_parent_weights()["locator"],
+                    [],
+                )
+            finally:
+                window.deleteLater()
+
+    def test_managed_segmenter_load_uses_one_verified_payload_for_engine_and_worker(self):
+        original_payload = b"verified-managed-segmenter"
+        replacement_payload = b"replaced-after-segmenter-verification"
+        successful_record, artifact, checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(original_payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-segmenter-ui.taxa"
+        )
+        self.project_manager.current_database_path = str(
+            Path(self.temp_dir.name) / "managed-segmenter-ui.taxa.sqlite"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = DummySamWorker()
+                window.sam_worker.load_model()
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+                original_read = model_management_module.read_bytes_bounded_in_root
+
+                def read_then_replace(*args, **kwargs):
+                    payload = original_read(*args, **kwargs)
+                    checkpoint_path.write_bytes(replacement_payload)
+                    return payload
+
+                with patch.object(
+                    model_management_module,
+                    "read_bytes_bounded_in_root",
+                    side_effect=read_then_replace,
+                ):
+                    self.assertTrue(
+                        window._apply_segmenter_selection_to_runtime()
+                    )
+
+                engine_options = self.engine.load_sam_decoder_options[-1]
+                worker_options = window.sam_worker.decoder_load_options[-1]
+                expected_digest = hashlib.sha256(original_payload).hexdigest()
+                self.assertEqual(engine_options["timestamp"], managed_reference)
+                self.assertEqual(
+                    engine_options["checkpoint_path"],
+                    str(checkpoint_path),
+                )
+                self.assertIs(
+                    engine_options["checkpoint_payload"],
+                    worker_options["checkpoint_payload"],
+                )
+                self.assertEqual(
+                    engine_options["checkpoint_payload"],
+                    original_payload,
+                )
+                self.assertEqual(worker_options["reference"], managed_reference)
+                self.assertTrue(worker_options["raise_on_error"])
+                self.assertEqual(
+                    self.engine.loaded_sam_decoder_reference,
+                    managed_reference,
+                )
+                self.assertEqual(
+                    window.sam_worker.loaded_decoder_reference,
+                    managed_reference,
+                )
+                for identity in (
+                    self.engine.loaded_sam_decoder_identity,
+                    window.sam_worker.loaded_decoder_identity,
+                ):
+                    self.assertEqual(identity["source"], "memory")
+                    self.assertEqual(identity["size_bytes"], len(original_payload))
+                    self.assertEqual(identity["hash_algorithm"], "sha256")
+                    self.assertEqual(identity["digest"], expected_digest)
+                self.assertEqual(checkpoint_path.read_bytes(), replacement_payload)
+            finally:
+                window.deleteLater()
+
+    def test_legacy_segmenter_load_uses_one_stable_payload_for_engine_and_worker(self):
+        timestamp = "20260105_legacy_stable"
+        original_payload = b"legacy-segmenter-before-path-replacement"
+        replacement_payload = b"legacy-segmenter-after-path-replacement"
+        checkpoint_path = self.weights_dir / f"sam_decoder_lora_{timestamp}.pth"
+        checkpoint_path.write_bytes(original_payload)
+
+        window = self.make_main_window()
+        try:
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+            window.refresh_model_list()
+            index = window.combo_segmenter.findData(timestamp)
+            self.assertGreaterEqual(index, 0)
+            blocked = window.combo_segmenter.blockSignals(True)
+            try:
+                window.combo_segmenter.setCurrentIndex(index)
+            finally:
+                window.combo_segmenter.blockSignals(blocked)
+            original_read = model_management_module.read_bytes_bounded_in_root
+
+            def read_then_replace(path, *args, **kwargs):
+                payload = original_read(path, *args, **kwargs)
+                if os.path.normcase(os.path.abspath(os.fspath(path))) == os.path.normcase(
+                    os.path.abspath(os.fspath(checkpoint_path))
+                ):
+                    checkpoint_path.write_bytes(replacement_payload)
+                return payload
+
+            with patch.object(
+                model_management_module,
+                "read_bytes_bounded_in_root",
+                side_effect=read_then_replace,
+            ):
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+
+            engine_options = self.engine.load_sam_decoder_options[-1]
+            worker_options = window.sam_worker.decoder_load_options[-1]
+            self.assertIs(
+                engine_options["checkpoint_payload"],
+                worker_options["checkpoint_payload"],
+            )
+            self.assertEqual(engine_options["checkpoint_payload"], original_payload)
+            self.assertEqual(checkpoint_path.read_bytes(), replacement_payload)
+            expected_digest = hashlib.sha256(original_payload).hexdigest()
+            self.assertEqual(
+                self.engine.loaded_sam_decoder_identity["digest"],
+                expected_digest,
+            )
+            self.assertEqual(
+                window.sam_worker.loaded_decoder_identity["digest"],
+                expected_digest,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_managed_segmenter_training_base_mismatch_fails_before_runtime_load(self):
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(
+                b"managed-segmenter-with-wrong-training-base"
+            )
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = DummySamWorker()
+                window.sam_worker.load_model()
+                window.refresh_model_list()
+                index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(index, 0)
+                blocked = window.combo_segmenter.blockSignals(True)
+                try:
+                    window.combo_segmenter.setCurrentIndex(index)
+                finally:
+                    window.combo_segmenter.blockSignals(blocked)
+                engine_load_count = len(self.engine.load_sam_decoder_calls)
+                worker_load_count = len(window.sam_worker.decoder_load_options)
+
+                with patch.object(
+                    window,
+                    "_verified_managed_training_base_sam",
+                    side_effect=ValueError(
+                        "managed_segmenter_base_sam_training_run_mismatch"
+                    ),
+                ), patch.object(
+                    model_management_module.QMessageBox,
+                    "critical",
+                ) as critical:
+                    loaded = window._apply_segmenter_selection_to_runtime()
+
+                self.assertFalse(loaded)
+                critical.assert_called_once()
+                self.assertEqual(
+                    len(self.engine.load_sam_decoder_calls),
+                    engine_load_count,
+                )
+                self.assertEqual(
+                    len(window.sam_worker.decoder_load_options),
+                    worker_load_count,
+                )
+                self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
+                self.assertIsNone(self.engine.parts_model)
+                self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+                self.assertIn(
+                    "managed_segmenter_base_sam_training_run_mismatch",
+                    window.log_console.toPlainText(),
+                )
+            finally:
+                window.deleteLater()
+
+    def test_managed_segmenter_worker_failure_clears_both_runtimes_and_restores_combo(self):
+        previous_timestamp = "20260105_1115"
+        (self.weights_dir / f"sam_decoder_lora_{previous_timestamp}.pth").write_bytes(
+            b"previously-confirmed-segmenter"
+        )
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(
+                b"verified-managed-segmenter-worker-failure"
+            )
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-segmenter-worker-failure.taxa"
+        )
+        self.project_manager.current_database_path = str(
+            Path(self.temp_dir.name)
+            / "managed-segmenter-worker-failure.taxa.sqlite"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = DummySamWorker()
+                window.sam_worker.load_model()
+                failed_worker = window.sam_worker
+                window.refresh_model_list()
+                self.assertGreaterEqual(
+                    window.combo_segmenter.findData(previous_timestamp),
+                    0,
+                )
+                window.last_confirmed_segmenter_timestamp = previous_timestamp
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+
+                with patch.object(
+                    window.sam_worker,
+                    "load_decoder_weights",
+                    side_effect=RuntimeError("worker_decoder_load_failed"),
+                ), patch.object(
+                    model_management_module.QMessageBox,
+                    "critical",
+                ) as critical:
+                    window.combo_segmenter.setCurrentIndex(managed_index)
+                    window.on_segmenter_changed(managed_index)
+
+                critical.assert_called_once()
+                self.assertEqual(
+                    window.combo_segmenter.currentData(),
+                    "BASE_SAM",
+                )
+                self.assertIsNone(self.engine.parts_model)
+                self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+                self.assertEqual(self.engine.loaded_sam_decoder_identity, {})
+                self.assertIsNot(window.sam_worker, failed_worker)
+                self.assertIsNotNone(window.sam_worker.model)
+                self.assertIsNone(window.sam_worker.current_results)
+                self.assertEqual(window.sam_worker.loaded_decoder_reference, "")
+                self.assertEqual(window.sam_worker.loaded_decoder_identity, {})
+                self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+            finally:
+                window.deleteLater()
+
+    def test_managed_segmenter_identity_mismatch_clears_both_runtimes(self):
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(
+                b"verified-managed-segmenter-identity-mismatch"
+            )
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-segmenter-identity-mismatch.taxa"
+        )
+        self.project_manager.current_database_path = str(
+            Path(self.temp_dir.name)
+            / "managed-segmenter-identity-mismatch.taxa.sqlite"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = DummySamWorker()
+                window.sam_worker.load_model()
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+                original_load = window.sam_worker.load_decoder_weights
+
+                def load_with_mismatched_identity(*args, **kwargs):
+                    loaded = original_load(*args, **kwargs)
+                    window.sam_worker.loaded_decoder_identity["digest"] = "0" * 64
+                    return loaded
+
+                with patch.object(
+                    window.sam_worker,
+                    "load_decoder_weights",
+                    side_effect=load_with_mismatched_identity,
+                ), patch.object(
+                    model_management_module.QMessageBox,
+                    "critical",
+                ) as critical:
+                    loaded = window._apply_segmenter_selection_to_runtime()
+
+                self.assertFalse(loaded)
+                critical.assert_called_once()
+                self.assertEqual(
+                    window.combo_segmenter.currentData(),
+                    "BASE_SAM",
+                )
+                self.assertIsNone(self.engine.parts_model)
+                self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+                self.assertEqual(self.engine.loaded_sam_decoder_identity, {})
+                self.assertIsNotNone(window.sam_worker.model)
+                self.assertIsNone(window.sam_worker.current_results)
+                self.assertEqual(window.sam_worker.loaded_decoder_reference, "")
+                self.assertEqual(window.sam_worker.loaded_decoder_identity, {})
+            finally:
+                window.deleteLater()
+
+    def test_managed_segmenter_failure_recreates_missing_sam_worker(self):
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(
+                b"verified-managed-segmenter-missing-worker"
+            )
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+        self.project_manager.current_project_path = str(
+            Path(self.temp_dir.name) / "managed-segmenter-missing-worker.taxa"
+        )
+        self.project_manager.current_database_path = str(
+            Path(self.temp_dir.name)
+            / "managed-segmenter-missing-worker.taxa.sqlite"
+        )
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = None
+                window.sam_thread = None
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+
+                with patch.object(
+                    self.engine,
+                    "load_sam_decoder",
+                    side_effect=RuntimeError("engine_decoder_load_failed"),
+                ), patch.object(
+                    model_management_module.QMessageBox,
+                    "critical",
+                ) as critical:
+                    loaded = window._apply_segmenter_selection_to_runtime()
+
+                self.assertFalse(loaded)
+                critical.assert_called_once()
+                self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
+                self.assertIsNotNone(window.sam_worker)
+                self.assertIsNotNone(window.sam_thread)
+                self.assertTrue(window.sam_thread.isRunning())
+                self.assertIsNotNone(window.sam_worker.model)
+                self.assertFalse(window.sam_base_reload_pending)
+            finally:
+                window.deleteLater()
+
+    def test_managed_segmenter_replays_verified_payload_after_deferred_worker_load(self):
+        payload = b"verified-managed-segmenter-deferred-worker"
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ), patch.object(annotation_module, "QThread", DeferredDummyThread):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = None
+                window.sam_thread = None
+                window.init_sam()
+                worker = window.sam_worker
+                thread = window.sam_thread
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                self.assertGreaterEqual(managed_index, 0)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+                self.assertIsNotNone(window.sam_decoder_apply_pending)
+                self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+                self.assertFalse(window._sam_worker_ready())
+                window._request_sam_box(1, 2, 10, 12)
+                self.assertEqual(worker.predict_box_calls, [])
+
+                thread.release_started()
+
+                self.assertIsNone(window.sam_decoder_apply_pending)
+                self.assertFalse(window.sam_base_reload_pending)
+                self.assertEqual(
+                    window.last_confirmed_segmenter_timestamp,
+                    managed_reference,
+                )
+                self.assertEqual(
+                    worker.decoder_load_options[-1]["checkpoint_payload"],
+                    payload,
+                )
+                self.assertEqual(
+                    worker.loaded_decoder_reference,
+                    managed_reference,
+                )
+                self.assertTrue(window._sam_worker_ready())
+            finally:
+                window.deleteLater()
+
+    def test_deferred_segmenter_pending_is_discarded_when_base_is_selected(self):
+        payload = b"verified-managed-segmenter-discarded-for-base"
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ), patch.object(annotation_module, "QThread", DeferredDummyThread):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = None
+                window.sam_thread = None
+                window.init_sam()
+                worker = window.sam_worker
+                thread = window.sam_thread
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+                self.assertIsNotNone(window.sam_decoder_apply_pending)
+
+                base_index = window.combo_segmenter.findData("BASE_SAM")
+                window.combo_segmenter.setCurrentIndex(base_index)
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+                self.assertIsNone(window.sam_decoder_apply_pending)
+
+                thread.release_started()
+
+                self.assertEqual(worker.decoder_load_options, [])
+                self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+                self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
+            finally:
+                window.deleteLater()
+
+    def test_deferred_segmenter_pending_does_not_apply_after_project_switch(self):
+        payload = b"verified-managed-segmenter-stale-project"
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ), patch.object(annotation_module, "QThread", DeferredDummyThread):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = None
+                window.sam_thread = None
+                window.init_sam()
+                worker = window.sam_worker
+                thread = window.sam_thread
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+                self.assertIsNotNone(window.sam_decoder_apply_pending)
+
+                self.project_manager.current_project_path = str(
+                    Path(self.temp_dir.name) / "switched-project.taxa"
+                )
+                thread.release_started()
+
+                self.assertIsNone(window.sam_decoder_apply_pending)
+                self.assertEqual(worker.decoder_load_options, [])
+                self.assertIsNone(self.engine.parts_model)
+                self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+                self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+            finally:
+                window.deleteLater()
+
+    def test_deferred_segmenter_worker_failure_restores_base_transactionally(self):
+        payload = b"verified-managed-segmenter-deferred-failure"
+        successful_record, artifact, _checkpoint_path = (
+            self._publish_managed_segmenter_for_ui(payload)
+        )
+        managed_reference = artifact["relative_path"]
+        self.project_manager._is_sqlite_project = True
+
+        class RecorderStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def load(self, run_id):
+                if run_id == successful_record["run_id"]:
+                    return dict(successful_record)
+                raise KeyError(run_id)
+
+        with patch.object(
+            model_management_module,
+            "TrainingRunRecorder",
+            RecorderStub,
+        ), patch.object(annotation_module, "QThread", DeferredDummyThread):
+            window = self.make_main_window()
+            try:
+                window.sam_worker = None
+                window.sam_thread = None
+                window.init_sam()
+                worker = window.sam_worker
+                thread = window.sam_thread
+                window.refresh_model_list()
+                managed_index = window.combo_segmenter.findData(managed_reference)
+                window.combo_segmenter.setCurrentIndex(managed_index)
+                self.assertTrue(window._apply_segmenter_selection_to_runtime())
+
+                with patch.object(
+                    worker,
+                    "load_decoder_weights",
+                    return_value=False,
+                ), patch.object(
+                    model_management_module.QMessageBox,
+                    "critical",
+                ) as critical:
+                    thread.release_started()
+
+                critical.assert_called_once()
+                self.assertIsNone(window.sam_decoder_apply_pending)
+                self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
+                self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+                self.assertEqual(self.engine.loaded_sam_decoder_identity, {})
+                self.assertEqual(worker.loaded_decoder_reference, "")
+                self.assertEqual(worker.loaded_decoder_identity, {})
+                self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+            finally:
+                window.deleteLater()
+
+    def test_legacy_segmenter_worker_false_result_restores_base_without_raising(self):
+        timestamp = "20260105_1350"
+        (self.weights_dir / f"sam_decoder_lora_{timestamp}.pth").write_bytes(
+            b"legacy-segmenter"
+        )
+        window = self.make_main_window()
+        try:
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+            window.refresh_model_list()
+            legacy_index = window.combo_segmenter.findData(timestamp)
+            self.assertGreaterEqual(legacy_index, 0)
+            window.combo_segmenter.setCurrentIndex(legacy_index)
+
+            with patch.object(
+                window.sam_worker,
+                "load_decoder_weights",
+                return_value=False,
+            ), patch.object(
+                model_management_module.QMessageBox,
+                "critical",
+            ) as critical:
+                loaded = window._apply_segmenter_selection_to_runtime()
+
+            self.assertFalse(loaded)
+            critical.assert_called_once()
+            self.assertEqual(window.combo_segmenter.currentData(), "BASE_SAM")
+            self.assertEqual(self.engine.loaded_sam_decoder_reference, "")
+            self.assertEqual(self.engine.loaded_sam_decoder_identity, {})
+            self.assertIsNone(window.last_confirmed_segmenter_timestamp)
+        finally:
+            window.deleteLater()
+
+    def test_sam_base_restore_uses_real_worker_thread_for_running_and_stopped_states(self):
+        app = QApplication.instance() or QApplication([])
+
+        class ReloadWorker(QObject):
+            model_loaded = Signal()
+            model_load_error = Signal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.model = None
+                self.fail_next_reload = False
+                self.current_results = object()
+                self.loaded_decoder_reference = "managed/decoder.pth"
+                self.loaded_decoder_identity = {"digest": "old"}
+
+            @Slot()
+            def reload_base_model(self):
+                if self.fail_next_reload:
+                    self.fail_next_reload = False
+                    self.model = None
+                    self.model_load_error.emit("synthetic base reload failure")
+                    return
+                self.model = object()
+                self.current_results = None
+                self.loaded_decoder_reference = ""
+                self.loaded_decoder_identity = {}
+                self.model_loaded.emit()
+
+        class ReloadHarness(annotation_module.MainWindowAnnotationMixin, QObject):
+            sam_base_reload_requested = Signal()
+            sam_box_requested = Signal(str, float, float, float, float)
+
+            def __init__(self, worker, thread):
+                super().__init__()
+                self.sam_worker = worker
+                self.sam_thread = thread
+                self.sam_base_reload_pending = False
+                self.current_lang = "en"
+                self.logs = []
+                self.current_image = "image.png"
+                self.sam_busy = False
+                self.pending_sam_part = None
+                self.pending_sam_image = None
+                self.pending_sam_description = ""
+                self.pending_sam_project_context = {}
+                self.desc_box = type(
+                    "DescriptionStub",
+                    (),
+                    {"toPlainText": lambda _self: "head description"},
+                )()
+
+            def log(self, message):
+                self.logs.append(str(message))
+
+            def _current_part_name(self):
+                return "Head"
+
+            def _capture_project_task_context(self):
+                return {"project": "thread-test"}
+
+            def _preload_engine_parts_model_async(self):
+                return False
+
+        worker_thread = QThread()
+        worker = ReloadWorker()
+        worker.moveToThread(worker_thread)
+        harness = ReloadHarness(worker, worker_thread)
+        harness.sam_base_reload_requested.connect(
+            worker.reload_base_model,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.model_loaded.connect(
+            harness._on_sam_model_loaded,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.model_load_error.connect(
+            harness._on_sam_model_load_error,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker_thread.started.connect(worker.reload_base_model)
+        loaded_spy = QSignalSpy(worker.model_loaded)
+        error_spy = QSignalSpy(worker.model_load_error)
+        box_spy = QSignalSpy(harness.sam_box_requested)
+
+        def wait_for_count(spy, expected):
+            for _attempt in range(100):
+                app.processEvents()
+                if spy.count() >= expected:
+                    break
+                spy.wait(20)
+            self.assertGreaterEqual(spy.count(), expected)
+            app.processEvents()
+
+        try:
+            worker_thread.start()
+            wait_for_count(loaded_spy, 1)
+            self.assertTrue(harness._sam_worker_ready())
+
+            harness.sam_base_reload_pending = True
+            harness._request_sam_box(1, 2, 10, 12)
+            self.assertEqual(box_spy.count(), 0)
+            self.assertFalse(harness.sam_busy)
+            harness.sam_base_reload_pending = False
+            harness._request_sam_box(1, 2, 10, 12)
+            self.assertEqual(box_spy.count(), 1)
+            self.assertTrue(harness.sam_busy)
+            harness.sam_busy = False
+
+            worker.model = None
+            harness.sam_base_reload_pending = False
+            self.assertTrue(harness._request_sam_base_reload())
+            self.assertTrue(harness.sam_base_reload_pending)
+            wait_for_count(loaded_spy, 2)
+            self.assertTrue(harness._sam_worker_ready())
+
+            worker_thread.quit()
+            self.assertTrue(worker_thread.wait(5000))
+            worker.model = None
+            harness.sam_base_reload_pending = False
+            self.assertTrue(harness._request_sam_base_reload())
+            wait_for_count(loaded_spy, 3)
+            self.assertTrue(worker_thread.isRunning())
+            self.assertTrue(harness._sam_worker_ready())
+
+            worker.model = None
+            worker.fail_next_reload = True
+            harness.sam_base_reload_pending = False
+            self.assertTrue(harness._request_sam_base_reload())
+            wait_for_count(error_spy, 1)
+            self.assertFalse(harness.sam_base_reload_pending)
+            self.assertFalse(harness._sam_worker_ready())
+            self.assertTrue(harness._request_sam_base_reload())
+            wait_for_count(loaded_spy, 4)
+            self.assertTrue(harness._sam_worker_ready())
+        finally:
+            worker_thread.quit()
+            worker_thread.wait(5000)
+
+    def test_locator_selection_is_restored_without_loading_while_training(self):
+        confirmed_timestamp = "20260105_1200"
+        requested_timestamp = "20260105_1100"
+        for timestamp in (confirmed_timestamp, requested_timestamp):
+            torch.save(
+                self._v2_locator_checkpoint((640, 384)),
+                self.weights_dir / f"locator_{timestamp}.pth",
+            )
+
+        window = self.make_main_window()
+        try:
+            window.active_project_kind = "image"
+            confirmed_index = window.combo_locator.findData(confirmed_timestamp)
+            window.combo_locator.setCurrentIndex(confirmed_index)
+            window.on_locator_changed(confirmed_index)
+            load_count = len(self.engine.load_locator_calls)
+
+            requested_index = window.combo_locator.findData(requested_timestamp)
+            with patch.object(
+                window,
+                "_is_any_training_running",
+                return_value=True,
+            ), patch.object(
+                model_management_module.QMessageBox,
+                "information",
+            ) as information:
+                window.combo_locator.setCurrentIndex(requested_index)
+                window.on_locator_changed(requested_index)
+
+            information.assert_called_once()
+            self.assertEqual(
+                window.combo_locator.currentData(),
+                confirmed_timestamp,
+            )
+            self.assertEqual(
+                self.engine.loaded_locator_timestamp,
+                confirmed_timestamp,
+            )
+            self.assertEqual(len(self.engine.load_locator_calls), load_count)
+        finally:
+            window.deleteLater()
+
+    def test_segmenter_selection_is_restored_without_loading_while_training(self):
+        confirmed_timestamp = "20260105_1200"
+        requested_timestamp = "20260105_1100"
+        for timestamp in (confirmed_timestamp, requested_timestamp):
+            (self.weights_dir / f"sam_decoder_lora_{timestamp}.pth").write_bytes(
+                b"segmenter"
+            )
+
+        window = self.make_main_window()
+        try:
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+            confirmed_index = window.combo_segmenter.findData(confirmed_timestamp)
+            window.combo_segmenter.setCurrentIndex(confirmed_index)
+            window.on_segmenter_changed(confirmed_index)
+            engine_load_count = len(self.engine.load_sam_decoder_calls)
+            worker_load_count = len(window.sam_worker.decoder_load_options)
+
+            requested_index = window.combo_segmenter.findData(requested_timestamp)
+            with patch.object(
+                window,
+                "_is_any_training_running",
+                return_value=True,
+            ), patch.object(
+                model_management_module.QMessageBox,
+                "information",
+            ) as information:
+                window.combo_segmenter.setCurrentIndex(requested_index)
+                window.on_segmenter_changed(requested_index)
+
+            information.assert_called_once()
+            self.assertEqual(
+                window.combo_segmenter.currentData(),
+                confirmed_timestamp,
+            )
+            self.assertEqual(
+                self.engine.loaded_sam_decoder_reference,
+                confirmed_timestamp,
+            )
+            self.assertEqual(
+                window.sam_worker.loaded_decoder_reference,
+                confirmed_timestamp,
+            )
+            self.assertEqual(
+                len(self.engine.load_sam_decoder_calls),
+                engine_load_count,
+            )
+            self.assertEqual(
+                len(window.sam_worker.decoder_load_options),
+                worker_load_count,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_central_parent_model_apply_rejects_runtime_changes_while_training(self):
+        locator_confirmed = "20260105_1200"
+        locator_requested = "20260105_1100"
+        segmenter_confirmed = "20260105_1200"
+        segmenter_requested = "20260105_1100"
+        for timestamp in (locator_confirmed, locator_requested):
+            torch.save(
+                self._v2_locator_checkpoint((640, 384)),
+                self.weights_dir / f"locator_{timestamp}.pth",
+            )
+        for timestamp in (segmenter_confirmed, segmenter_requested):
+            (self.weights_dir / f"sam_decoder_lora_{timestamp}.pth").write_bytes(
+                b"segmenter"
+            )
+
+        window = self.make_main_window()
+        try:
+            window.active_project_kind = "image"
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+
+            locator_index = window.combo_locator.findData(locator_confirmed)
+            window.combo_locator.setCurrentIndex(locator_index)
+            window.on_locator_changed(locator_index)
+            segmenter_index = window.combo_segmenter.findData(segmenter_confirmed)
+            window.combo_segmenter.setCurrentIndex(segmenter_index)
+            window.on_segmenter_changed(segmenter_index)
+            locator_load_count = len(self.engine.load_locator_calls)
+            segmenter_load_count = len(self.engine.load_sam_decoder_calls)
+            worker_load_count = len(window.sam_worker.decoder_load_options)
+
+            with patch.object(
+                window,
+                "_is_any_training_running",
+                return_value=True,
+            ):
+                window.combo_locator.setCurrentIndex(
+                    window.combo_locator.findData(locator_requested)
+                )
+                self.assertFalse(window._apply_locator_selection_to_runtime())
+                window.combo_segmenter.setCurrentIndex(
+                    window.combo_segmenter.findData(segmenter_requested)
+                )
+                self.assertFalse(window._apply_segmenter_selection_to_runtime())
+
+            self.assertEqual(window.combo_locator.currentData(), locator_confirmed)
+            self.assertEqual(
+                window.combo_segmenter.currentData(),
+                segmenter_confirmed,
+            )
+            self.assertEqual(len(self.engine.load_locator_calls), locator_load_count)
+            self.assertEqual(
+                len(self.engine.load_sam_decoder_calls),
+                segmenter_load_count,
+            )
+            self.assertEqual(
+                len(window.sam_worker.decoder_load_options),
+                worker_load_count,
+            )
+        finally:
+            window.deleteLater()
+
+    def test_general_settings_are_blocked_while_training(self):
+        window = self.make_main_window()
+        try:
+            with patch.object(
+                window,
+                "_is_any_training_running",
+                return_value=True,
+            ), patch.object(
+                presentation_module,
+                "GeneralSettingsDialog",
+            ) as dialog_class, patch.object(
+                model_management_module.QMessageBox,
+                "information",
+            ) as information:
+                window.open_general_settings()
+
+            dialog_class.assert_not_called()
+            information.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_stl_model_settings_are_blocked_while_training(self):
+        window = self.make_main_window()
+        try:
+            with patch.object(
+                window,
+                "_is_any_training_running",
+                return_value=True,
+            ), patch.object(
+                presentation_module,
+                "ModelSettingsDialog",
+            ) as dialog_class, patch.object(
+                model_management_module.QMessageBox,
+                "information",
+            ) as information:
+                window.open_stl_model_settings()
+
+            dialog_class.assert_not_called()
+            information.assert_called_once()
+        finally:
+            window.deleteLater()
+
+    def test_general_settings_device_change_reapplies_segmenter_centrally(self):
+        timestamp = "20260105_1115"
+        (self.weights_dir / f"sam_decoder_lora_{timestamp}.pth").write_bytes(
+            b"segmenter"
+        )
+        window = self.make_main_window()
+        try:
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+            segmenter_index = window.combo_segmenter.findData(timestamp)
+            self.assertGreaterEqual(segmenter_index, 0)
+            window.combo_segmenter.setCurrentIndex(segmenter_index)
+            values = {
+                "language": window.current_lang,
+                "theme": window.current_theme,
+                "startup_behavior": "start_center",
+                "project_autosave_interval_sec": 5,
+                "runtime_device": "cpu",
+            }
+            with patch.object(
+                presentation_module,
+                "GeneralSettingsDialog",
+            ) as dialog_class, patch.object(
+                window,
+                "_apply_segmenter_selection_to_runtime",
+                return_value=True,
+            ) as apply_segmenter:
+                dialog = dialog_class.return_value
+                dialog.exec.return_value = True
+                dialog.get_values.return_value = values
+                window.open_general_settings()
+
+            apply_segmenter.assert_called_once_with(log_change=False)
+            self.assertEqual(window.runtime_device, "cpu")
+            self.assertEqual(window.sam_worker.device_preference, "auto")
+        finally:
+            window.deleteLater()
+
+    def test_stl_settings_device_change_reapplies_segmenter_centrally(self):
+        timestamp = "20260105_1115"
+        (self.weights_dir / f"sam_decoder_lora_{timestamp}.pth").write_bytes(
+            b"segmenter"
+        )
+        window = self.make_main_window()
+        try:
+            window.sam_worker = DummySamWorker()
+            window.sam_worker.load_model()
+            segmenter_index = window.combo_segmenter.findData(timestamp)
+            self.assertGreaterEqual(segmenter_index, 0)
+            window.combo_segmenter.setCurrentIndex(segmenter_index)
+            values = {
+                "epochs": window.train_epochs,
+                "batch": window.train_batch,
+                "blink_epochs": window.blink_train_epochs,
+                "blink_batch": window.blink_train_batch,
+                "blink_lr": window.blink_train_lr,
+                "blink_weight_decay": window.blink_train_weight_decay,
+                "blink_input_size": window.blink_train_input_size,
+                "blink_auto_shrink_steps": window.blink_auto_shrink_steps,
+                "blink_training_strategy": window.blink_training_strategy,
+                "lr": window.train_lr,
+                "wd": window.train_wd,
+                "conf": window.inf_conf,
+                "adapt": window.inf_adapt,
+                "pad": window.inf_pad,
+                "noise_floor": window.inf_noise_floor,
+                "poly_epsilon": window.inf_poly_epsilon,
+                "runtime_device": "cpu",
+                "model_backend": window.model_backend,
+                "external_backend": window.external_backend_config,
+                "locator_scope": self.project_manager.get_locator_scope(),
+                "vlm_preannotation": {},
+                "parent_box_aspect_ratios": {},
+                "model_profiles": {},
+            }
+            with patch.object(
+                presentation_module,
+                "ModelSettingsDialog",
+            ) as dialog_class, patch.object(
+                window,
+                "_apply_segmenter_selection_to_runtime",
+                return_value=True,
+            ) as apply_segmenter:
+                dialog = dialog_class.return_value
+                dialog.exec.return_value = True
+                dialog.get_values.return_value = values
+                window.open_stl_model_settings()
+
+            apply_segmenter.assert_called_once_with(log_change=False)
+            self.assertEqual(window.runtime_device, "cpu")
+            self.assertEqual(window.sam_worker.device_preference, "auto")
+        finally:
+            window.deleteLater()
+
+    def test_legacy_locator_confirmation_yes_records_explicit_scope_and_resolution_assumptions(self):
+        timestamp = "20260105_1115"
+        torch.save(
+            {"state_dict": {}},
+            self.weights_dir / f"locator_{timestamp}.pth",
+        )
+        self.engine.legacy_locator_timestamps.add(timestamp)
+        self.engine.legacy_locator_uses_512.add(timestamp)
+
+        window = self.make_main_window()
+        try:
+            window.current_lang = "zh"
+            window.active_project_kind = "image"
+            index = window.combo_locator.findData(timestamp)
+            window.combo_locator.setCurrentIndex(index)
+            self.assertTrue(window._apply_locator_selection_to_runtime())
+            with patch.object(
+                model_management_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.Yes,
+            ) as question:
+                self.assertTrue(
+                    window._confirm_legacy_locator_selection_if_needed()
+                )
+
+            prompt = question.call_args.args[2]
+            self.assertIn("有序部位范围", prompt)
+            self.assertIn("Head, Mesosoma, Gaster", prompt)
+            self.assertIn("512px", prompt)
+            self.assertFalse(
+                self.engine.loaded_locator_requires_legacy_confirmation
+            )
+            self.assertEqual(window.last_confirmed_locator_timestamp, timestamp)
+        finally:
+            window.deleteLater()
+
+    def test_legacy_locator_confirmation_no_restores_last_confirmed_model(self):
+        good_timestamp = "20260105_1200"
+        legacy_timestamp = "20260105_1100"
+        torch.save(
+            self._v2_locator_checkpoint((640, 384)),
+            self.weights_dir / f"locator_{good_timestamp}.pth",
+        )
+        torch.save(
+            {"state_dict": {}, "meta": {"locator_size": [640, 384]}},
+            self.weights_dir / f"locator_{legacy_timestamp}.pth",
+        )
+        self.engine.legacy_locator_timestamps.add(legacy_timestamp)
+
+        window = self.make_main_window()
+        try:
+            window.active_project_kind = "image"
+            good_index = window.combo_locator.findData(good_timestamp)
+            window.combo_locator.setCurrentIndex(good_index)
+            window.on_locator_changed(good_index)
+            self.assertEqual(
+                window.last_confirmed_locator_timestamp,
+                good_timestamp,
+            )
+
+            legacy_index = window.combo_locator.findData(legacy_timestamp)
+            with patch.object(
+                model_management_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.No,
+            ):
+                window.combo_locator.setCurrentIndex(legacy_index)
+                window.on_locator_changed(legacy_index)
+
+            self.assertEqual(window.combo_locator.currentData(), good_timestamp)
+            self.assertEqual(self.engine.loaded_locator_timestamp, good_timestamp)
+            self.assertEqual(
+                window.last_confirmed_locator_timestamp,
+                good_timestamp,
+            )
+            self.assertIn(
+                "Legacy locator selection was cancelled.",
+                window.log_console.toPlainText(),
+            )
+        finally:
+            window.deleteLater()
+
+    def test_locator_combo_load_failure_is_reported_and_restores_last_ready_model(self):
+        good_timestamp = "20260105_1200"
+        bad_timestamp = "20260105_1100"
+        for timestamp in (good_timestamp, bad_timestamp):
+            torch.save(
+                self._v2_locator_checkpoint((640, 384)),
+                self.weights_dir / f"locator_{timestamp}.pth",
+            )
+
+        window = self.make_main_window()
+        try:
             window.enter_image_workflow()
-            window.combo_locator.setCurrentIndex(legacy_index)
-            window.on_locator_changed(legacy_index)
+            self.assertEqual(window.combo_locator.currentData(), good_timestamp)
+            self.assertEqual(window.last_confirmed_locator_timestamp, good_timestamp)
 
-            self.assertIn(f"Locator switched to: {legacy_timestamp} [legacy-512]", window.log_console.toPlainText())
+            original_load = self.engine.load_locator
+
+            def fail_bad_locator(timestamp, checkpoint_path=None, **kwargs):
+                if timestamp == bad_timestamp:
+                    self.engine.locator = None
+                    self.engine.loaded_locator_timestamp = None
+                    raise ValueError("locator_checkpoint_state_mismatch")
+                return original_load(
+                    timestamp,
+                    checkpoint_path=checkpoint_path,
+                    **kwargs,
+                )
+
+            bad_index = window.combo_locator.findData(bad_timestamp)
+            self.assertGreaterEqual(bad_index, 0)
+            with patch.object(self.engine, "load_locator", side_effect=fail_bad_locator), \
+                 patch.object(main_module.QMessageBox, "critical") as critical:
+                window.combo_locator.setCurrentIndex(bad_index)
+                window.on_locator_changed(bad_index)
+
+            critical.assert_called_once()
+            self.assertEqual(window.combo_locator.currentData(), good_timestamp)
+            self.assertEqual(self.engine.loaded_locator_timestamp, good_timestamp)
+            self.assertIsNotNone(self.engine.locator)
+            self.assertIsNone(window.locator_load_failure)
+            self.assertIn(
+                "Prediction and training were stopped",
+                window.log_console.toPlainText(),
+            )
+        finally:
+            window.deleteLater()
+
+    def test_locator_preload_failure_blocks_single_batch_and_training_entrypoints(self):
+        bad_timestamp = "20260105_1100"
+        torch.save(
+            self._v2_locator_checkpoint((640, 384)),
+            self.weights_dir / f"locator_{bad_timestamp}.pth",
+        )
+        image_path = Path(self.temp_dir.name) / "locator_gate.png"
+        image = QImage(120, 90, QImage.Format_RGB32)
+        image.fill(0xFFB0B0B0)
+        self.assertTrue(image.save(str(image_path)))
+        image_key = str(image_path)
+
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [image_key]
+            self.project_manager.project_data["labels"] = {
+                image_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                }
+            }
+            self.engine.current_num_classes = 1
+            window.current_image = image_key
+
+            def fail_locator(*_args, **_kwargs):
+                self.engine.locator = None
+                self.engine.loaded_locator_timestamp = None
+                raise ValueError("locator_checkpoint_state_mismatch")
+
+            with patch.object(self.engine, "load_locator", side_effect=fail_locator), \
+                 patch.object(main_module.QMessageBox, "critical") as critical:
+                window.run_prediction()
+                window.run_batch_inference()
+
+            self.assertEqual(self.engine.predict_calls, [])
+            self.assertIsNone(getattr(window, "inf_thread", None))
+            self.assertIsNone(self.engine.locator)
+            self.assertGreaterEqual(critical.call_count, 2)
+
+            self.project_manager.project_data["labels"][image_key].update(
+                {
+                    "parts": {
+                        "Head": [
+                            [10.0, 10.0],
+                            [45.0, 10.0],
+                            [24.0, 45.0],
+                        ]
+                    },
+                    "boxes": {"Head": [8.0, 8.0, 48.0, 48.0]},
+                    "status": "labeled",
+                }
+            )
+            window.chk_train_locator_only.setChecked(True)
+            with patch.object(self.engine, "load_locator", side_effect=fail_locator), \
+                 patch.object(main_module.QMessageBox, "critical"), \
+                 patch.object(main_module.QMessageBox, "warning"), \
+                 patch.object(main_module.QMessageBox, "information"), \
+                 patch.object(window, "_ensure_training_integrity_baseline", return_value=True), \
+                 patch.object(window, "_show_structured_training_preflight", return_value=True), \
+                 patch.object(window, "_launch_training_with_preflight") as launch:
+                window.run_training()
+
+            launch.assert_not_called()
+            self.assertIsNone(self.engine.locator)
+        finally:
+            window.deleteLater()
+
+    def test_pending_sam_runtime_blocks_single_batch_and_training_entrypoints(self):
+        for pending_kind in ("decoder", "base"):
+            with self.subTest(pending_kind=pending_kind):
+                image_key = str(
+                    Path(self.temp_dir.name) / f"sam_pending_{pending_kind}.png"
+                )
+                window = self.make_main_window()
+                try:
+                    self.project_manager.project_data["images"] = [image_key]
+                    self.project_manager.project_data["labels"] = {
+                        image_key: {
+                            "parts": {},
+                            "boxes": {},
+                            "auto_boxes": {},
+                            "descriptions": {},
+                            "status": "unlabeled",
+                            "genus": "Unknown",
+                        }
+                    }
+                    window.current_image = image_key
+                    window.sam_decoder_apply_pending = (
+                        {"reference": "pending-segmenter"}
+                        if pending_kind == "decoder"
+                        else None
+                    )
+                    window.sam_base_reload_pending = pending_kind == "base"
+                    prediction_count = len(self.engine.predict_calls)
+
+                    with patch.object(
+                        model_management_module.QMessageBox,
+                        "information",
+                    ) as information, patch.object(
+                        window,
+                        "_ensure_training_integrity_baseline",
+                    ) as training_baseline, patch.object(
+                        window,
+                        "_launch_training_with_preflight",
+                    ) as launch:
+                        window.run_prediction()
+                        window.run_batch_inference()
+                        window.run_training()
+
+                    self.assertEqual(information.call_count, 3)
+                    self.assertEqual(len(self.engine.predict_calls), prediction_count)
+                    self.assertIsNone(getattr(window, "inf_thread", None))
+                    training_baseline.assert_not_called()
+                    launch.assert_not_called()
+                finally:
+                    window.deleteLater()
+
+    def test_rejected_legacy_locator_confirmation_blocks_single_batch_and_training(self):
+        legacy_timestamp = "20260105_1100"
+        torch.save(
+            {"state_dict": {}, "meta": {"locator_size": [640, 384]}},
+            self.weights_dir / f"locator_{legacy_timestamp}.pth",
+        )
+        self.engine.legacy_locator_timestamps.add(legacy_timestamp)
+
+        unlabeled_path = Path(self.temp_dir.name) / "legacy_gate_unlabeled.png"
+        labeled_path = Path(self.temp_dir.name) / "legacy_gate_labeled.png"
+        for image_path in (unlabeled_path, labeled_path):
+            image = QImage(120, 90, QImage.Format_RGB32)
+            image.fill(0xFFB0B0B0)
+            self.assertTrue(image.save(str(image_path)))
+
+        unlabeled_key = str(unlabeled_path)
+        labeled_key = str(labeled_path)
+        window = self.make_main_window()
+        try:
+            self.project_manager.project_data["taxonomy"] = ["Head"]
+            self.project_manager.project_data["locator_scope"] = ["Head"]
+            self.project_manager.project_data["images"] = [
+                unlabeled_key,
+                labeled_key,
+            ]
+            self.project_manager.project_data["labels"] = {
+                unlabeled_key: {
+                    "parts": {},
+                    "boxes": {},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "unlabeled",
+                    "genus": "Unknown",
+                },
+                labeled_key: {
+                    "parts": {
+                        "Head": [
+                            [10.0, 10.0],
+                            [45.0, 10.0],
+                            [24.0, 45.0],
+                        ]
+                    },
+                    "boxes": {"Head": [8.0, 8.0, 48.0, 48.0]},
+                    "auto_boxes": {},
+                    "descriptions": {},
+                    "status": "labeled",
+                    "genus": "Unknown",
+                },
+            }
+            self.engine.current_num_classes = 1
+            self.engine.current_locator_scope = ["Head"]
+            window.current_image = unlabeled_key
+            window.active_project_kind = "image"
+            legacy_index = window.combo_locator.findData(legacy_timestamp)
+            window.combo_locator.setCurrentIndex(legacy_index)
+            self.assertTrue(window._apply_locator_selection_to_runtime())
+            self.assertTrue(
+                self.engine.loaded_locator_requires_legacy_confirmation
+            )
+            window.chk_train_locator_only.setChecked(True)
+
+            with patch.object(
+                model_management_module,
+                "themed_yes_no_question",
+                return_value=main_module.QMessageBox.No,
+            ) as question, patch.object(
+                window,
+                "_ensure_training_integrity_baseline",
+                return_value=True,
+            ), patch.object(
+                window,
+                "_show_structured_training_preflight",
+                return_value=True,
+            ), patch.object(
+                window,
+                "_launch_training_with_preflight",
+            ) as launch:
+                window.run_prediction()
+                window.run_batch_inference()
+                window.run_training()
+
+            self.assertEqual(question.call_count, 3)
+            self.assertEqual(self.engine.predict_calls, [])
+            self.assertIsNone(getattr(window, "inf_thread", None))
+            launch.assert_not_called()
+            self.assertTrue(
+                self.engine.loaded_locator_requires_legacy_confirmation
+            )
         finally:
             window.deleteLater()
 
@@ -3958,7 +6137,7 @@ class UiPolishScopeTests(unittest.TestCase):
 
             with patch.object(window, "_show_structured_training_preflight", return_value=True), \
                  patch.object(window, "_confirm_legacy_locator_selection_if_needed", return_value=True), \
-                 patch.object(window, "ensure_locator_preloaded"), \
+                 patch.object(window, "_ensure_locator_ready_for_operation", return_value=True), \
                  patch.object(window, "ensure_sam_preloaded"), \
                  patch.object(window, "_launch_training_with_preflight", side_effect=fake_launch):
                 window.run_training()

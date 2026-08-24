@@ -186,6 +186,9 @@ class SmokeSamWorker:
         self.model = object()
         self.model_loaded.emit()
 
+    def reload_base_model(self):
+        self.load_model()
+
 
 class SmokeCascadeManager:
     def list_available_experts(self):

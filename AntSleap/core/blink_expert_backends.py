@@ -3,9 +3,15 @@ from .cascade_routes import (
     ROUTE_BACKEND_HEATMAP_BLINK,
     ROUTE_BACKEND_VIT_B_BLINK,
 )
-from .blink_expert_manifest import load_blink_expert_manifest
+from .blink_expert_manifest import (
+    validate_blink_expert_contract,
+    verify_blink_manifest_payload,
+)
 from .projection import CoordinateMapper
 
+import hashlib
+import io
+import os
 import cv2
 import numpy as np
 import torch
@@ -65,8 +71,19 @@ class VitBBlinkBackend:
 
     def predict_child_box(self, *, manager, image_path, parent_box, child_part_name, parent_part, route_record, context=None):
         expert_part = str(route_record.get("expert_part") or route_record.get("child") or child_part_name).strip()
-        expert_path = manager.resolve_route_expert_path(route_record)
-        expert_model = manager._load_expert(expert_part, model_path=expert_path)
+        checkpoint = manager.resolve_route_expert_checkpoint(route_record)
+        if not checkpoint:
+            return None
+        expert_model = manager._load_expert(
+            expert_part,
+            model_path=checkpoint["path"],
+            checkpoint_bytes=checkpoint["checkpoint_bytes"],
+            checkpoint_digest=checkpoint["digest"],
+            checkpoint_source=checkpoint["source"],
+            manifest_payload=checkpoint.get("manifest_payload"),
+            manifest_identity=checkpoint.get("manifest_identity"),
+            route_record=route_record,
+        )
         if expert_model is None:
             return None
         return manager._infer_with_loaded_expert(image_path, parent_box, child_part_name, expert_model)
@@ -76,8 +93,8 @@ class HeatmapBlinkBackend:
     backend_id = ROUTE_BACKEND_HEATMAP_BLINK
 
     def predict_child_box(self, *, manager, image_path, parent_box, child_part_name, parent_part, route_record, context=None):
-        expert_path = manager.resolve_route_expert_path(route_record)
-        model = self._load_model(manager, expert_path, route_record)
+        checkpoint = manager.resolve_route_expert_checkpoint(route_record)
+        model = self._load_model(manager, checkpoint, route_record)
         if model is None:
             return None
 
@@ -128,16 +145,62 @@ class HeatmapBlinkBackend:
             "backend": self.backend_id,
         }
 
-    def _load_model(self, manager, expert_path, route_record):
-        if not expert_path:
+    def _load_model(self, manager, checkpoint, route_record):
+        if not isinstance(checkpoint, dict):
             return None
-        cache_key = f"{self.backend_id}:{expert_path}"
+        expert_path = checkpoint.get("path")
+        checkpoint_bytes = checkpoint.get("checkpoint_bytes")
+        checkpoint_digest = str(checkpoint.get("digest") or "")
+        checkpoint_source = str(checkpoint.get("source") or "unknown")
+        if not expert_path or not isinstance(checkpoint_bytes, bytes) or not checkpoint_digest:
+            return None
+        observed_checkpoint_digest = hashlib.sha256(checkpoint_bytes).hexdigest()
+        if checkpoint_digest != observed_checkpoint_digest:
+            raise BlinkBackendError("blink_checkpoint_payload_digest_mismatch")
+        manifest_payload = checkpoint.get("manifest_payload")
+        manifest_identity = checkpoint.get("manifest_identity")
+        manifest = {}
+        manifest_digest = "no-manifest"
+        if manifest_payload is not None:
+            try:
+                manifest, manifest_digest = verify_blink_manifest_payload(
+                    manifest_payload,
+                    manifest_identity,
+                )
+            except ValueError as exc:
+                raise BlinkBackendError(str(exc)) from exc
+        cache_key = ":".join(
+            (
+                self.backend_id,
+                checkpoint_source,
+                os.path.normcase(os.path.abspath(expert_path)),
+                manifest_digest,
+                observed_checkpoint_digest,
+            )
+        )
         if cache_key in manager.loaded_experts:
-            return manager.loaded_experts[cache_key]
-        if not expert_path or not torch or not cv2:
+            model = manager.loaded_experts[cache_key]
+            if manifest:
+                try:
+                    validate_blink_expert_contract(
+                        manifest,
+                        getattr(model, "_taxamask_meta", {}),
+                        expected_backend=self.backend_id,
+                        route_input_size=route_record.get("input_size"),
+                        route_parent_part=route_record.get("parent"),
+                        route_child_part=route_record.get("child"),
+                    )
+                except ValueError as exc:
+                    raise BlinkBackendError(str(exc)) from exc
+            return model
+        if not torch or not cv2:
             return None
         try:
-            loaded = torch.load(expert_path, map_location=manager.device, weights_only=True)
+            loaded = torch.load(
+                io.BytesIO(checkpoint_bytes),
+                map_location=manager.device,
+                weights_only=True,
+            )
         except Exception as exc:
             raise BlinkBackendError(f"heatmap_blink_load_failed:{exc}") from exc
 
@@ -147,12 +210,25 @@ class HeatmapBlinkBackend:
             checkpoint_state = loaded.get("state_dict", {})
             checkpoint_meta = loaded.get("meta", {}) if isinstance(loaded.get("meta"), dict) else {}
 
-        manifest_path = str(route_record.get("expert_manifest") or "").strip()
-        manifest = load_blink_expert_manifest(manifest_path)
-        manifest_input = manifest.get("input_size") if isinstance(manifest, dict) else None
-        input_size = normalize_heatmap_input_size(
-            manifest_input or checkpoint_meta.get("input_size") or route_record.get("input_size") or 512
-        )
+        if manifest:
+            try:
+                contract = validate_blink_expert_contract(
+                    manifest,
+                    checkpoint_meta,
+                    expected_backend=self.backend_id,
+                    route_input_size=route_record.get("input_size"),
+                    route_parent_part=route_record.get("parent"),
+                    route_child_part=route_record.get("child"),
+                )
+            except ValueError as exc:
+                raise BlinkBackendError(str(exc)) from exc
+            input_size = normalize_heatmap_input_size(contract["input_size"])
+        else:
+            input_size = normalize_heatmap_input_size(
+                checkpoint_meta.get("input_size")
+                or route_record.get("input_size")
+                or 512
+            )
 
         try:
             base_channels = int(checkpoint_meta.get("base_channels", 24))

@@ -102,6 +102,7 @@ class LossWeightProfileWiringTests(unittest.TestCase):
                 {"selected_locator_size": [640, 384]},
                 ["Head"],
                 ["Head"],
+                train_segmenter=False,
             )
 
         expected_snapshot = {"locator": custom_weights}

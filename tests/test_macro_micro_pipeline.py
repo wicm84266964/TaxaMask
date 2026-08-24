@@ -1,5 +1,6 @@
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportIndexIssue=false
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -176,8 +177,8 @@ class MacroMicroPipelineTests(unittest.TestCase):
             loader_calls = []
             infer_calls = []
 
-            def fake_load(part_name, model_path=None):
-                loader_calls.append((part_name, model_path))
+            def fake_load(part_name, model_path=None, **checkpoint):
+                loader_calls.append((part_name, model_path, checkpoint))
                 return object()
 
             def fake_infer(image_path, parent_box, child_part_name, expert_model):
@@ -208,7 +209,19 @@ class MacroMicroPipelineTests(unittest.TestCase):
             )
 
             self.assertEqual(result["box"], [1, 2, 3, 4])
-            self.assertEqual(loader_calls, [("Mandible", str(expert_path))])
+            self.assertEqual(loader_calls[0][0:2], ("Mandible", str(expert_path)))
+            self.assertEqual(
+                loader_calls[0][2]["checkpoint_bytes"],
+                b"placeholder",
+            )
+            self.assertEqual(
+                loader_calls[0][2]["checkpoint_source"],
+                "legacy_route_compatibility",
+            )
+            self.assertEqual(
+                loader_calls[0][2]["checkpoint_digest"],
+                hashlib.sha256(b"placeholder").hexdigest(),
+            )
             self.assertEqual(infer_calls[0][1], [10, 20, 80, 70])
             self.assertEqual(infer_calls[0][2], "Mandible")
 

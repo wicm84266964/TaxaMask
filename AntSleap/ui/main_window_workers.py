@@ -556,6 +556,10 @@ class TrainingThread(QThread):
         self.has_locator_stage = bool(self.locator_train_data and self.locator_val_data)
         self.has_parts_stage = bool(self.train_segmenter and self.parts_train_data and self.parts_val_data)
         self.saved_weights_timestamp = None
+        self._trained_locator_runtime = None
+        self._trained_locator_optimizer = None
+        self._trained_parts_runtime = None
+        self._trained_parts_optimizer = None
         self.training_run = training_run
         self._weight_publisher = None
         self.model_output_root = os.path.abspath(
@@ -603,11 +607,13 @@ class TrainingThread(QThread):
             )
 
     def _publish_weights(self):
+        self._assert_training_runtimes_unchanged()
         run = self.training_run
         if run is None:
             return self.engine.save_weights(
                 save_locator=self.has_locator_stage,
                 save_segmenter=self.has_parts_stage,
+                locator_scope=self.locator_scope,
             )
         publisher = TrainingWeightPublisher(self.model_output_root)
         self._weight_publisher = publisher
@@ -640,6 +646,7 @@ class TrainingThread(QThread):
                 save_segmenter=self.has_parts_stage,
                 output_dir=staging_dir,
                 artifact_key=run.run_id,
+                locator_scope=self.locator_scope,
             )
             publication = publisher.publish_pending(run.run_id, staging_dir, specs)
         run.register_path_base("managed_model_root", self.model_output_root)
@@ -658,6 +665,18 @@ class TrainingThread(QThread):
             if observed.get("digest") != artifact.get("digest"):
                 raise ValueError("published_weight_artifact_mismatch")
         return run.run_id, publisher
+
+    def _assert_training_runtimes_unchanged(self):
+        if self.has_locator_stage and (
+            self.engine.locator is not self._trained_locator_runtime
+            or self.engine.opt_loc is not self._trained_locator_optimizer
+        ):
+            raise RuntimeError("parent_training_locator_runtime_changed")
+        if self.has_parts_stage and (
+            self.engine.parts_model is not self._trained_parts_runtime
+            or self.engine.opt_parts is not self._trained_parts_optimizer
+        ):
+            raise RuntimeError("parent_training_segmenter_runtime_changed")
 
     def _tr(self, text):
         return self.translate(text, self.lang)
@@ -678,6 +697,8 @@ class TrainingThread(QThread):
             if self.has_locator_stage:
                 locator = self.engine.ensure_locator_loaded()
                 opt_loc = self.engine.opt_loc
+                self._trained_locator_runtime = locator
+                self._trained_locator_optimizer = opt_loc
                 ds_loc_train = TwoStageDataset(self.locator_train_data, self.locator_scope, mode="locator", input_size=tuple(self.engine.locator_resolution))
                 ds_loc_val = TwoStageDataset(self.locator_val_data, self.locator_scope, mode="locator", input_size=tuple(self.engine.locator_resolution))
                 dl_loc_train = DataLoader(ds_loc_train, batch_size=max(1, self.batch_size * 2), shuffle=True)
@@ -723,6 +744,8 @@ class TrainingThread(QThread):
                 dl_parts_val = DataLoader(ds_parts_val, batch_size=1, shuffle=False)
                 parts_model = self.engine.ensure_parts_model_loaded()
                 opt_parts = self.engine.opt_parts
+                self._trained_parts_runtime = parts_model
+                self._trained_parts_optimizer = opt_parts
                 self.log_signal.emit(self._tr("Training SAM... (BS=1)"))
                 for epoch in range(self.epochs):
                     if self.isInterruptionRequested():

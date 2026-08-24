@@ -60,7 +60,19 @@ def main() -> int:
     parser.add_argument("--text-api-protocol", default="auto", help="Text LLM protocol: auto, chat_completions, or responses.")
     parser.add_argument("--disable-part-description-extraction", action="store_true", help="Skip text-only taxon part-description extraction.")
     parser.add_argument("--disable-multimodal-validation", action="store_true", help="Use local/mock review path.")
-    parser.add_argument("--save-images", action="store_true", help="Save figure clips to files.")
+    parser.add_argument(
+        "--save-images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save figure clips required by the import-ready projection (default: enabled).",
+    )
+    parser.add_argument(
+        "--resume",
+        dest="resume_completed_pdfs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse complete PDF database results when their source images remain available (default: enabled).",
+    )
     parser.add_argument("--run-index", default="", help="Optional run index JSON path.")
     args = parser.parse_args()
 
@@ -121,6 +133,8 @@ def main() -> int:
         "figure_profile_name": figure_profile_name,
         "part_description_profile_path": part_description_profile_path,
         "part_description_profile_name": part_description_profile_name,
+        "save_images": bool(args.save_images),
+        "resume_completed_pdfs": bool(args.resume_completed_pdfs),
         "started_at_unix": started,
         "finished_at_unix": None,
         "duration_seconds": None,
@@ -173,13 +187,51 @@ def main() -> int:
             figure_profile_path=figure_profile_path,
             part_description_profile=part_description_profile,
             part_description_profile_path=part_description_profile_path,
+            resume_completed_pdfs=bool(args.resume_completed_pdfs),
         )
         for pdf_path in pdfs:
             try:
                 result = extractor.extract_from_pdf(pdf_path)
-                results.append({"pdf_path": pdf_path, "ok": True, "result": result, "error": ""})
+                extraction_status = str((result or {}).get("status") or "success").strip().lower()
+                if extraction_status == "partial_success":
+                    stats = dict((result or {}).get("stats") or {})
+                    projection_error = str(
+                        stats.get("import_ready_export_error")
+                        or "import-ready figure projection failed"
+                    )
+                    results.append(
+                        {
+                            "pdf_path": pdf_path,
+                            "ok": False,
+                            "status": "failed_projection",
+                            "database_committed": True,
+                            "result": result,
+                            "error": projection_error,
+                            "import_ready_recovery_directory": str(
+                                stats.get("import_ready_recovery_directory") or ""
+                            ),
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "pdf_path": pdf_path,
+                            "ok": True,
+                            "status": extraction_status,
+                            "result": result,
+                            "error": "",
+                        }
+                    )
             except Exception as exc:
-                results.append({"pdf_path": pdf_path, "ok": False, "result": None, "error": str(exc)})
+                results.append(
+                    {
+                        "pdf_path": pdf_path,
+                        "ok": False,
+                        "status": "failed",
+                        "result": None,
+                        "error": str(exc),
+                    }
+                )
     except Exception as exc:
         status = "failed"
         error = str(exc)
@@ -190,10 +242,15 @@ def main() -> int:
     finished = time.time()
     total = len(results)
     ok_count = sum(1 for item in results if bool(item.get("ok", False)))
-    failed_count = total - ok_count
+    projection_failed_count = sum(
+        1 for item in results if item.get("status") == "failed_projection"
+    )
+    failed_count = sum(1 for item in results if item.get("status") == "failed")
     if status != "failed":
         if failed_count:
-            status = "partial" if ok_count else "failed"
+            status = "partial" if ok_count or projection_failed_count else "failed"
+        elif projection_failed_count:
+            status = "partial"
         else:
             status = "passed"
     run_index.update(
@@ -205,11 +262,15 @@ def main() -> int:
             "summary": {
                 "total_pdfs": total,
                 "successful_pdfs": ok_count,
+                "partial_pdfs": projection_failed_count,
                 "failed_pdfs": failed_count,
+                "database_committed_pdfs": ok_count + projection_failed_count,
                 "figure_profile_name": figure_profile_name,
                 "part_description_profile_name": part_description_profile_name,
                 "multimodal_validation_enabled": not bool(args.disable_multimodal_validation),
                 "part_description_extraction_enabled": not bool(args.disable_part_description_extraction),
+                "save_images": bool(args.save_images),
+                "resume_completed_pdfs": bool(args.resume_completed_pdfs),
                 "text_part_model": str(args.text_model or ""),
                 "multimodal_provider": str(multimodal_config.get("default_provider", "") or ""),
                 "multimodal_model": str(
@@ -229,8 +290,13 @@ def main() -> int:
     print(f"status={status}")
     print(f"pdf_count={len(pdfs)}")
     print(f"successful_pdfs={ok_count}")
+    print(f"partial_pdfs={projection_failed_count}")
     print(f"run_index={run_index_path}")
-    return 0 if status in {"passed", "partial"} else 1
+    if status == "passed":
+        return 0
+    if status == "partial":
+        return 2
+    return 1
 
 
 if __name__ == "__main__":

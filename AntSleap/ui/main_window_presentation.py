@@ -243,6 +243,8 @@ class MainWindowPresentationMixin:
         self._refresh_blink_refine_state()
 
     def open_general_settings(self):
+        if not self._ensure_parent_model_settings_available():
+            return
         params = {
             "language": self.current_lang,
             "theme": self.current_theme,
@@ -272,13 +274,11 @@ class MainWindowPresentationMixin:
             if self.engine.set_device_preference(self.runtime_device):
                 self.log(tr("Runtime device resolved to: {0}", self.current_lang).format(str(self.engine.device)))
             if self.sam_worker:
-                self.sam_worker.device_preference = self.runtime_device
-                self.sam_worker.reload_base_model()
                 selected_segmenter = self._selected_segmenter_timestamp()
                 if selected_segmenter:
-                    weights_path = self._segmenter_model_path(selected_segmenter)
-                    if weights_path:
-                        self.sam_worker.load_decoder_weights(weights_path)
+                    self._apply_segmenter_selection_to_runtime(log_change=False)
+                else:
+                    self._request_sam_base_reload()
             if hasattr(self, "blink_lab"):
                 self._sync_blink_lab_model_profile_defaults()
 
@@ -295,6 +295,8 @@ class MainWindowPresentationMixin:
         self.refresh_ui()
 
     def open_stl_model_settings(self, target_route=None, focus_vlm=False):
+        if not self._ensure_parent_model_settings_available():
+            return
         params = {
             'epochs': self.train_epochs, 'batch': self.train_batch, 'lr': self.train_lr, 'wd': self.train_wd,
             'blink_epochs': self.blink_train_epochs,
@@ -402,15 +404,14 @@ class MainWindowPresentationMixin:
 
             # Update SAM Worker epsilon
             if self.sam_worker:
-                self.sam_worker.set_epsilon(self.inf_poly_epsilon)
                 if old_runtime_device != self.runtime_device:
-                    self.sam_worker.device_preference = self.runtime_device
-                    self.sam_worker.reload_base_model()
                     selected_segmenter = self._selected_segmenter_timestamp()
                     if selected_segmenter:
-                        weights_path = self._segmenter_model_path(selected_segmenter)
-                        if weights_path:
-                            self.sam_worker.load_decoder_weights(weights_path)
+                        self._apply_segmenter_selection_to_runtime(log_change=False)
+                    else:
+                        self._request_sam_base_reload()
+                elif hasattr(self, "sam_base_reload_options_requested"):
+                    self._request_sam_base_reload()
 
             if hasattr(self, "blink_lab"):
                 self._sync_blink_lab_model_profile_defaults()

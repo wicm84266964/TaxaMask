@@ -47,14 +47,40 @@ jobs:
           if gh release view "$VERSION" >/dev/null 2>&1 || git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
             echo "Tag or release $VERSION already exists; published versions are immutable." >&2; exit 1
           fi
+          citation_version="$(sed -n 's/^version: "\([^"]*\)"/\1/p' CITATION.cff)"
+          if [[ "v$citation_version" != "$VERSION" ]]; then
+            echo "CITATION.cff version $citation_version does not match requested release $VERSION." >&2; exit 1
+          fi
+          shopt -s nullglob
+          release_notes=(docs/releases/"${VERSION#v}"-*.md)
+          if [[ "${#release_notes[@]}" -ne 1 ]]; then
+            echo "Expected exactly one docs/releases/${VERSION#v}-*.md release note, found ${#release_notes[@]}." >&2; exit 1
+          fi
+          heading="$(sed -n '1{s/\r$//;p;}' "${release_notes[0]}")"
+          if [[ "$heading" != "# TaxaMask $VERSION"* ]]; then
+            echo "Release note H1 must start with '# TaxaMask $VERSION'." >&2; exit 1
+          fi
       - name: Require successful checks on this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
-          count="$(echo "$checks" | jq '[.check_runs | sort_by(.name, .started_at) | group_by(.name)[] | last | select(.name != "create tagged release")] | length')"
-          bad="$(echo "$checks" | jq '[.check_runs | sort_by(.name, .started_at) | group_by(.name)[] | last | select(.name != "create tagged release") | select(.status != "completed" or .conclusion != "success")] | length')"
-          [[ "$count" -gt 0 && "$bad" -eq 0 ]] || { echo "All CI checks must pass before release." >&2; exit 1; }
+          checks="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")"
+          required_checks=(
+            "windows-latest Python 3.12"
+            "ubuntu-latest Python 3.12"
+            "macos-latest Python 3.12"
+            "Embedded Agent Center"
+            "Paper Distill Skill bundle"
+          )
+          failed=0
+          for check_name in "${required_checks[@]}"; do
+            state="$(echo "$checks" | jq -r --arg name "$check_name" '[.[] | .check_runs[] | select(.name == $name)] | sort_by(.started_at) | last | if . == null then "missing" else (.status + ":" + (.conclusion // "")) end')"
+            if [[ "$state" != "completed:success" ]]; then
+              echo "Required check is not successful: $check_name ($state)" >&2
+              failed=1
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || exit 1
       - name: Create immutable tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,6 +93,8 @@ jobs:
             echo "Expected exactly one docs/releases/${VERSION#v}-*.md release note, found ${#release_notes[@]}." >&2
             exit 1
           fi
-          args=("$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes-file "${release_notes[0]}")
+          heading="$(sed -n '1{s/\r$//;p;}' "${release_notes[0]}")"
+          release_title="${heading#\# }"
+          args=("$VERSION" --target "$GITHUB_SHA" --title "$release_title" --notes-file "${release_notes[0]}")
           [[ "$PRERELEASE" != "true" ]] || args+=(--prerelease)
           gh release create "${args[@]}"

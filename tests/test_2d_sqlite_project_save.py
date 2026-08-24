@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from AntSleap.core.project import ProjectManager
 from AntSleap.core.project_sqlite_loader import load_2d_sqlite_project_manifest
@@ -169,6 +170,80 @@ class Project2DSQLiteSaveTests(unittest.TestCase):
             label = loaded["project_data"]["labels"][image_path]
             self.assertEqual(label["taxon"], "Formica polyctena")
             self.assertEqual(label["taxon_rank"], "species")
+
+    def test_integrity_failure_rolls_back_before_sqlite_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, manifest_path, _db_path = _sqlite_manager(root)
+            image_path = manager.project_data["images"][0]
+            original = load_2d_sqlite_project_manifest(manifest_path)["project_data"]
+            stored_image_paths = [
+                stored_path
+                for stored_path in original["labels"]
+                if Path(stored_path).resolve() == Path(image_path).resolve()
+            ]
+            self.assertEqual(len(stored_image_paths), 1)
+            stored_image_path = stored_image_paths[0]
+            original_taxon = original["labels"][stored_image_path].get("taxon")
+            original_version = original.get("project_data_version_id")
+
+            manager.set_taxon(
+                image_path,
+                "Formica rollback-test",
+                taxon_rank="species",
+                save=False,
+            )
+            pending_version = manager._pending_project_data_version_id
+            transaction_states = []
+
+            def fail_integrity(connection):
+                transaction_states.append(connection.in_transaction)
+                raise RuntimeError("synthetic_integrity_failure")
+
+            with mock.patch(
+                "AntSleap.core.project_sqlite_writer.ensure_integrity_ok",
+                side_effect=fail_integrity,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "synthetic_integrity_failure",
+                ):
+                    manager.flush_sqlite_changes(
+                        image_paths=[image_path],
+                        integrity_check=True,
+                    )
+
+            reloaded = load_2d_sqlite_project_manifest(manifest_path)
+            self.assertEqual(transaction_states, [True])
+            self.assertEqual(
+                reloaded["project_data"]["labels"][stored_image_path].get("taxon"),
+                original_taxon,
+            )
+            self.assertEqual(
+                reloaded["project_data"].get("project_data_version_id"),
+                original_version,
+            )
+            self.assertIn(image_path, manager._sqlite_dirty_images)
+            self.assertIn(image_path, manager._sqlite_label_dirty_images)
+            self.assertEqual(
+                manager._pending_project_data_version_id,
+                pending_version,
+            )
+
+            self.assertTrue(
+                manager.flush_sqlite_changes(
+                    image_paths=[image_path],
+                    integrity_check=True,
+                )
+            )
+            self.assertNotIn(image_path, manager._sqlite_dirty_images)
+            self.assertNotIn(image_path, manager._sqlite_label_dirty_images)
+            self.assertEqual(manager._pending_project_data_version_id, "")
+            retried = load_2d_sqlite_project_manifest(manifest_path)
+            self.assertEqual(
+                retried["project_data"]["labels"][stored_image_path].get("taxon"),
+                "Formica rollback-test",
+            )
 
     def test_vlm_image_result_and_run_summary_are_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:

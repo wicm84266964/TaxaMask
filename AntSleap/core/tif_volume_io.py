@@ -7,6 +7,7 @@ from datetime import datetime
 
 import numpy as np
 
+from .path_identity import paths_overlap, paths_refer_to_same_file
 from .safe_io import atomic_write_json, replace_directory_safely
 
 
@@ -517,8 +518,10 @@ def copy_volume_sidecar(source_sidecar_path, target_sidecar_path, role=None):
     target = os.path.abspath(str(target_sidecar_path))
     if not volume_sidecar_exists(source):
         raise FileNotFoundError(source)
-    if os.path.normcase(source) == os.path.normcase(target):
+    if paths_refer_to_same_file(source, target):
         raise ValueError(f"source_target_sidecar_same:{source}")
+    if paths_overlap(source, target):
+        raise ValueError(f"source_target_sidecar_overlap:{source}:{target}")
     parent = os.path.dirname(target) or "."
     os.makedirs(parent, exist_ok=True)
     staging_root = tempfile.mkdtemp(prefix=".tmp_sidecar_copy_", dir=parent)
@@ -544,6 +547,10 @@ class VolumeSidecarReplacement:
     def __init__(self, source_sidecar_path, target_sidecar_path, role=None):
         self.source = os.path.abspath(str(source_sidecar_path))
         self.target = os.path.abspath(str(target_sidecar_path))
+        if volume_sidecar_exists(self.source) and paths_refer_to_same_file(self.source, self.target):
+            raise ValueError(f"source_target_sidecar_same:{self.source}")
+        if volume_sidecar_exists(self.source) and paths_overlap(self.source, self.target):
+            raise ValueError(f"source_target_sidecar_overlap:{self.source}:{self.target}")
         transaction_id = uuid.uuid4().hex
         self.staged = f"{self.target}.pending_{transaction_id}"
         self.rollback_path = f"{self.target}.rollback_{transaction_id}"

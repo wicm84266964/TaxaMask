@@ -319,14 +319,14 @@ class PDFExtractorProfileTests(unittest.TestCase):
             )
             stats.update(extractor._sync_import_ready_figure_exports(pdf_file_id))
 
-            accepted_exports = list(extractor.accepted_figures_dir.glob("paper__accepted_*.png"))
-            review_exports = list(extractor.review_figures_dir.glob("paper__review_*.png"))
+            accepted_exports = list(extractor.accepted_figures_dir.glob("*__accepted_*.png"))
+            review_exports = list(extractor.review_figures_dir.glob("*__review_*.png"))
             self.assertEqual(stats["accepted_exported_figures"], 1)
             self.assertEqual(stats["review_exported_figures"], 0)
             self.assertEqual(len(accepted_exports), 1)
             self.assertEqual(accepted_exports[0].read_bytes(), b"accepted-image")
             self.assertEqual(review_exports, [])
-            manifest = extractor.stats_dir / "paper_import_ready_figures.csv"
+            manifest = Path(str(stats["import_ready_manifest"]))
             self.assertTrue(manifest.exists())
             manifest_text = manifest.read_text(encoding="utf-8-sig")
             self.assertIn("accepted.png", manifest_text)

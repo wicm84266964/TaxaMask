@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .platform_paths import writable_user_config_dir
+from .path_identity import canonicalize_posix_root_alias
 from .project_traceability import validate_traceability_id
 
 
@@ -90,7 +91,7 @@ def _absolute_path(value):
 
 
 def _absolute_chain(path):
-    absolute = _absolute_path(path)
+    absolute = canonicalize_posix_root_alias(_absolute_path(path))
     drive, tail = os.path.splitdrive(absolute)
     anchor = f"{drive}{os.sep}" if drive else os.sep
     relative = tail.lstrip("\\/")
@@ -111,8 +112,8 @@ def _entry_kind(stat_result):
 
 def _require_safe_existing_path(path, *, expected_kind=None):
     clean_kind = _clean_entry_kind(expected_kind) if expected_kind else None
+    supplied_absolute = _absolute_path(path)
     chain = list(_absolute_chain(path))
-    absolute = chain[-1]
     for index, current in enumerate(chain):
         is_target = index == len(chain) - 1
         try:
@@ -128,7 +129,7 @@ def _require_safe_existing_path(path, *, expected_kind=None):
             _raise("location_parent_not_directory")
         if is_target and clean_kind and observed_kind != clean_kind:
             _raise("location_kind_mismatch")
-    return absolute
+    return supplied_absolute
 
 
 def require_safe_existing_path(path, *, expected_kind=None):

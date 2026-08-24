@@ -1,6 +1,12 @@
 import copy
+import inspect
 import json
+import multiprocessing
+import os
+import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import tifffile
 
-from AntSleap.core import tif_part_extraction
+from AntSleap.core import safe_io, tif_part_extraction
 from AntSleap.core.tif_materials import read_material_map
 from AntSleap.core.tif_part_extraction import (
     add_polygon_keyframe,
@@ -20,9 +26,17 @@ from AntSleap.core.tif_part_extraction import (
     validate_contours_for_interpolation,
 )
 from AntSleap.core.tif_local_axis_reslice import align_editable_axis_to_reference_plane
-from AntSleap.core.tif_project import TIF_PROJECT_SCHEMA_VERSION, TIF_PROJECT_TYPE, TifProjectManager
+from AntSleap.core.tif_project import (
+    TIF_PROJECT_SCHEMA_VERSION,
+    TIF_PROJECT_TYPE,
+    TIF_VOLUME_CLEANUP_WARNING_LIMIT,
+    TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES,
+    TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+    TifProjectManager,
+)
 from AntSleap.core.tif_volume_io import (
     VOLUME_SIDECAR_FORMAT,
+    begin_volume_sidecar_replacement,
     copy_volume_sidecar,
     create_empty_label_sidecar_like,
     load_volume_sidecar,
@@ -31,7 +45,280 @@ from AntSleap.core.tif_volume_io import (
 )
 
 
+def _persist_cleanup_warning_worker(
+    manifest_path,
+    warning_id,
+    ready_queue,
+    start_event,
+    result_queue,
+):
+    manager = TifProjectManager()
+    manager.load_project(manifest_path)
+    manager.volume_cleanup_warnings = [
+        manager._normalize_volume_cleanup_warning(
+            {
+                "warning_id": warning_id,
+                "recorded_at": "2026-08-24T00:00:00+00:00",
+                "operation": warning_id,
+                "error": "locked",
+            }
+        )
+    ]
+    manager._volume_cleanup_warning_dirty_ids.update(
+        warning["warning_id"] for warning in manager.volume_cleanup_warnings
+    )
+    ready_queue.put(warning_id)
+    if not start_event.wait(15):
+        result_queue.put((warning_id, "start_timeout"))
+        return
+    result_queue.put((warning_id, manager._persist_volume_cleanup_warnings()))
+
+
 class TifProjectTests(unittest.TestCase):
+    def _create_directory_alias(self, alias, target):
+        alias = Path(alias)
+        target = Path(target)
+        try:
+            os.symlink(target, alias, target_is_directory=True)
+            return
+        except OSError as exc:
+            if os.name != "nt":
+                self.skipTest(f"directory aliases are unavailable: {exc}")
+            result = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(alias),
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                self.skipTest(
+                    f"directory aliases are unavailable: {exc}; {result.stderr}"
+                )
+
+    @staticmethod
+    def _remove_directory_alias(alias):
+        alias = Path(alias)
+        if not os.path.lexists(alias):
+            return
+        if os.name == "nt":
+            os.rmdir(alias)
+        else:
+            alias.unlink()
+
+    def _working_edit_copy_fixture(self, root, project_name):
+        project_root = Path(root) / project_name
+        manager = TifProjectManager()
+        manifest_path = manager.create_project(project_name, project_root)
+        manager.create_specimen_scaffold("specimen")
+        manual_rel = "specimens/specimen/labels/manual_truth.ome.zarr"
+        working_rel = "specimens/specimen/labels/working_edit.ome.zarr"
+        draft_rel = "specimens/specimen/labels/model_draft/prediction.ome.zarr"
+        manual_array = np.full((2, 3, 4), 2, dtype=np.uint16)
+        working_array = np.full((2, 3, 4), 1, dtype=np.uint16)
+        draft_array = np.full((2, 3, 4), 9, dtype=np.uint16)
+        manual_meta = write_volume_sidecar(
+            project_root / manual_rel, manual_array, role="manual_truth"
+        )
+        working_meta = write_volume_sidecar(
+            project_root / working_rel, working_array, role="working_edit"
+        )
+        draft_meta = write_volume_sidecar(
+            project_root / draft_rel, draft_array, role="model_draft"
+        )
+        manager.register_label_volume(
+            "specimen",
+            "manual_truth",
+            manual_rel,
+            manual_meta["shape_zyx"],
+            manual_meta["dtype"],
+            status="reviewed",
+            explicit_review=True,
+            operation="truth_promotion",
+            audit_metadata={"review_action": "test_fixture"},
+            save=False,
+        )
+        manager.register_label_volume(
+            "specimen",
+            "working_edit",
+            working_rel,
+            working_meta["shape_zyx"],
+            working_meta["dtype"],
+            status="in_progress",
+            save=False,
+        )
+        manager.add_model_draft(
+            "specimen",
+            draft_rel,
+            draft_meta["shape_zyx"],
+            draft_meta["dtype"],
+            "prediction",
+            save=False,
+        )
+        manager.get_specimen("specimen")["review_status"] = "reviewed"
+        manager.get_specimen("specimen")["train_ready"] = True
+        manager.save_project()
+        return {
+            "manager": manager,
+            "manifest_path": manifest_path,
+            "project_root": project_root,
+            "manual_path": project_root / manual_rel,
+            "working_path": project_root / working_rel,
+            "draft_path": project_root / draft_rel,
+            "manual_array": manual_array,
+            "working_array": working_array,
+            "draft_array": draft_array,
+        }
+
+    def test_failed_load_restores_complete_manager_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("existing", root / "existing")
+            manager.create_specimen_scaffold("specimen")
+            manager.volume_cleanup_warnings.append({"error": "existing warning"})
+            before = copy.deepcopy(manager.__dict__)
+            invalid_path = root / "invalid.json"
+            invalid_path.write_text(
+                json.dumps({"schema_version": "unsupported", "project_type": TIF_PROJECT_TYPE}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unsupported_tif_project_schema"):
+                manager.load_project(invalid_path)
+
+            self.assertEqual(manager.__dict__, before)
+
+    def test_successful_load_does_not_carry_pending_data_version_into_target_project(self):
+        from AntSleap.core.tif_integrity_bridge import register_tif_project_baseline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("source", root / "source")
+            source_pending_version = manager._mark_manual_truth_data_changed()
+
+            target_manager = TifProjectManager()
+            target_manifest = target_manager.create_project("target", root / "target")
+            target_database = target_manager.current_database_path
+            register_tif_project_baseline(target_manager)
+
+            manager.load_project(target_manifest)
+
+            self.assertEqual(manager._pending_project_data_version_id, "")
+            manager.add_or_update_label_schema(
+                "target-schema",
+                labels=[{"id": 1, "name": "brain"}],
+                save=False,
+            )
+            target_pending_version = manager._pending_project_data_version_id
+            self.assertNotEqual(target_pending_version, source_pending_version)
+            manager.save_project()
+
+            connection = sqlite3.connect(target_database)
+            try:
+                version_ids = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT data_version_id FROM integrity_data_versions"
+                    ).fetchall()
+                }
+            finally:
+                connection.close()
+            self.assertIn(target_pending_version, version_ids)
+            self.assertNotIn(source_pending_version, version_ids)
+            self.assertEqual(
+                manager.project_data["project_data_version_id"],
+                target_pending_version,
+            )
+
+    def test_failed_create_restores_complete_manager_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("existing", root / "existing")
+            manager.create_specimen_scaffold("specimen")
+            before = copy.deepcopy(manager.__dict__)
+
+            def fail_after_mutation(*_args, **_kwargs):
+                manager.current_project_path = "partial-project"
+                manager.current_database_path = "partial-database"
+                manager.project_data = {"name": "partial"}
+                raise RuntimeError("injected create failure")
+
+            with patch.object(manager, "_create_sqlite_project_storage", side_effect=fail_after_mutation):
+                with self.assertRaisesRegex(RuntimeError, "injected create failure"):
+                    manager.create_project("failed", root / "failed")
+
+            self.assertEqual(manager.__dict__, before)
+
+    def test_manifest_write_then_raise_removes_published_project_entry(self):
+        from AntSleap.core import tif_project as tif_project_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TifProjectManager()
+            manager.create_project("existing", root / "existing")
+            before = copy.deepcopy(manager.__dict__)
+            failed_root = root / "failed"
+            manifest_path, database_path = manager._default_sqlite_paths_for_new_project(failed_root)
+            original_write = tif_project_module.write_project_manifest
+
+            def write_then_raise(*args, **kwargs):
+                original_write(*args, **kwargs)
+                raise RuntimeError("injected post-publish manifest failure")
+
+            with patch.object(tif_project_module, "write_project_manifest", side_effect=write_then_raise):
+                with self.assertRaisesRegex(RuntimeError, "post-publish manifest failure"):
+                    manager.create_project("failed", failed_root)
+
+            self.assertFalse(Path(manifest_path).exists())
+            self.assertFalse(Path(database_path).exists())
+            self.assertFalse(Path(f"{database_path}-wal").exists())
+            self.assertFalse(Path(f"{database_path}-shm").exists())
+            self.assertEqual(manager.__dict__, before)
+
+    def _part_truth_alias_fixture(self, root, project_name, *, reslice=False):
+        manager = TifProjectManager()
+        manager.create_project(project_name, Path(root) / project_name)
+        manager.create_specimen_scaffold("specimen")
+        manager.add_part("specimen", "brain", save=False)
+        manager.set_part_training_metadata(
+            "specimen", "brain", opened_for_review=True, save=False
+        )
+        if reslice:
+            manager.add_part_reslice(
+                "specimen",
+                "brain",
+                {"reslice_id": "axis-1", "status": "exported"},
+                save=False,
+            )
+            labels = manager.get_part_reslice(
+                "specimen", "brain", "axis-1"
+            )["labels"]
+            prefix = "specimens/specimen/parts/brain/reslices/axis-1/labels"
+        else:
+            labels = manager.get_part("specimen", "brain")["labels"]
+            prefix = "specimens/specimen/parts/brain/labels"
+        labels["editable_ai_result"] = {
+            "path": f"{prefix}/editable_ai_result.ome.zarr",
+            "role": "editable_ai_result",
+            "status": "pending_review",
+        }
+        labels["manual_truth"] = {
+            "path": f"{prefix}/manual_truth.ome.zarr",
+            "role": "manual_truth",
+            "status": "available",
+        }
+        return manager, labels
+
     def test_new_volume_registration_does_not_assume_micrometers(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = TifProjectManager()
@@ -137,6 +424,69 @@ class TifProjectTests(unittest.TestCase):
             np.testing.assert_array_equal(load_volume_sidecar(target), target_array)
             self.assertEqual(read_volume_metadata(target)["role"], "manual_truth")
             self.assertFalse(any(path.name.startswith(".tmp_sidecar_copy_") for path in root.iterdir()))
+
+    def test_volume_sidecar_copy_entrypoints_enforce_platform_path_identity(self):
+        for entrypoint in ("copy", "replacement"):
+            with self.subTest(entrypoint=entrypoint), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "source.ome.zarr"
+                target = root / "target.ome.zarr"
+                source_array = np.full((2, 3, 4), 9, dtype=np.uint16)
+                target_array = np.full((2, 3, 4), 3, dtype=np.uint16)
+                write_volume_sidecar(source, source_array, role="editable_ai_result")
+                write_volume_sidecar(target, target_array, role="manual_truth")
+
+                with patch(
+                    "AntSleap.core.tif_volume_io.paths_refer_to_same_file",
+                    return_value=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, "source_target_sidecar_same"):
+                        if entrypoint == "copy":
+                            copy_volume_sidecar(source, target, role="manual_truth")
+                        else:
+                            begin_volume_sidecar_replacement(
+                                source, target, role="manual_truth"
+                            )
+
+                np.testing.assert_array_equal(load_volume_sidecar(source), source_array)
+                np.testing.assert_array_equal(load_volume_sidecar(target), target_array)
+                self.assertFalse(
+                    any(
+                        marker in path.name
+                        for path in root.iterdir()
+                        for marker in (".pending_", ".rollback_", ".tmp_sidecar_copy_")
+                    )
+                )
+
+    def test_volume_sidecar_copy_entrypoints_reject_ancestor_and_descendant_overlap(self):
+        for entrypoint in ("copy", "replacement"):
+            for target_kind in ("ancestor", "descendant"):
+                with self.subTest(entrypoint=entrypoint, target_kind=target_kind), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    labels_root = root / "labels"
+                    source = labels_root / "model_draft" / "prediction.ome.zarr"
+                    manual = labels_root / "manual_truth.ome.zarr"
+                    source_array = np.full((2, 3, 4), 9, dtype=np.uint16)
+                    manual_array = np.full((2, 3, 4), 3, dtype=np.uint16)
+                    write_volume_sidecar(source, source_array, role="model_draft")
+                    write_volume_sidecar(manual, manual_array, role="manual_truth")
+                    target = labels_root if target_kind == "ancestor" else source / "nested.ome.zarr"
+
+                    with self.assertRaisesRegex(ValueError, "source_target_sidecar_overlap"):
+                        if entrypoint == "copy":
+                            copy_volume_sidecar(source, target, role="working_edit")
+                        else:
+                            begin_volume_sidecar_replacement(source, target, role="working_edit")
+
+                    np.testing.assert_array_equal(load_volume_sidecar(source), source_array)
+                    np.testing.assert_array_equal(load_volume_sidecar(manual), manual_array)
+                    self.assertFalse(
+                        any(
+                            marker in path.name
+                            for path in root.rglob("*")
+                            for marker in (".pending_", ".rollback_", ".tmp_sidecar_copy_")
+                        )
+                    )
 
     def test_batch_truth_save_failure_restores_all_existing_manual_truth_sidecars(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -570,6 +920,2260 @@ class TifProjectTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "working_edit_manual_truth_same_path"):
                 manager.promote_working_edit_to_manual_truth("01-0101-16")
             self.assertTrue((project_root / shared_rel / "array.npy").exists())
+
+    def test_working_edit_promotion_enforces_platform_reported_path_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "promotion_mock_alias")
+
+            with patch(
+                "AntSleap.core.tif_project.paths_refer_to_same_file",
+                return_value=True,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "working_edit_manual_truth_same_path"
+                ):
+                    fixture["manager"].promote_working_edit_to_manual_truth(
+                        "specimen", save=True
+                    )
+
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["working_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+
+    def test_full_truth_promotion_rejects_ancestor_target_without_touching_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "promotion_overlap")
+            labels_root = fixture["working_path"].parent
+            fixture["manager"].get_specimen("specimen")["labels"]["manual_truth"]["path"] = (
+                fixture["manager"].to_relative(labels_root)
+            )
+
+            with self.assertRaisesRegex(ValueError, "working_edit_manual_truth_path_overlap"):
+                fixture["manager"].promote_working_edit_to_manual_truth("specimen", save=True)
+
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["working_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["draft_path"]), fixture["draft_array"]
+            )
+
+    def test_part_truth_promotions_reject_ancestor_target_without_touching_labels(self):
+        for reslice in (False, True):
+            with self.subTest(reslice=reslice), tempfile.TemporaryDirectory() as tmp:
+                manager, labels = self._part_truth_alias_fixture(
+                    tmp, f"part_truth_overlap_{reslice}", reslice=reslice
+                )
+                editable_path = Path(manager.to_absolute(labels["editable_ai_result"]["path"]))
+                labels_root = editable_path.parent
+                manual_path = labels_root / "manual_truth.ome.zarr"
+                editable_array = np.full((2, 3, 4), 7, dtype=np.uint16)
+                manual_array = np.full((2, 3, 4), 2, dtype=np.uint16)
+                write_volume_sidecar(editable_path, editable_array, role="editable_ai_result")
+                write_volume_sidecar(manual_path, manual_array, role="manual_truth")
+                labels["manual_truth"]["path"] = manager.to_relative(labels_root)
+
+                expected_error = (
+                    "part_reslice_manual_truth_source_target_path_overlap"
+                    if reslice
+                    else "part_manual_truth_source_target_path_overlap"
+                )
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    if reslice:
+                        manager.promote_part_reslice_editable_result_to_manual_truth(
+                            "specimen", "brain", "axis-1", save=False
+                        )
+                    else:
+                        manager.promote_part_editable_result_to_manual_truth(
+                            "specimen", "brain", save=False
+                        )
+
+                np.testing.assert_array_equal(load_volume_sidecar(editable_path), editable_array)
+                np.testing.assert_array_equal(load_volume_sidecar(manual_path), manual_array)
+
+    def test_part_truth_promotion_rejects_editable_platform_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, labels = self._part_truth_alias_fixture(
+                tmp, "part_truth_mock_alias"
+            )
+
+            with patch(
+                "AntSleap.core.tif_project.paths_refer_to_same_file",
+                return_value=True,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "part_editable_ai_result_manual_truth_same_path",
+                ):
+                    manager.promote_part_editable_result_to_manual_truth(
+                        "specimen", "brain", save=False
+                    )
+
+            self.assertEqual(labels["manual_truth"]["status"], "available")
+
+    def test_part_reslice_truth_promotion_rejects_editable_platform_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, labels = self._part_truth_alias_fixture(
+                tmp, "reslice_truth_mock_alias", reslice=True
+            )
+
+            with patch(
+                "AntSleap.core.tif_project.paths_refer_to_same_file",
+                return_value=True,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "part_reslice_editable_ai_result_manual_truth_same_path",
+                ):
+                    manager.promote_part_reslice_editable_result_to_manual_truth(
+                        "specimen", "brain", "axis-1", save=False
+                    )
+
+            self.assertEqual(labels["manual_truth"]["status"], "available")
+
+    def test_part_manual_truth_same_physical_path_remains_existing_truth(self):
+        for reslice in (False, True):
+            with self.subTest(reslice=reslice), tempfile.TemporaryDirectory() as tmp:
+                manager, labels = self._part_truth_alias_fixture(
+                    tmp, f"existing_truth_{reslice}", reslice=reslice
+                )
+
+                with patch(
+                    "AntSleap.core.tif_project.paths_refer_to_same_file",
+                    return_value=True,
+                ):
+                    if reslice:
+                        result = manager.promote_part_reslice_editable_result_to_manual_truth(
+                            "specimen",
+                            "brain",
+                            "axis-1",
+                            source_role="manual_truth",
+                            save=False,
+                        )
+                    else:
+                        result = manager.promote_part_editable_result_to_manual_truth(
+                            "specimen",
+                            "brain",
+                            source_role="manual_truth",
+                            save=False,
+                        )
+
+                self.assertIs(result, labels["manual_truth"])
+                self.assertEqual(labels["manual_truth"]["status"], "reviewed")
+
+    def test_copy_model_draft_to_working_edit_commits_volume_and_sqlite_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_success")
+            manager = fixture["manager"]
+            data_version_before = manager.project_data["project_data_version_id"]
+
+            copied = manager.copy_label_layer_to_working_edit(
+                "specimen", source_role="model_draft", save=True
+            )
+
+            self.assertEqual(copied["status"], "copied_from_model_draft")
+            self.assertEqual(manager.get_specimen("specimen")["review_status"], "in_progress")
+            self.assertFalse(manager.get_specimen("specimen")["train_ready"])
+            self.assertEqual(
+                manager.project_data["project_data_version_id"], data_version_before
+            )
+            self.assertEqual(manager._pending_project_data_version_id, "")
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["draft_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(fixture["manifest_path"])
+            reloaded_specimen = reloaded.get_specimen("specimen")
+            self.assertEqual(
+                reloaded_specimen["labels"]["working_edit"]["status"],
+                "copied_from_model_draft",
+            )
+            self.assertEqual(reloaded_specimen["review_status"], "in_progress")
+            self.assertFalse(reloaded_specimen["train_ready"])
+
+    def test_single_volume_commit_cleanup_error_is_recorded_without_failing_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_cleanup_warning")
+            manager = fixture["manager"]
+
+            with self.assertLogs("AntSleap.core.tif_project", level="WARNING") as logs, patch(
+                "AntSleap.core.tif_volume_io.VolumeSidecarReplacement.commit",
+                return_value="rollback directory is locked",
+            ):
+                copied = manager.copy_label_layer_to_working_edit(
+                    "specimen", source_role="model_draft", save=True
+                )
+
+            self.assertEqual(copied["status"], "copied_from_model_draft")
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["draft_array"]
+            )
+            self.assertEqual(len(manager.volume_cleanup_warnings), 1)
+            warning = manager.volume_cleanup_warnings[0]
+            self.assertEqual(warning["operation"], "volume_replacement_commit")
+            self.assertEqual(warning["role"], "working_edit")
+            self.assertIn("locked", warning["error"])
+            self.assertTrue(warning["rollback_path"])
+            self.assertEqual(warning["data_commit_status"], "committed")
+            self.assertEqual(warning["cleanup_scope"], "rollback_backup_only")
+            self.assertIn("backup cleanup was incomplete", logs.output[0])
+
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            self.assertTrue(warning_path.is_file())
+            persisted = json.loads(warning_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["schema_version"],
+                TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                persisted["max_records"], TIF_VOLUME_CLEANUP_WARNING_LIMIT
+            )
+            self.assertLess(warning_path.stat().st_size, TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES)
+            persisted_warning = persisted["warnings"][0]
+            self.assertEqual(
+                persisted_warning["operation"], "volume_replacement_commit"
+            )
+            self.assertEqual(
+                persisted_warning["data_commit_status"], "committed"
+            )
+            self.assertIn("locked", persisted_warning["error"])
+            self.assertTrue(persisted_warning["rollback_path"])
+            self.assertFalse(os.path.isabs(persisted_warning["rollback_path"]))
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(fixture["manifest_path"])
+            self.assertEqual(len(reloaded.volume_cleanup_warnings), 1)
+            reloaded_warning = reloaded.volume_cleanup_warnings[0]
+            self.assertEqual(
+                reloaded_warning["operation"], "volume_replacement_commit"
+            )
+            self.assertEqual(reloaded_warning["error"], persisted_warning["error"])
+            self.assertEqual(
+                reloaded_warning["rollback_path"],
+                persisted_warning["rollback_path"],
+            )
+
+    def test_volume_cleanup_warning_sidecar_is_bounded_and_atomic_write_failure_is_nonfatal(self):
+        class CleanupReplacement:
+            metadata = {"role": "working_edit"}
+            target = "specimens/specimen/labels/working_edit.ome.zarr"
+            rollback_path = (
+                "specimens/specimen/labels/working_edit.ome.zarr.rollback_locked"
+            )
+
+            def commit(self):
+                return "rollback directory is locked"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("cleanup-bound", Path(tmp) / "cleanup-bound")
+            manager.volume_cleanup_warnings = [
+                manager._normalize_volume_cleanup_warning(
+                    {
+                        "operation": f"previous-{index}",
+                        "rollback_path": f"rollback-{index}",
+                        "error": "locked",
+                    }
+                )
+                for index in range(TIF_VOLUME_CLEANUP_WARNING_LIMIT)
+            ]
+
+            with patch(
+                "AntSleap.core.tif_project.atomic_write_json_in_root",
+                side_effect=PermissionError("maintenance warning file is locked"),
+            ), patch(
+                "AntSleap.app_runtime.runtime_log_event",
+                side_effect=RuntimeError("runtime log unavailable"),
+            ), self.assertLogs(
+                "AntSleap.core.tif_project", level="WARNING"
+            ) as logs:
+                cleanup_error = manager._commit_volume_replacement_cleanup(
+                    CleanupReplacement(),
+                    operation="volume_replacement_commit",
+                    role="working_edit",
+                )
+
+            self.assertEqual(cleanup_error, "rollback directory is locked")
+            self.assertEqual(
+                len(manager.volume_cleanup_warnings),
+                TIF_VOLUME_CLEANUP_WARNING_LIMIT,
+            )
+            self.assertEqual(
+                manager.volume_cleanup_warnings[0]["operation"], "previous-1"
+            )
+            self.assertEqual(
+                manager.volume_cleanup_warnings[-1]["operation"],
+                "volume_replacement_commit",
+            )
+            self.assertTrue(
+                any("Could not persist" in message for message in logs.output)
+            )
+
+    def test_volume_cleanup_warning_atomic_replace_failure_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project(
+                "cleanup-atomic-preserve", Path(tmp) / "cleanup-atomic-preserve"
+            )
+            manager.volume_cleanup_warnings = [
+                manager._normalize_volume_cleanup_warning(
+                    {
+                        "warning_id": "cleanup_warning_original",
+                        "operation": "original",
+                    }
+                )
+            ]
+            manager._volume_cleanup_warning_dirty_ids.update(
+                warning["warning_id"]
+                for warning in manager.volume_cleanup_warnings
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            warning_path.parent.mkdir(parents=True, exist_ok=True)
+            fixed_tmp_marker = Path(f"{warning_path}.tmp")
+            fixed_tmp_marker.write_text("must remain untouched", encoding="utf-8")
+            self.assertEqual(manager._persist_volume_cleanup_warnings(), "")
+            original_bytes = warning_path.read_bytes()
+            self.assertEqual(
+                fixed_tmp_marker.read_text(encoding="utf-8"),
+                "must remain untouched",
+            )
+            manager.volume_cleanup_warnings.append(
+                manager._normalize_volume_cleanup_warning(
+                    {
+                        "warning_id": "cleanup_warning_new",
+                        "operation": "new",
+                    }
+                )
+            )
+            manager._volume_cleanup_warning_dirty_ids.add(
+                manager.volume_cleanup_warnings[-1]["warning_id"]
+            )
+
+            directory_fd_guards = safe_io._directory_fd_guards_available()
+            replace_function = (
+                "rename"
+                if directory_fd_guards
+                else "replace"
+            )
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=directory_fd_guards,
+            ), patch.object(
+                safe_io.os,
+                replace_function,
+                side_effect=PermissionError("simulated replace failure"),
+            ):
+                persistence_error = manager._persist_volume_cleanup_warnings()
+
+            self.assertIn("simulated replace failure", persistence_error)
+            self.assertEqual(warning_path.read_bytes(), original_bytes)
+            self.assertEqual(
+                list(warning_path.parent.glob(f".{warning_path.name}.tmp-*")), []
+            )
+
+    def test_volume_cleanup_warning_sidecar_requires_matching_nonempty_project_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "cleanup-project-identity"
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-project-identity", project_root
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            valid_payload = {
+                "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                "record_type": "tif_volume_cleanup_maintenance_warnings",
+                "project_id": manager.project_data["project_id"],
+                "warnings": [{"operation": "volume_replacement_commit"}],
+            }
+
+            rejected_project_ids = {
+                "missing": None,
+                "different": "project_tif_different",
+                "whitespace_variant": (
+                    f" {manager.project_data['project_id']} "
+                ),
+            }
+            for case, project_id in rejected_project_ids.items():
+                with self.subTest(case=case):
+                    payload = copy.deepcopy(valid_payload)
+                    if project_id is None:
+                        payload.pop("project_id")
+                    else:
+                        payload["project_id"] = project_id
+                    warning_path.parent.mkdir(parents=True, exist_ok=True)
+                    warning_path.write_text(
+                        json.dumps(payload), encoding="utf-8"
+                    )
+
+                    reloaded = TifProjectManager()
+                    with self.assertLogs(
+                        "AntSleap.core.tif_project", level="WARNING"
+                    ) as logs:
+                        loaded = reloaded.load_project(manifest_path)
+
+                    self.assertEqual(
+                        loaded["project_id"], manager.project_data["project_id"]
+                    )
+                    self.assertEqual(reloaded.volume_cleanup_warnings, [])
+                    self.assertTrue(
+                        any(
+                            "maintenance_warning_" in message
+                            for message in logs.output
+                        )
+                    )
+
+            warning_path.write_text(json.dumps(valid_payload), encoding="utf-8")
+            manager.project_data["project_id"] = ""
+            with self.assertLogs(
+                "AntSleap.core.tif_project", level="WARNING"
+            ) as logs:
+                loaded_warnings = manager._load_volume_cleanup_warnings()
+            self.assertEqual(loaded_warnings, [])
+            self.assertTrue(
+                any(
+                    "maintenance_warning_current_project_id_missing" in message
+                    for message in logs.output
+                )
+            )
+
+    def test_malformed_volume_cleanup_warning_sidecar_does_not_block_project_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "cleanup-malformed-sidecar"
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-malformed-sidecar", project_root
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            warning_path.parent.mkdir(parents=True, exist_ok=True)
+            warning_path.write_text("{not-json", encoding="utf-8")
+
+            reloaded = TifProjectManager()
+            with self.assertLogs(
+                "AntSleap.core.tif_project", level="WARNING"
+            ):
+                loaded = reloaded.load_project(manifest_path)
+
+            self.assertEqual(
+                loaded["project_id"], manager.project_data["project_id"]
+            )
+            self.assertEqual(reloaded.volume_cleanup_warnings, [])
+
+    def test_volume_cleanup_warning_reader_enforces_exact_byte_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-size-boundary", Path(tmp) / "cleanup-size-boundary"
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            warning_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                "record_type": "tif_volume_cleanup_maintenance_warnings",
+                "project_id": manager.project_data["project_id"],
+                "warnings": [
+                    {
+                        "warning_id": "cleanup_warning_boundary",
+                        "operation": "boundary",
+                    }
+                ],
+            }
+            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            warning_path.write_bytes(encoded)
+
+            with patch(
+                "AntSleap.core.tif_project.TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES",
+                len(encoded),
+            ):
+                reloaded = TifProjectManager()
+                reloaded.load_project(manifest_path)
+            self.assertEqual(len(reloaded.volume_cleanup_warnings), 1)
+
+            warning_path.write_bytes(encoded + b" ")
+            with patch(
+                "AntSleap.core.tif_project.TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES",
+                len(encoded),
+            ), self.assertLogs(
+                "AntSleap.core.tif_project", level="WARNING"
+            ) as logs:
+                oversized = TifProjectManager()
+                oversized.load_project(manifest_path)
+            self.assertEqual(oversized.volume_cleanup_warnings, [])
+            self.assertTrue(
+                any("json_file_too_large" in message for message in logs.output)
+            )
+
+    def test_volume_cleanup_warning_reader_rejects_identity_swap_during_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-open-race", Path(tmp) / "cleanup-open-race"
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            warning_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                "record_type": "tif_volume_cleanup_maintenance_warnings",
+                "project_id": manager.project_data["project_id"],
+                "warnings": [{"operation": "before-swap"}],
+            }
+            warning_path.write_text(json.dumps(payload), encoding="utf-8")
+            replacement_path = warning_path.with_name("replacement.json")
+            replacement_path.write_text(
+                json.dumps({**payload, "warnings": [{"operation": "after-swap"}]}),
+                encoding="utf-8",
+            )
+            real_open = os.open
+            swapped = {"done": False}
+
+            def swap_before_open(path, flags, *args, **kwargs):
+                if os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                    os.path.abspath(warning_path)
+                ) and not swapped["done"]:
+                    swapped["done"] = True
+                    os.replace(replacement_path, warning_path)
+                return real_open(path, flags, *args, **kwargs)
+
+            reloaded = TifProjectManager()
+            with patch(
+                "AntSleap.core.safe_io.os.open", side_effect=swap_before_open
+            ), self.assertLogs(
+                "AntSleap.core.tif_project", level="WARNING"
+            ) as logs:
+                reloaded.load_project(manifest_path)
+
+            self.assertTrue(swapped["done"])
+            self.assertEqual(reloaded.volume_cleanup_warnings, [])
+            self.assertTrue(
+                any("file_identity_changed_during_open" in message for message in logs.output)
+            )
+
+    def test_volume_cleanup_warning_sidecar_rejects_parent_directory_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "cleanup-alias" / "project"
+            external_root = root / "external-warning-target"
+            external_root.mkdir(parents=True)
+            manager = TifProjectManager()
+            manifest_path = manager.create_project("cleanup-alias", project_root)
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            logs_alias = warning_path.parent
+            external_warning = external_root / warning_path.name
+            external_payload = {
+                "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                "record_type": "tif_volume_cleanup_maintenance_warnings",
+                "project_id": manager.project_data["project_id"],
+                "warnings": [{"operation": "must-not-load"}],
+            }
+            external_warning.write_text(
+                json.dumps(external_payload), encoding="utf-8"
+            )
+            original_bytes = external_warning.read_bytes()
+            self._create_directory_alias(logs_alias, external_root)
+            try:
+                reloaded = TifProjectManager()
+                with self.assertLogs(
+                    "AntSleap.core.tif_project", level="WARNING"
+                ):
+                    reloaded.load_project(manifest_path)
+                self.assertEqual(reloaded.volume_cleanup_warnings, [])
+
+                manager.volume_cleanup_warnings = [
+                    manager._normalize_volume_cleanup_warning(
+                        {
+                            "warning_id": "cleanup_warning_alias",
+                            "operation": "must-not-persist",
+                        }
+                    )
+                ]
+                manager._volume_cleanup_warning_dirty_ids.update(
+                    warning["warning_id"]
+                    for warning in manager.volume_cleanup_warnings
+                )
+                persistence_error = manager._persist_volume_cleanup_warnings()
+                self.assertIn("unsafe_parent_entry", persistence_error)
+                self.assertEqual(external_warning.read_bytes(), original_bytes)
+                self.assertFalse(
+                    (external_root / f"{warning_path.name}.lock").exists()
+                )
+            finally:
+                self._remove_directory_alias(logs_alias)
+
+    def test_volume_cleanup_warning_concurrent_processes_merge_without_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-concurrent", Path(tmp) / "cleanup-concurrent"
+            )
+            context = multiprocessing.get_context("spawn")
+            ready_queue = context.Queue()
+            result_queue = context.Queue()
+            start_event = context.Event()
+            warning_ids = ["cleanup_warning_process_a", "cleanup_warning_process_b"]
+            processes = [
+                context.Process(
+                    target=_persist_cleanup_warning_worker,
+                    args=(
+                        manifest_path,
+                        warning_id,
+                        ready_queue,
+                        start_event,
+                        result_queue,
+                    ),
+                )
+                for warning_id in warning_ids
+            ]
+            for process in processes:
+                process.start()
+            try:
+                ready = {ready_queue.get(timeout=20) for _index in processes}
+                self.assertEqual(ready, set(warning_ids))
+                start_event.set()
+                results = dict(
+                    result_queue.get(timeout=20) for _index in processes
+                )
+            finally:
+                start_event.set()
+                for process in processes:
+                    process.join(timeout=20)
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=5)
+            self.assertEqual(results, {warning_id: "" for warning_id in warning_ids})
+            self.assertTrue(all(process.exitcode == 0 for process in processes))
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            self.assertEqual(
+                {item["warning_id"] for item in reloaded.volume_cleanup_warnings},
+                set(warning_ids),
+            )
+
+    def test_cleanup_warning_paths_are_relative_or_redacted_before_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = root / "cleanup-path-redaction" / "project"
+            manager = TifProjectManager()
+            manager.create_project("cleanup-path-redaction", project_root)
+
+            internal_path = (
+                project_root
+                / "specimens"
+                / "specimen"
+                / "labels"
+                / "working_edit.ome.zarr"
+            )
+            same_drive_external = (
+                root / "private-parent" / "same-drive-secret.ome.zarr"
+            )
+            current_drive = project_root.drive.upper()
+            other_drive = "Z:" if current_drive != "Z:" else "Y:"
+            cross_drive_external = (
+                f"{other_drive}\\private-cross-drive\\cross-drive-secret.ome.zarr"
+            )
+            nested_error_path = (
+                same_drive_external.parent
+                / "private-cleanup-error"
+                / "nested-secret.ome.zarr"
+            )
+
+            internal_reference = manager._cleanup_warning_path_reference(
+                internal_path
+            )
+            same_drive_reference = manager._cleanup_warning_path_reference(
+                same_drive_external
+            )
+            traversal_reference = manager._cleanup_warning_path_reference(
+                "../private-traversal/traversal-secret.ome.zarr"
+            )
+            cross_drive_reference = manager._cleanup_warning_path_reference(
+                cross_drive_external
+            )
+
+            self.assertEqual(
+                internal_reference,
+                "specimens/specimen/labels/working_edit.ome.zarr",
+            )
+            for reference, basename in (
+                (same_drive_reference, "same-drive-secret.ome.zarr"),
+                (traversal_reference, "traversal-secret.ome.zarr"),
+                (cross_drive_reference, "cross-drive-secret.ome.zarr"),
+            ):
+                with self.subTest(reference=reference):
+                    self.assertTrue(reference.startswith("external_path_"))
+                    self.assertIn(basename, reference)
+                    self.assertIn("_sha256_", reference)
+                    self.assertEqual(len(reference.rsplit("_sha256_", 1)[1]), 64)
+                    self.assertNotIn("..", reference)
+                    self.assertFalse(os.path.isabs(reference))
+                    self.assertNotIn("private-parent", reference)
+                    self.assertNotIn("private-traversal", reference)
+                    self.assertNotIn("private-cross-drive", reference)
+                    self.assertNotIn(other_drive, reference)
+
+            self.assertEqual(
+                same_drive_reference,
+                manager._cleanup_warning_path_reference(same_drive_external),
+            )
+            manager.volume_cleanup_warnings = [
+                manager._normalize_volume_cleanup_warning(
+                    {
+                        "target_path": internal_path,
+                        "rollback_path": same_drive_external,
+                        "error": (
+                            "PermissionError: [WinError 5] cleanup failed: "
+                            f"'{nested_error_path}'"
+                        ),
+                    }
+                )
+            ]
+            manager._volume_cleanup_warning_dirty_ids.update(
+                warning["warning_id"]
+                for warning in manager.volume_cleanup_warnings
+            )
+            self.assertEqual(manager._persist_volume_cleanup_warnings(), "")
+            persisted_text = Path(manager.volume_cleanup_warning_path).read_text(
+                encoding="utf-8"
+            )
+            persisted = json.loads(persisted_text)
+            self.assertEqual(
+                persisted["warnings"][0]["target_path"], internal_reference
+            )
+            self.assertEqual(
+                persisted["warnings"][0]["rollback_path"],
+                same_drive_reference,
+            )
+            self.assertNotIn(str(same_drive_external.parent), persisted_text)
+            self.assertNotIn(str(nested_error_path.parent), persisted_text)
+            self.assertNotIn("private-cleanup-error", persisted_text)
+            self.assertIn("external_path_nested-secret.ome.zarr_sha256_", persisted_text)
+
+    def test_saturated_cleanup_warning_merge_preserves_each_new_writer(self):
+        class CleanupReplacement:
+            def __init__(self, marker, root):
+                self.metadata = {"role": "manual_truth"}
+                self.target = root / f"{marker}.ome.zarr"
+                self.rollback_path = root / f"{marker}.rollback"
+
+            def commit(self):
+                return "rollback directory is locked"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manifest_path = manager.create_project(
+                "cleanup-saturated", Path(tmp) / "cleanup-saturated"
+            )
+            manager.volume_cleanup_warnings = [
+                manager._normalize_volume_cleanup_warning(
+                    {
+                        "warning_id": f"cleanup_warning_initial_{index:03d}",
+                        "recorded_at": "2026-08-24T00:00:00+00:00",
+                        "operation": f"initial-{index:03d}",
+                        "error": "locked",
+                    }
+                )
+                for index in range(TIF_VOLUME_CLEANUP_WARNING_LIMIT)
+            ]
+            manager._volume_cleanup_warning_dirty_ids.update(
+                warning["warning_id"]
+                for warning in manager.volume_cleanup_warnings
+            )
+            self.assertEqual(manager._persist_volume_cleanup_warnings(), "")
+
+            writer_a = TifProjectManager()
+            writer_b = TifProjectManager()
+            writer_a.load_project(manifest_path)
+            writer_b.load_project(manifest_path)
+            root = Path(writer_a.project_dir)
+
+            with self.assertLogs("AntSleap.core.tif_project", level="WARNING"):
+                writer_b._commit_volume_replacement_cleanup(
+                    CleanupReplacement("writer-b", root),
+                    operation="saturated-writer-b",
+                )
+            self.assertEqual(writer_a._persist_volume_cleanup_warnings(), "")
+            after_stale_noop = TifProjectManager()
+            after_stale_noop.load_project(manifest_path)
+            after_stale_operations = {
+                warning["operation"]
+                for warning in after_stale_noop.volume_cleanup_warnings
+            }
+            self.assertIn("saturated-writer-b", after_stale_operations)
+            self.assertNotIn("initial-000", after_stale_operations)
+            with self.assertLogs("AntSleap.core.tif_project", level="WARNING"):
+                writer_a._commit_volume_replacement_cleanup(
+                    CleanupReplacement("writer-a", root),
+                    operation="saturated-writer-a",
+                )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(manifest_path)
+            operations = [
+                warning["operation"]
+                for warning in reloaded.volume_cleanup_warnings
+            ]
+            self.assertEqual(len(operations), TIF_VOLUME_CLEANUP_WARNING_LIMIT)
+            self.assertIn("saturated-writer-a", operations)
+            self.assertIn("saturated-writer-b", operations)
+            self.assertNotIn("initial-000", operations)
+            self.assertNotIn("initial-001", operations)
+            self.assertEqual(
+                operations[-2:],
+                ["saturated-writer-b", "saturated-writer-a"],
+            )
+
+    def test_invalid_regular_cleanup_sidecar_is_isolated_before_new_warning(self):
+        class CleanupReplacement:
+            metadata = {"role": "manual_truth"}
+
+            def __init__(self, root):
+                self.target = root / "current.ome.zarr"
+                self.rollback_path = root / "current.rollback"
+
+            def commit(self):
+                return "rollback directory is locked"
+
+        invalid_cases = {
+            "malformed_json": lambda project_id: b'{"warnings": [',
+            "oversized_json": lambda project_id: (
+                b'{"padding":"'
+                + b"x" * TIF_VOLUME_CLEANUP_WARNING_MAX_BYTES
+                + b'"}'
+            ),
+            "wrong_schema": lambda project_id: json.dumps(
+                {
+                    "schema_version": "unsupported_cleanup_schema",
+                    "project_id": project_id,
+                    "warnings": [
+                        {
+                            "warning_id": "cleanup_warning_must_not_merge",
+                            "operation": "must-not-merge",
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+            "wrong_project": lambda project_id: json.dumps(
+                {
+                    "schema_version": TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                    "record_type": "tif_volume_cleanup_maintenance_warnings",
+                    "project_id": "different-project",
+                    "warnings": [
+                        {
+                            "warning_id": "cleanup_warning_must_not_merge",
+                            "operation": "must-not-merge",
+                        }
+                    ],
+                }
+            ).encode("utf-8"),
+        }
+
+        for case_name, invalid_bytes in invalid_cases.items():
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmp:
+                manager = TifProjectManager()
+                manager.create_project(
+                    f"cleanup-invalid-{case_name}",
+                    Path(tmp) / f"cleanup-invalid-{case_name}",
+                )
+                warning_path = Path(manager.volume_cleanup_warning_path)
+                warning_path.parent.mkdir(parents=True, exist_ok=True)
+                invalid_content = invalid_bytes(manager.project_data["project_id"])
+                warning_path.write_bytes(invalid_content)
+
+                with self.assertLogs(
+                    "AntSleap.core.tif_project", level="WARNING"
+                ):
+                    cleanup_error = manager._commit_volume_replacement_cleanup(
+                        CleanupReplacement(Path(manager.project_dir)),
+                        operation=f"recovered-{case_name}",
+                    )
+
+                self.assertIn("locked", cleanup_error)
+                persisted = json.loads(warning_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    persisted["schema_version"],
+                    TIF_VOLUME_CLEANUP_WARNING_SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    persisted["project_id"], manager.project_data["project_id"]
+                )
+                self.assertEqual(len(persisted["warnings"]), 1)
+                self.assertEqual(
+                    persisted["warnings"][0]["operation"],
+                    f"recovered-{case_name}",
+                )
+                self.assertNotIn("must-not-merge", warning_path.read_text("utf-8"))
+                rejected_path = Path(f"{warning_path}.rejected")
+                self.assertEqual(rejected_path.read_bytes(), invalid_content)
+                self.assertEqual(
+                    list(warning_path.parent.glob(f"{warning_path.name}.rejected*")),
+                    [rejected_path],
+                )
+                self.assertEqual(manager._volume_cleanup_warning_dirty_ids, set())
+
+    def test_cleanup_warning_error_redacts_relative_external_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project(
+                "cleanup-relative-redaction", Path(tmp) / "cleanup-relative-redaction"
+            )
+            error = (
+                "failed ../private-parent/relative-secret.tif, "
+                "~/private-home/home-secret.tif, and "
+                r"C:private-drive\drive-secret.tif, plus "
+                r"\private-root\root-secret.tif"
+            )
+            normalized = manager._normalize_volume_cleanup_warning(
+                {"operation": "relative-redaction", "error": error}
+            )
+
+            self.assertNotIn("private-parent", normalized["error"])
+            self.assertNotIn("private-home", normalized["error"])
+            self.assertNotIn("private-drive", normalized["error"])
+            self.assertNotIn("private-root", normalized["error"])
+            self.assertNotIn("../", normalized["error"])
+            self.assertNotIn("~/", normalized["error"])
+            self.assertNotIn("C:private", normalized["error"])
+            self.assertEqual(normalized["error"].count("external_path_"), 4)
+            self.assertTrue(
+                manager._cleanup_warning_path_reference("~/private/home.tif").startswith(
+                    "external_path_"
+                )
+            )
+            self.assertTrue(
+                manager._cleanup_warning_path_reference(
+                    r"C:private\drive.tif"
+                ).startswith("external_path_")
+            )
+
+    def test_cleanup_warning_error_redacts_unquoted_paths_with_spaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project(
+                "cleanup-spaced-path-redaction",
+                Path(tmp) / "cleanup-spaced-path-redaction",
+            )
+            cases = (
+                (
+                    r"failed at C:\Secret Folder\private name.txt, retry pending",
+                    ("Secret Folder", "private name.txt"),
+                    "retry pending",
+                ),
+                (
+                    "failed at /Users/Private Folder/private name.tif; retry pending",
+                    ("Private Folder", "private name.tif"),
+                    "retry pending",
+                ),
+                (
+                    "failed at ../Private Folder/private name.tif, retry pending",
+                    ("Private Folder", "private name.tif"),
+                    "retry pending",
+                ),
+            )
+
+            for error, private_fragments, preserved_suffix in cases:
+                with self.subTest(error=error):
+                    normalized = manager._normalize_volume_cleanup_warning(
+                        {"operation": "spaced-path-redaction", "error": error}
+                    )["error"]
+                    self.assertIn("external_path_", normalized)
+                    self.assertIn(preserved_suffix, normalized)
+                    for fragment in private_fragments:
+                        self.assertNotIn(fragment, normalized)
+
+            ambiguous = manager._normalize_volume_cleanup_warning(
+                {
+                    "operation": "spaced-path-redaction",
+                    "error": r"failed at C:\Secret Folder\private name.txt because cleanup failed",
+                }
+            )["error"]
+            self.assertIn("external_path_", ambiguous)
+            self.assertNotIn("Secret Folder", ambiguous)
+            self.assertNotIn("private name.txt", ambiguous)
+            self.assertNotIn("because cleanup failed", ambiguous)
+
+    def test_invalid_cleanup_sidecar_is_preserved_when_isolation_slot_is_unsafe(self):
+        class CleanupReplacement:
+            metadata = {"role": "manual_truth"}
+
+            def __init__(self, root):
+                self.target = root / "current.ome.zarr"
+                self.rollback_path = root / "current.rollback"
+
+            def commit(self):
+                return "rollback directory is locked"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project(
+                "cleanup-isolation-blocked", Path(tmp) / "cleanup-isolation-blocked"
+            )
+            warning_path = Path(manager.volume_cleanup_warning_path)
+            warning_path.parent.mkdir(parents=True, exist_ok=True)
+            original_bytes = b'{"warnings": ['
+            warning_path.write_bytes(original_bytes)
+            Path(f"{warning_path}.rejected").mkdir()
+
+            with self.assertLogs("AntSleap.core.tif_project", level="WARNING"):
+                cleanup_error = manager._commit_volume_replacement_cleanup(
+                    CleanupReplacement(Path(manager.project_dir)),
+                    operation="isolation-must-fail",
+                )
+
+            self.assertIn("locked", cleanup_error)
+            self.assertEqual(warning_path.read_bytes(), original_bytes)
+            self.assertTrue(Path(f"{warning_path}.rejected").is_dir())
+            self.assertEqual(len(manager._volume_cleanup_warning_dirty_ids), 1)
+
+    def test_safe_json_fstat_failure_closes_fd_and_removes_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "warning.json"
+            descriptors = []
+            real_mkstemp = safe_io.tempfile.mkstemp
+
+            def tracked_mkstemp(*args, **kwargs):
+                descriptor, path = real_mkstemp(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor, path
+
+            def fail_fstat(_descriptor):
+                raise OSError("simulated fstat failure")
+
+            with patch.object(
+                safe_io, "_directory_fd_guards_available", return_value=False
+            ), patch.object(
+                safe_io.tempfile, "mkstemp", side_effect=tracked_mkstemp
+            ), patch.object(
+                safe_io.os, "fstat", side_effect=fail_fstat
+            ):
+                with self.assertRaisesRegex(OSError, "simulated fstat failure"):
+                    safe_io.atomic_write_json_in_root(
+                        target,
+                        {"status": "new"},
+                        trusted_root=root,
+                    )
+
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+            self.assertEqual(list(root.glob(".warning.json.tmp-*")), [])
+
+    def test_safe_json_accepts_alias_of_trusted_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            physical_root = fixture_root / "physical"
+            physical_root.mkdir()
+            alias_root = fixture_root / "trusted-alias"
+            ancestor_alias = Path(f"{tmp}-ancestor-alias")
+            self._create_directory_alias(alias_root, physical_root)
+            self._create_directory_alias(ancestor_alias, fixture_root)
+            try:
+                target = alias_root / "nested" / "warning.json"
+                safe_io.atomic_write_json_in_root(
+                    target,
+                    {"status": "ready"},
+                    trusted_root=alias_root,
+                )
+
+                physical_target = physical_root / "nested" / "warning.json"
+                self.assertEqual(
+                    json.loads(physical_target.read_text(encoding="utf-8")),
+                    {"status": "ready"},
+                )
+
+                canonical_target = physical_root / "canonical.json"
+                safe_io.atomic_write_json_in_root(
+                    canonical_target,
+                    {"status": "canonical"},
+                    trusted_root=alias_root,
+                )
+                self.assertEqual(
+                    json.loads(canonical_target.read_text(encoding="utf-8")),
+                    {"status": "canonical"},
+                )
+
+                ancestor_target = (
+                    ancestor_alias / "physical" / "ancestor-canonical.json"
+                )
+                safe_io.atomic_write_json_in_root(
+                    ancestor_target,
+                    {"status": "ancestor-canonical"},
+                    trusted_root=alias_root,
+                )
+                self.assertEqual(
+                    json.loads(
+                        (physical_root / "ancestor-canonical.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    {"status": "ancestor-canonical"},
+                )
+            finally:
+                self._remove_directory_alias(ancestor_alias)
+                self._remove_directory_alias(alias_root)
+
+    def test_posix_parent_fstat_failure_closes_new_directory_descriptor(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            target = root / "nested" / "warning.json"
+            real_open = safe_io.os.open
+            real_fstat = safe_io.os.fstat
+            child_descriptors = []
+            calls = {"count": 0}
+
+            def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+                if dir_fd is not None:
+                    child_descriptors.append(descriptor)
+                return descriptor
+
+            def fail_child_fstat(descriptor):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("simulated child fstat failure")
+                return real_fstat(descriptor)
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os, "open", side_effect=tracked_open
+            ), patch.object(
+                safe_io.os, "fstat", side_effect=fail_child_fstat
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "simulated child fstat failure"
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(child_descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(child_descriptors[0])
+
+    def test_posix_root_fstat_interruption_closes_root_descriptor(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "warning.json"
+            real_open = safe_io.os.open
+            descriptors = []
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "fstat",
+                side_effect=KeyboardInterrupt("simulated root fstat interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated root fstat interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+
+    def test_posix_child_fstat_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            target = root / "nested" / "warning.json"
+            real_open = safe_io.os.open
+            real_fstat = safe_io.os.fstat
+            descriptors = []
+            calls = {"count": 0}
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_child_fstat(descriptor):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise KeyboardInterrupt(
+                        "simulated child fstat interruption"
+                    )
+                return real_fstat(descriptor)
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "fstat",
+                side_effect=interrupt_child_fstat,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated child fstat interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_posix_nested_parent_transfer_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "first" / "second").mkdir(parents=True)
+            target = root / "first" / "second" / "warning.json"
+            real_open = safe_io.os.open
+            real_close = safe_io.os.close
+            descriptors = []
+            child_descriptors = []
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                if kwargs.get("dir_fd") is not None:
+                    child_descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_after_first_child_close(descriptor):
+                real_close(descriptor)
+                if child_descriptors and descriptor == child_descriptors[0]:
+                    raise KeyboardInterrupt(
+                        "simulated nested parent transfer interruption"
+                    )
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "close",
+                side_effect=interrupt_after_first_child_close,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated nested parent transfer interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 3)
+            self.assertEqual(len(child_descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_posix_parent_transfer_boundary_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            target = root / "nested" / "warning.json"
+            real_open = safe_io.os.open
+            descriptors = []
+            source_lines, first_line = inspect.getsourcelines(
+                safe_io._open_safe_parent
+            )
+            transfer_line = next(
+                first_line + index
+                for index, line in enumerate(source_lines)
+                if "previous_fd, current_fd, next_fd =" in line
+            )
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_at_transfer(frame, event, _arg):
+                if (
+                    frame.f_code is safe_io._open_safe_parent.__code__
+                    and event == "line"
+                    and frame.f_lineno == transfer_line
+                ):
+                    raise KeyboardInterrupt(
+                        "simulated parent transfer boundary interruption"
+                    )
+                return interrupt_at_transfer
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ):
+                try:
+                    sys.settrace(interrupt_at_transfer)
+                    with self.assertRaisesRegex(
+                        KeyboardInterrupt,
+                        "simulated parent transfer boundary interruption",
+                    ):
+                        safe_io._open_safe_parent(
+                            target,
+                            root,
+                            create=False,
+                        )
+                finally:
+                    sys.settrace(None)
+
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_advisory_lock_fdopen_failure_closes_open_descriptor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            descriptors = []
+            real_open_entry = safe_io._open_entry
+
+            def tracked_open_entry(*args, **kwargs):
+                descriptor = real_open_entry(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with patch.object(
+                safe_io, "_directory_fd_guards_available", return_value=False
+            ), patch.object(
+                safe_io, "_open_entry", side_effect=tracked_open_entry
+            ), patch.object(
+                safe_io.os, "fdopen", side_effect=OSError("simulated fdopen failure")
+            ):
+                with self.assertRaisesRegex(OSError, "simulated fdopen failure"):
+                    safe_io.AdvisoryFileLock(
+                        lock_path, trusted_root=root
+                    ).acquire()
+
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+            replacement_lock = safe_io.AdvisoryFileLock(
+                lock_path, trusted_root=root
+            )
+            self.assertTrue(replacement_lock.acquire())
+            replacement_lock.release()
+
+    def test_advisory_lock_rejects_repeated_acquire_without_losing_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = safe_io.AdvisoryFileLock(lock_path, trusted_root=root)
+            self.assertTrue(lock.acquire())
+            with self.assertRaisesRegex(
+                RuntimeError, "advisory_file_lock_already_acquired"
+            ):
+                lock.acquire()
+            self.assertIsNotNone(lock.handle)
+            lock.release()
+
+            replacement_lock = safe_io.AdvisoryFileLock(
+                lock_path, trusted_root=root
+            )
+            self.assertTrue(replacement_lock.acquire())
+            replacement_lock.release()
+
+    def test_advisory_lock_retries_transient_missing_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_require_entry = safe_io._require_safe_regular_entry_at
+            real_fdopen = safe_io.os.fdopen
+            calls = {"count": 0}
+            handles = []
+
+            def missing_once(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise FileNotFoundError("simulated transient lock disappearance")
+                return real_require_entry(*args, **kwargs)
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            with patch.object(
+                safe_io,
+                "_require_safe_regular_entry_at",
+                side_effect=missing_once,
+            ), patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(len(handles), 2)
+            self.assertTrue(handles[0].closed)
+            self.assertFalse(handles[1].closed)
+            lock.release()
+            self.assertTrue(handles[1].closed)
+
+    def test_advisory_lock_revalidates_named_entry_after_os_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_fdopen = safe_io.os.fdopen
+            calls = {"count": 0}
+            handles = []
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_validate = lock._locked_candidate_is_current
+
+            def missing_during_first_post_lock_validation(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise FileNotFoundError(
+                        "simulated post-lock directory-entry disappearance"
+                    )
+                return real_validate(*args, **kwargs)
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=missing_during_first_post_lock_validation,
+            ), patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(len(handles), 2)
+            self.assertTrue(handles[0].closed)
+            self.assertFalse(handles[1].closed)
+            lock.release()
+            self.assertTrue(handles[1].closed)
+
+    def test_advisory_lock_retries_real_post_lock_identity_replacement(self):
+        if os.name == "nt":
+            self.skipTest("renaming an open lock entry is POSIX-specific")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            displaced_path = root / "warning.displaced.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_acquire_os_lock = lock._acquire_os_lock
+            calls = {"count": 0}
+
+            def replace_after_first_lock(handle, deadline):
+                acquired = real_acquire_os_lock(handle, deadline)
+                calls["count"] += 1
+                if acquired and calls["count"] == 1:
+                    os.replace(lock_path, displaced_path)
+                    lock_path.write_bytes(b"0")
+                return acquired
+
+            with patch.object(
+                lock,
+                "_acquire_os_lock",
+                side_effect=replace_after_first_lock,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(calls["count"], 2)
+            self.assertTrue(displaced_path.is_file())
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            self.assertFalse(contender.acquire())
+            lock.release()
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_parent_guard_blocks_post_validation_replacement(self):
+        if os.name == "nt":
+            self.skipTest("renaming an open lock entry is POSIX-specific")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            displaced_path = root / "warning.displaced.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_validate = lock._locked_candidate_is_current
+            replaced = {"done": False}
+
+            def replace_after_validation(*args, **kwargs):
+                current = real_validate(*args, **kwargs)
+                if current and not replaced["done"]:
+                    os.replace(lock_path, displaced_path)
+                    lock_path.write_bytes(b"0")
+                    replaced["done"] = True
+                return current
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=replace_after_validation,
+            ):
+                self.assertTrue(lock.acquire())
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            self.assertFalse(contender.acquire())
+            lock.release()
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_releases_candidate_on_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = safe_io.AdvisoryFileLock(lock_path, trusted_root=root)
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=KeyboardInterrupt("simulated interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated interruption",
+                ):
+                    lock.acquire()
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_transfer_interruption_clears_object_handle(self):
+        class InterruptAfterTransferLock(safe_io.AdvisoryFileLock):
+            interrupt_after_transfer = False
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+                if (
+                    name == "handle"
+                    and value is not None
+                    and self.interrupt_after_transfer
+                ):
+                    object.__setattr__(self, "interrupt_after_transfer", False)
+                    raise KeyboardInterrupt("simulated transfer interruption")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptAfterTransferLock(lock_path, trusted_root=root)
+            lock.interrupt_after_transfer = True
+
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated transfer interruption",
+            ):
+                lock.acquire()
+
+            self.assertIsNone(lock.handle)
+            lock.release()
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_return_interruption_reclaims_transferred_handle(self):
+        class InterruptBeforeReturnLock(safe_io.AdvisoryFileLock):
+            interrupt_on_transferred_read = False
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+                if name == "handle" and value is not None:
+                    object.__setattr__(
+                        self,
+                        "interrupt_on_transferred_read",
+                        True,
+                    )
+
+            def __getattribute__(self, name):
+                if name == "handle" and object.__getattribute__(
+                    self,
+                    "interrupt_on_transferred_read",
+                ):
+                    object.__setattr__(
+                        self,
+                        "interrupt_on_transferred_read",
+                        False,
+                    )
+                    raise KeyboardInterrupt("simulated return interruption")
+                return object.__getattribute__(self, name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptBeforeReturnLock(lock_path, trusted_root=root)
+
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated return interruption",
+            ):
+                lock.acquire()
+
+            self.assertIsNone(lock.handle)
+            lock.release()
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_candidate_parent_cleanup_interruption_closes_handle(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class InterruptFirstParentCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            interrupted_descriptor = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    self.interrupted_descriptor = descriptor
+                    raise KeyboardInterrupt("simulated candidate parent close")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_fdopen = safe_io.os.fdopen
+            handles = []
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = InterruptFirstParentCloseLock(lock_path, trusted_root=root)
+            with patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ), patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated candidate parent close",
+                ):
+                    lock.acquire()
+
+            self.assertEqual(len(handles), 1)
+            self.assertTrue(handles[0].closed)
+            self.assertIsNone(lock.handle)
+            self.assertGreaterEqual(lock.interrupted_descriptor, 0)
+            with self.assertRaises(OSError):
+                os.fstat(lock.interrupted_descriptor)
+
+    def test_advisory_lock_validation_parent_cleanup_interruption_releases_lock(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class InterruptSecondParentCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            interrupt_parent_close = False
+            interrupted_descriptor = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.interrupt_parent_close:
+                    self.interrupt_parent_close = False
+                    self.interrupted_descriptor = descriptor
+                    raise KeyboardInterrupt("simulated validation parent close")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptSecondParentCloseLock(lock_path, trusted_root=root)
+            self.assertTrue(lock.acquire())
+            lock.interrupt_parent_close = True
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated validation parent close",
+            ):
+                lock.release()
+
+            self.assertIsNone(lock.handle)
+            self.assertGreaterEqual(lock.interrupted_descriptor, 0)
+            with self.assertRaises(OSError):
+                os.fstat(lock.interrupted_descriptor)
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_candidate_parent_close_never_closes_reused_fd(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class ReuseFdAfterCandidateCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            replacement_fd = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+                    self.replacement_fd = os.open(os.devnull, os.O_RDONLY)
+                    raise RuntimeError("simulated post-close failure")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = ReuseFdAfterCandidateCloseLock(
+                root / "warning.lock",
+                trusted_root=root,
+                timeout=0.0,
+            )
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated post-close failure",
+                ):
+                    lock.acquire()
+
+            try:
+                self.assertGreaterEqual(lock.replacement_fd, 0)
+                os.fstat(lock.replacement_fd)
+                self.assertEqual(lock.close_calls, 1)
+            finally:
+                if lock.replacement_fd >= 0:
+                    os.close(lock.replacement_fd)
+
+    def test_advisory_lock_validation_parent_close_never_closes_reused_fd(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class ReuseFdAfterValidationCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            replacement_fd = -1
+            replace_on_close = False
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.replace_on_close:
+                    self.replace_on_close = False
+                    safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+                    self.replacement_fd = os.open(os.devnull, os.O_RDONLY)
+                    raise RuntimeError("simulated validation post-close failure")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = ReuseFdAfterValidationCloseLock(
+                lock_path,
+                trusted_root=root,
+            )
+            self.assertTrue(lock.acquire())
+            lock.replace_on_close = True
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated validation post-close failure",
+            ):
+                lock.release()
+
+            try:
+                self.assertGreaterEqual(lock.replacement_fd, 0)
+                os.fstat(lock.replacement_fd)
+                self.assertEqual(lock.close_calls, 1)
+                contender = safe_io.AdvisoryFileLock(
+                    lock_path,
+                    trusted_root=root,
+                    timeout=0.1,
+                )
+                self.assertTrue(contender.acquire())
+                contender.release()
+            finally:
+                if lock.replacement_fd >= 0:
+                    os.close(lock.replacement_fd)
+
+    def test_advisory_lock_persistent_identity_change_times_out_without_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    safe_io.UnsafeFilesystemPath,
+                    "lock_identity_changed_after_acquire",
+                ):
+                    lock.acquire()
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_rejects_hardlinked_lock_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            second_link = root / "warning.second-link.lock"
+            lock_path.write_bytes(b"0")
+            try:
+                os.link(lock_path, second_link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_lock_hardlink",
+            ):
+                safe_io.AdvisoryFileLock(
+                    lock_path,
+                    trusted_root=root,
+                ).acquire()
+
+    def test_bounded_readers_reject_hardlinks_to_files_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            trusted_root = fixture_root / "trusted"
+            trusted_root.mkdir()
+            outside_bytes = fixture_root / "outside.bin"
+            outside_json = fixture_root / "outside.json"
+            outside_bytes.write_bytes(b"outside-checkpoint")
+            outside_json.write_text('{"outside": true}', encoding="utf-8")
+            inside_bytes = trusted_root / "checkpoint.pth"
+            inside_json = trusted_root / "manifest.json"
+            try:
+                os.link(outside_bytes, inside_bytes)
+                os.link(outside_json, inside_json)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_regular_file_hardlink",
+            ):
+                safe_io.read_bytes_bounded_in_root(
+                    inside_bytes,
+                    trusted_root=trusted_root,
+                    max_bytes=1024,
+                )
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_regular_file_hardlink",
+            ):
+                safe_io.read_json_bounded_in_root(
+                    inside_json,
+                    trusted_root=trusted_root,
+                    max_bytes=1024,
+                )
+            self.assertEqual(outside_bytes.read_bytes(), b"outside-checkpoint")
+            self.assertEqual(
+                json.loads(outside_json.read_text(encoding="utf-8")),
+                {"outside": True},
+            )
+
+    def test_safe_json_read_rejects_content_stat_change_and_closes_fd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "warning.json"
+            target.write_text('{"status": "ready"}', encoding="utf-8")
+            real_fstat = safe_io.os.fstat
+            descriptors = []
+            calls = {"count": 0}
+
+            def changed_second_fstat(descriptor):
+                calls["count"] += 1
+                descriptors.append(descriptor)
+                result = real_fstat(descriptor)
+                if calls["count"] == 2:
+                    values = list(result)
+                    values[6] = int(result.st_size) + 1
+                    return os.stat_result(values)
+                return result
+
+            with patch.object(
+                safe_io, "_directory_fd_guards_available", return_value=False
+            ), patch.object(
+                safe_io.os, "fstat", side_effect=changed_second_fstat
+            ):
+                with self.assertRaisesRegex(
+                    safe_io.UnsafeFilesystemPath,
+                    "file_content_changed_during_read",
+                ):
+                    safe_io.read_json_bounded_in_root(
+                        target,
+                        trusted_root=root,
+                        max_bytes=1024,
+                    )
+
+            self.assertGreaterEqual(len(descriptors), 2)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+
+    def test_batch_volume_commit_cleanup_errors_are_recorded_without_failing_promotion(self):
+        class CleanupReplacement:
+            def __init__(self, index):
+                self.metadata = {"role": "manual_truth"}
+                self.target = f"manual-{index}.ome.zarr"
+                self.rollback_path = f"manual-{index}.ome.zarr.rollback"
+                self.commit_calls = 0
+
+            def commit(self):
+                self.commit_calls += 1
+                return "rollback directory is locked"
+
+        manager = TifProjectManager()
+        refs = [
+            {"specimen_id": "specimen", "part_id": "head"},
+            {"specimen_id": "specimen", "part_id": "thorax"},
+        ]
+        replacements = [CleanupReplacement(1), CleanupReplacement(2)]
+        next_replacement = iter(replacements)
+
+        def promote(*_args, _replacement_transactions=None, **_kwargs):
+            replacement = next(next_replacement)
+            _replacement_transactions.append(replacement)
+            return {"status": "reviewed"}
+
+        acceptance = {"ready": refs, "blocked": []}
+        with self.assertLogs("AntSleap.core.tif_project", level="WARNING") as logs, patch.object(
+            manager,
+            "build_part_review_acceptance_report",
+            return_value=acceptance,
+        ), patch.object(
+            manager,
+            "promote_part_editable_result_to_manual_truth",
+            side_effect=promote,
+        ):
+            result = manager.promote_reviewed_part_results_to_manual_truth(refs, save=False)
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual([item.commit_calls for item in replacements], [1, 1])
+        self.assertEqual(len(manager.volume_cleanup_warnings), 2)
+        self.assertEqual(
+            {item["operation"] for item in manager.volume_cleanup_warnings},
+            {"batch_volume_replacement_commit"},
+        )
+        self.assertEqual(len(logs.output), 2)
+
+    def test_copy_model_draft_rejects_ancestor_target_without_touching_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_overlap")
+            labels_root = fixture["working_path"].parent
+            fixture["manager"].get_specimen("specimen")["labels"]["working_edit"]["path"] = (
+                fixture["manager"].to_relative(labels_root)
+            )
+
+            with self.assertRaisesRegex(ValueError, "source_target_label_path_overlap:model_draft"):
+                fixture["manager"].copy_label_layer_to_working_edit(
+                    "specimen", source_role="model_draft", save=True
+                )
+
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["draft_path"]), fixture["draft_array"]
+            )
+
+    def test_copy_model_draft_rejects_target_inside_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_truth_child")
+            child_target = fixture["manual_path"] / "nested_working_edit.ome.zarr"
+            fixture["manager"].get_specimen("specimen")["labels"]["working_edit"]["path"] = (
+                fixture["manager"].to_relative(child_target)
+            )
+
+            with self.assertRaisesRegex(ValueError, "working_edit_manual_truth_path_overlap"):
+                fixture["manager"].copy_label_layer_to_working_edit(
+                    "specimen", source_role="model_draft", save=True
+                )
+
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+            self.assertFalse(child_target.exists())
+
+    def test_copy_manual_truth_to_distinct_working_edit_remains_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "manual_copy_success")
+            data_version_before = fixture["manager"].project_data[
+                "project_data_version_id"
+            ]
+
+            copied = fixture["manager"].copy_label_layer_to_working_edit(
+                "specimen", source_role="manual_truth", save=True
+            )
+
+            self.assertEqual(copied["status"], "copied_from_manual_truth")
+            self.assertEqual(
+                fixture["manager"].project_data["project_data_version_id"],
+                data_version_before,
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["manual_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+
+    def test_copy_model_draft_save_failure_rolls_back_volume_memory_and_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_rollback")
+            manager = fixture["manager"]
+            project_snapshot = copy.deepcopy(manager.project_data)
+            pending_version_snapshot = manager._pending_project_data_version_id
+            pending_assets_snapshot = set(manager._pending_integrity_dirty_assets)
+
+            with patch(
+                "AntSleap.core.tif_sqlite_writer._insert_project_row",
+                side_effect=RuntimeError("sqlite write failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "sqlite write failed"):
+                    manager.copy_label_layer_to_working_edit(
+                        "specimen", source_role="model_draft", save=True
+                    )
+
+            self.assertEqual(manager.project_data, project_snapshot)
+            self.assertEqual(
+                manager._pending_project_data_version_id, pending_version_snapshot
+            )
+            self.assertEqual(
+                manager._pending_integrity_dirty_assets, pending_assets_snapshot
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["working_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+            self.assertFalse(
+                any(
+                    marker in path.name
+                    for path in fixture["working_path"].parent.iterdir()
+                    for marker in (".pending_", ".rollback_")
+                )
+            )
+
+            reloaded = TifProjectManager()
+            reloaded.load_project(fixture["manifest_path"])
+            reloaded_specimen = reloaded.get_specimen("specimen")
+            self.assertEqual(
+                reloaded_specimen["labels"]["working_edit"]["status"], "in_progress"
+            )
+            self.assertEqual(reloaded_specimen["review_status"], "reviewed")
+            self.assertTrue(reloaded_specimen["train_ready"])
+
+    def test_copy_model_draft_refuses_working_edit_alias_to_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_alias")
+            shutil.rmtree(fixture["working_path"])
+            try:
+                os.symlink(
+                    fixture["manual_path"],
+                    fixture["working_path"],
+                    target_is_directory=True,
+                )
+            except (OSError, NotImplementedError) as exc:
+                if os.name != "nt":
+                    self.skipTest(f"directory aliases are unavailable: {exc}")
+                junction = subprocess.run(
+                    [
+                        "cmd.exe",
+                        "/d",
+                        "/c",
+                        "mklink",
+                        "/J",
+                        str(fixture["working_path"]),
+                        str(fixture["manual_path"]),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if junction.returncode != 0:
+                    self.skipTest(
+                        f"directory aliases are unavailable: {exc}; {junction.stderr}"
+                    )
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError, "working_edit_manual_truth_same_path"
+                ):
+                    fixture["manager"].copy_label_layer_to_working_edit(
+                        "specimen", source_role="model_draft", save=True
+                    )
+
+                np.testing.assert_array_equal(
+                    load_volume_sidecar(fixture["manual_path"]),
+                    fixture["manual_array"],
+                )
+                self.assertTrue(
+                    os.path.samefile(fixture["working_path"], fixture["manual_path"])
+                )
+            finally:
+                if os.path.lexists(fixture["working_path"]):
+                    if os.name == "nt":
+                        os.rmdir(fixture["working_path"])
+                    else:
+                        os.unlink(fixture["working_path"])
+
+    def test_copy_model_draft_enforces_platform_reported_path_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(tmp, "draft_copy_mock_alias")
+
+            with patch(
+                "AntSleap.core.tif_project.paths_refer_to_same_file",
+                side_effect=(False, True),
+            ) as same_file:
+                with self.assertRaisesRegex(
+                    ValueError, "working_edit_manual_truth_same_path"
+                ):
+                    fixture["manager"].copy_label_layer_to_working_edit(
+                        "specimen", source_role="model_draft", save=True
+                    )
+
+            self.assertEqual(same_file.call_count, 2)
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["working_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
+
+    def test_copy_model_draft_refuses_source_alias_to_manual_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._working_edit_copy_fixture(
+                tmp, "draft_copy_source_mock_alias"
+            )
+
+            with patch(
+                "AntSleap.core.tif_project.paths_refer_to_same_file",
+                side_effect=(False, False, True),
+            ) as same_file:
+                with self.assertRaisesRegex(
+                    ValueError, "source_manual_truth_same_path:model_draft"
+                ):
+                    fixture["manager"].copy_label_layer_to_working_edit(
+                        "specimen", source_role="model_draft", save=True
+                    )
+
+            self.assertEqual(same_file.call_count, 3)
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["working_path"]), fixture["working_array"]
+            )
+            np.testing.assert_array_equal(
+                load_volume_sidecar(fixture["manual_path"]), fixture["manual_array"]
+            )
 
     def test_raw_backup_cannot_be_promoted_to_manual_truth(self):
         with tempfile.TemporaryDirectory() as tmp:

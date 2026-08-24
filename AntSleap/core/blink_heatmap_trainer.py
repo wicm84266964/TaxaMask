@@ -20,7 +20,12 @@ except Exception:
     plt = None
     HAS_PLOT = False
 
-from .blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP, write_blink_expert_manifest
+from .blink_expert_manifest import (
+    BLINK_EXPERT_BACKEND_HEATMAP,
+    build_blink_preprocessing_contract,
+    require_safe_blink_expert_part_name,
+    write_blink_expert_manifest,
+)
 from .blink_heatmap_dataset import BlinkHeatmapDataset
 from .blink_reproducibility import (
     DEFAULT_BLINK_RANDOM_SEED,
@@ -38,7 +43,6 @@ from .blink_training_strategy import (
 )
 from .projection import CoordinateMapper
 from .runtime_device import resolve_torch_device
-from .taxonomy_defaults import is_safe_part_name
 from .model_profiles import (
     DEFAULT_BLINK_OUTER_LOSS_WEIGHTS,
     DEFAULT_HEATMAP_BLINK_COMPONENT_LOSS_WEIGHTS,
@@ -131,10 +135,8 @@ class BlinkHeatmapTrainer:
         training_records=None,
         validation_records=None,
     ):
+        self.part_name = require_safe_blink_expert_part_name(part_name)
         self.device = resolve_torch_device(device)
-        self.part_name = str(part_name or "").strip()
-        if not is_safe_part_name(self.part_name):
-            raise ValueError(f"Unsafe heatmap Blink expert part name: {self.part_name}")
         self.parent_part = str(parent_part).strip() if isinstance(parent_part, str) and parent_part.strip() else None
         self.project_path = project_path
         self.learning_rate = float(learning_rate)
@@ -258,6 +260,7 @@ class BlinkHeatmapTrainer:
         progress_callback: Optional[Callable[[int], None]] = None,
         stop_callback: Optional[Callable[[], bool]] = None,
     ):
+        self.part_name = require_safe_blink_expert_part_name(self.part_name)
         self.seeds = apply_blink_training_seed(self.random_seed)
         target_size = normalize_heatmap_input_size(target_size or self.input_size)
         parent_suffix = f" within {self.parent_part}" if self.parent_part else ""
@@ -471,8 +474,10 @@ class BlinkHeatmapTrainer:
         return {
             "kind": "blink_heatmap_expert",
             "part_name": self.part_name,
+            "child_part": self.part_name,
             "parent_part": self.parent_part,
             "input_size": [int(target_size[0]), int(target_size[1])],
+            "preprocessing": build_blink_preprocessing_contract(),
             "base_channels": int(getattr(self.model, "base_channels", 24) or 24),
             "heatmap_sigma": float(self.heatmap_sigma),
             "learning_rate": float(self.learning_rate),

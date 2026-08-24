@@ -177,6 +177,30 @@ class TifVolumeRenderControllerTests(unittest.TestCase):
         controller.schedule_volume_preview_render.assert_called_once_with()
         self.assertIn("CPU fallback", workbench.training_status_label.text())
 
+    def test_gpu_failure_repaint_runs_after_failure_guard_is_released(self):
+        workbench = self.make_workbench()
+        controller = TifVolumeRenderController(workbench)
+        controller.state.volume_canvas_renderer = "gpu"
+        controller._switch_volume_canvas_to_cpu = Mock(
+            side_effect=lambda _warning: setattr(controller.state, "volume_canvas_renderer", "cpu")
+        )
+        controller._update_volume_render_status_label = Mock()
+        controller.render_volume_preview = Mock()
+        callbacks = []
+
+        with patch(
+            "AntSleap.ui.tif_volume_render_controller.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callbacks.append(callback),
+        ):
+            controller._on_gpu_volume_failed("OpenGL initialization failed")
+
+        self.assertFalse(controller.state.handling_gpu_volume_failure)
+        self.assertEqual(controller.state.volume_canvas_renderer, "cpu")
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        controller.render_volume_preview.assert_called_once_with()
+        self.assertFalse(controller.state.volume_render_scheduled)
+
     def test_commit_memory_failure_is_not_reported_as_gpu_or_data_corruption(self):
         workbench = self.make_workbench()
         controller = TifVolumeRenderController(workbench)

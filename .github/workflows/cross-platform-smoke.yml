@@ -57,6 +57,9 @@ jobs:
           python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_embedded_skill_bundles tests.test_gui_smoke
           python scripts/run_validation_suite.py --suite round5_ci_smoke --timeout 300
 
+      - name: Run v2.4.10 release regressions
+        run: python scripts/run_validation_suite.py --suite v2410_release_audit --timeout 300
+
       - name: Verify link-capable runner
         if: runner.os != 'Windows'
         run: python -c "import tempfile; from pathlib import Path; tmp = tempfile.TemporaryDirectory(); root = Path(tmp.name); target = root / 'target'; target.write_text('ok', encoding='utf-8'); link = root / 'link'; link.symlink_to(target); assert link.is_symlink(); tmp.cleanup()"

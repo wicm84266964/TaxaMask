@@ -387,6 +387,7 @@ def _process_locator_scope(
     box_pad,
     noise_floor,
     poly_epsilon,
+    segment_polygons,
 ):
     image_size = (
         prepared_input["original_width"],
@@ -523,18 +524,19 @@ def _process_locator_scope(
         )
         result["auto_boxes"][part_name] = [float(value) for value in final_box]
         result["scores"][part_name] = candidate["peak"]
-        _run_sam(
-            engine,
-            result,
-            part_name,
-            candidate["crop"],
-            candidate["prompt_box"],
-            candidate["left"],
-            candidate["top"],
-            poly_epsilon,
-            image_size,
-            event_context,
-        )
+        if segment_polygons:
+            _run_sam(
+                engine,
+                result,
+                part_name,
+                candidate["crop"],
+                candidate["prompt_box"],
+                candidate["left"],
+                candidate["top"],
+                poly_epsilon,
+                image_size,
+                event_context,
+            )
 
 
 def _record_child_route_rejection(
@@ -568,6 +570,7 @@ def _process_child_routes(
     event_context,
     conf_thresh,
     poly_epsilon,
+    segment_polygons,
 ):
     manager = route_state["manager"]
     manifest = route_state["manifest"]
@@ -737,7 +740,7 @@ def _process_child_routes(
             gate=gate,
             box=_detail_box(expert_box),
         )
-        if not _run_sam(
+        if segment_polygons and not _run_sam(
             engine,
             result,
             child_part,
@@ -786,7 +789,7 @@ def _finalize_result(result, route_state):
     return result
 
 
-def predict_full_pipeline(
+def _predict_pipeline(
     engine,
     image_path,
     current_taxonomy=None,
@@ -798,6 +801,8 @@ def predict_full_pipeline(
     poly_epsilon=2.0,
     project_route_manifest=None,
     model_profile_context=None,
+    *,
+    segment_polygons,
 ):
     started = time.perf_counter()
     event_context = _event_context(image_path, model_profile_context)
@@ -807,8 +812,10 @@ def predict_full_pipeline(
         locator_model=str(
             getattr(engine, "loaded_locator_reference", "") or "base_untrained"
         ),
-        segmenter_model=str(
-            getattr(engine, "loaded_sam_decoder_reference", "") or "base_sam"
+        segmenter_model=(
+            str(getattr(engine, "loaded_sam_decoder_reference", "") or "base_sam")
+            if segment_polygons
+            else "disabled_box_only"
         ),
         conf_thresh=float(conf_thresh),
         adapt_thresh=float(adapt_thresh),
@@ -819,8 +826,9 @@ def predict_full_pipeline(
     try:
         locator = engine.ensure_locator_loaded()
         locator.eval()
-        parts_model = engine.ensure_parts_model_loaded()
-        parts_model.sam_model.eval()
+        if segment_polygons:
+            parts_model = engine.ensure_parts_model_loaded()
+            parts_model.sam_model.eval()
 
         input_started = time.perf_counter()
         prepared_input, input_error = _prepare_input(engine, image_path)
@@ -890,6 +898,7 @@ def predict_full_pipeline(
             box_pad,
             noise_floor,
             poly_epsilon,
+            segment_polygons,
         )
         _process_child_routes(
             engine,
@@ -902,6 +911,7 @@ def predict_full_pipeline(
             event_context,
             conf_thresh,
             poly_epsilon,
+            segment_polygons,
         )
         result = _finalize_result(result, route_state)
         _emit(
@@ -924,4 +934,62 @@ def predict_full_pipeline(
         raise
 
 
-__all__ = ["predict_full_pipeline"]
+def predict_full_pipeline(
+    engine,
+    image_path,
+    current_taxonomy=None,
+    locator_scope=None,
+    conf_thresh=0.1,
+    adapt_thresh=0.4,
+    box_pad=0.4,
+    noise_floor=0.15,
+    poly_epsilon=2.0,
+    project_route_manifest=None,
+    model_profile_context=None,
+):
+    return _predict_pipeline(
+        engine,
+        image_path,
+        current_taxonomy=current_taxonomy,
+        locator_scope=locator_scope,
+        conf_thresh=conf_thresh,
+        adapt_thresh=adapt_thresh,
+        box_pad=box_pad,
+        noise_floor=noise_floor,
+        poly_epsilon=poly_epsilon,
+        project_route_manifest=project_route_manifest,
+        model_profile_context=model_profile_context,
+        segment_polygons=True,
+    )
+
+
+def predict_box_pipeline(
+    engine,
+    image_path,
+    current_taxonomy=None,
+    locator_scope=None,
+    conf_thresh=0.1,
+    adapt_thresh=0.4,
+    box_pad=0.4,
+    noise_floor=0.15,
+    project_route_manifest=None,
+    model_profile_context=None,
+):
+    """Run locator and Blink routes without constructing or invoking SAM."""
+
+    return _predict_pipeline(
+        engine,
+        image_path,
+        current_taxonomy=current_taxonomy,
+        locator_scope=locator_scope,
+        conf_thresh=conf_thresh,
+        adapt_thresh=adapt_thresh,
+        box_pad=box_pad,
+        noise_floor=noise_floor,
+        project_route_manifest=project_route_manifest,
+        model_profile_context=model_profile_context,
+        segment_polygons=False,
+    )
+
+
+__all__ = ["predict_box_pipeline", "predict_full_pipeline"]

@@ -1,5 +1,6 @@
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportIndexIssue=false, reportOptionalMemberAccess=false, reportUninitializedInstanceVariable=false
 
+import json
 import os
 import sys
 import tempfile
@@ -18,16 +19,26 @@ if str(ANTSLEAP_ROOT) not in sys.path:
 from PIL import Image
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog, QDialogButtonBox
+import torch
 
 import main as main_module
 import AntSleap.ui.main_window_blink_context as blink_context_module
 from main import BlinkEntryDialog, MainWindow
 from ui.blink_lab import BlinkLabWidget, BlinkTrainingThread, BucketDeletePreviewDialog, BucketDeleteTypeConfirmDialog
 from AntSleap.core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY
-from AntSleap.core.blink_expert_manifest import BLINK_EXPERT_BACKEND_HEATMAP
+from AntSleap.core.blink_expert_manifest import (
+    BLINK_EXPERT_BACKEND_HEATMAP,
+    build_blink_expert_manifest,
+)
+from AntSleap.core.cascade_manager import CascadingManager
 from AntSleap.core.model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS
 from AntSleap.core.blink_trainer import BlinkExpertTrainer
+from AntSleap.core.blink_heatmap_trainer import BlinkHeatmapTrainer
 from AntSleap.core.expert_notes import load_expert_notes, set_expert_note
+from AntSleap.core.training_weight_publisher import (
+    TRAINING_BUNDLE_DIRECTORY,
+    TrainingWeightPublisher,
+)
 
 
 class DummyPartsModel:
@@ -54,6 +65,7 @@ class DummyCascadeManager:
 class DummyEngine:
     def __init__(self, weights_dir):
         self.weights_dir = weights_dir
+        self.device = "cpu"
         self.parts_model = DummyPartsModel()
         self.cascade_manager = DummyCascadeManager()
         self.locator_resolution = (512, 512)
@@ -367,6 +379,67 @@ class BlinkBridgeTests(unittest.TestCase):
         file_path = bucket_dir / filename
         file_path.write_bytes(content)
         return file_path
+
+    def _publish_active_expert(
+        self,
+        run_id="blink-ui-run-001",
+        *,
+        child_part="Mandible",
+    ):
+        staging_root = Path(self.temp_dir.name) / f"staging-{run_id}"
+        child_dir = staging_root / child_part
+        child_dir.mkdir(parents=True)
+        staged_weights = child_dir / "expert_published.pth"
+        staged_weights.write_bytes(b"published blink weights")
+        staged_manifest = staged_weights.with_suffix(".manifest.json")
+        staged_manifest.write_text(
+            json.dumps(
+                build_blink_expert_manifest(
+                    str(staged_weights),
+                    parent_part="Head",
+                    child_part=child_part,
+                    input_size=(64, 64),
+                )
+            ),
+            encoding="utf-8",
+        )
+        model_root = Path(self.engine.weights_dir) / "experts"
+        publisher = TrainingWeightPublisher(model_root)
+        publication = publisher.publish_pending(
+            run_id,
+            staging_root,
+            [
+                {
+                    "artifact_id": "blink_checkpoint",
+                    "role": "output_weights",
+                    "relative_path": f"{child_part}/expert_published.pth",
+                    "media_type": "application/octet-stream",
+                },
+                {
+                    "artifact_id": "blink_model_manifest",
+                    "role": "model_manifest",
+                    "relative_path": f"{child_part}/expert_published.manifest.json",
+                    "media_type": "application/json",
+                },
+            ],
+        )
+        active = publisher.activate(
+            run_id,
+            {
+                "schema_version": "taxamask_training_run_v1",
+                "run_id": run_id,
+                "status": "succeeded",
+                "artifacts": publication["artifacts"],
+            },
+        )
+        artifacts = {item["artifact_id"]: item for item in active["artifacts"]}
+        published_weights = model_root.joinpath(
+            *artifacts["blink_checkpoint"]["relative_path"].split("/")
+        )
+        published_manifest = model_root.joinpath(
+            *artifacts["blink_model_manifest"]["relative_path"].split("/")
+        )
+        return published_weights, published_manifest
 
     def _select_bucket_item(self, widget, part_name):
         widget.refresh_expert_registry()
@@ -1305,6 +1378,8 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertEqual(trainer_kwargs.get("training_strategy"), "full_inside_random")
 
     def test_training_success_appoints_and_enables_new_route_expert(self):
+        cascade_manager = CascadingManager(self.engine)
+        self.engine.cascade_manager = cascade_manager
         widget = BlinkLabWidget(self.engine, self.pm)
         widget.training_route_context = {
             "parent_part": "Head",
@@ -1314,24 +1389,161 @@ class BlinkBridgeTests(unittest.TestCase):
         refresh_hits = []
         widget.route_registry_refresh_requested.connect(lambda: refresh_hits.append("refresh"))
 
-        save_path = str(Path(self.engine.weights_dir) / "experts" / "Mandible" / "expert_v20260512_120000.pth")
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(save_path).write_bytes(b"expert")
+        published_path, published_manifest = self._publish_active_expert()
+        save_path = str(published_path)
 
         widget._on_training_result(save_path)
 
         route = self.pm.get_cascade_route("Head", "Mandible")
         self.assertIsNotNone(route)
         self.assertTrue(route.get("enabled"))
-        self.assertEqual(route.get("expert_id"), "Mandible/expert_v20260512_120000.pth")
-        self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/expert_v20260512_120000.pth")
+        self.assertEqual(route.get("expert_id"), "Mandible/expert_published.pth")
+        self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/expert_published.pth")
+        expected_manifest_reference = published_manifest.relative_to(
+            Path(self.engine.weights_dir) / "experts"
+        ).as_posix()
+        self.assertEqual(route.get("expert_manifest"), expected_manifest_reference)
+        self.assertEqual(Path(cascade_manager.resolve_route_expert_path(route)), published_path)
         self.assertEqual(
             [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
-            ["Mandible/expert_v20260512_120000.pth"],
+            ["Mandible/expert_published.pth"],
         )
         self.assertEqual(refresh_hits, ["refresh"])
         self.assertIn("enabled", widget.lbl_status.text())
         self.assertIn("Head -> Mandible", widget.lbl_status.text())
+
+        class _CropProbeExpert:
+            _taxamask_meta = {"input_size": [64, 64]}
+
+            def __init__(self):
+                self.input_shape = None
+
+            def __call__(self, tensor):
+                self.input_shape = tuple(tensor.shape)
+                return torch.tensor([[0.5, 0.5, 0.5, 0.5]], dtype=torch.float32)
+
+            def _cxcywh_to_xyxy(self, _prediction, width, height):
+                return [width * 0.25, height * 0.25, width * 0.75, height * 0.75]
+
+        crop_probe = _CropProbeExpert()
+        with patch.object(cascade_manager, "_load_expert", return_value=crop_probe):
+            prediction = cascade_manager.infer_child_part(
+                self.image_path,
+                [10.0, 10.0, 80.0, 70.0],
+                "Mandible",
+                parent_part="Head",
+                route_manifest=self.pm.project_data["cascade_routes"],
+            )
+        self.assertEqual(crop_probe.input_shape, (1, 3, 64, 64))
+        self.assertIsInstance(prediction, dict)
+        self.assertGreaterEqual(prediction["box"][0], 10.0)
+        self.assertGreaterEqual(prediction["box"][1], 10.0)
+        self.assertLessEqual(prediction["box"][2], 80.0)
+        self.assertLessEqual(prediction["box"][3], 70.0)
+
+    def test_blink_trainers_reject_reserved_part_names_before_creating_directories(self):
+        expert_root = Path(self.engine.weights_dir) / "reserved-constructor-test"
+        for trainer_class, reserved_name in (
+            (BlinkExpertTrainer, "Training_Runs"),
+            (BlinkHeatmapTrainer, "EXPERT_NOTES.JSON"),
+        ):
+            with self.subTest(trainer=trainer_class.__name__, part=reserved_name):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "blink_expert_part_name_unsafe_or_reserved",
+                ):
+                    trainer_class(
+                        project_path=self.pm.current_project_path,
+                        part_name=reserved_name,
+                        save_dir=str(expert_root),
+                        device="cpu",
+                    )
+                self.assertFalse(expert_root.exists())
+
+    def test_blink_trainers_revalidate_mutated_part_before_dataset_access(self):
+        for trainer_class in (BlinkExpertTrainer, BlinkHeatmapTrainer):
+            with self.subTest(trainer=trainer_class.__name__):
+                trainer = trainer_class.__new__(trainer_class)
+                trainer.part_name = "cascade_routes.json"
+                with patch.object(trainer, "_make_dataset") as make_dataset:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "blink_expert_part_name_unsafe_or_reserved",
+                    ):
+                        trainer.train(epochs=1, batch_size=1)
+                make_dataset.assert_not_called()
+
+    def test_blink_training_ui_rejects_reserved_part_before_baseline_or_preflight(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.canvas.current_tool_part = ".training_weight_publication.lock"
+        project_before = json.loads(json.dumps(self.pm.project_data))
+
+        with patch.object(widget, "_ensure_blink_training_baseline") as baseline, \
+             patch.object(widget, "_start_blink_training_preflight") as preflight, \
+             patch("ui.blink_lab.QMessageBox.critical") as critical:
+            widget.train_expert_model()
+
+        baseline.assert_not_called()
+        preflight.assert_not_called()
+        critical.assert_called_once()
+        self.assertEqual(self.pm.project_data, project_before)
+        self.assertIsNone(widget.training_preflight_thread)
+
+    def test_manual_appointment_rejects_expert_bound_to_another_child_without_project_write(self):
+        self.engine.cascade_manager = CascadingManager(self.engine)
+        self._publish_active_expert("blink-wrong-child-appointment")
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.start_session(
+            {
+                "image_path": self.image_path,
+                "target_part": "Eye",
+                "focus_roi": {
+                    "part": "Head",
+                    "source": "manual",
+                    "box": [10.0, 10.0, 80.0, 70.0],
+                },
+            },
+            self.pm.get_labels(self.image_path),
+            self.pm.get_boxes(self.image_path),
+            self.pm.get_auto_boxes(self.image_path),
+        )
+        self._select_model_item_by_expert_id(
+            widget,
+            "Mandible",
+            "Mandible/expert_published.pth",
+        )
+        project_before = json.loads(json.dumps(self.pm.project_data))
+
+        with patch("ui.blink_lab.QMessageBox.critical") as critical, \
+             patch("ui.blink_lab.themed_yes_no_question") as confirm:
+            widget.appoint_selected_expert_to_current_route()
+
+        critical.assert_called_once()
+        confirm.assert_not_called()
+        self.assertEqual(self.pm.project_data, project_before)
+        self.assertIsNone(self.pm.get_cascade_route("Head", "Eye"))
+
+    def test_training_result_with_missing_manifest_does_not_register_route(self):
+        cascade_manager = CascadingManager(self.engine)
+        self.engine.cascade_manager = cascade_manager
+        widget = BlinkLabWidget(self.engine, self.pm)
+        widget.training_route_context = {
+            "parent_part": "Head",
+            "child_part": "Mandible",
+            "had_appointed_expert": False,
+        }
+        save_path = str(
+            self._create_expert_file(
+                "Mandible",
+                "expert_without_manifest.pth",
+            )
+        )
+
+        widget._on_training_result(save_path)
+
+        route = self.pm.get_cascade_route("Head", "Mandible")
+        self.assertIsNone(route)
+        self.assertIn("route auto-link failed", widget.lbl_status.text())
 
     def test_training_success_does_not_override_existing_appointed_route_expert(self):
         self.pm.appoint_cascade_route_expert(
@@ -1362,10 +1574,10 @@ class BlinkBridgeTests(unittest.TestCase):
         self.assertEqual(route.get("appointed_expert", {}).get("expert_id"), "Mandible/expert_v20260501_090000.pth")
         self.assertEqual(
             [candidate.get("expert_id") for candidate in route.get("expert_candidates", [])],
-            ["Mandible/expert_v20260503_120000.pth", "Mandible/expert_v20260501_090000.pth"],
+            ["Mandible/expert_v20260501_090000.pth"],
         )
-        self.assertEqual(refresh_hits, ["refresh"])
-        self.assertIn("already has an appointed expert", widget.lbl_status.text())
+        self.assertEqual(refresh_hits, [])
+        self.assertIn("route auto-link failed", widget.lbl_status.text())
 
     def test_bucket_delete_preview_cancel_keeps_files_and_current_project_routes(self):
         self._create_expert_file("Mandible", "expert_v20260501_090000.pth")
@@ -1575,6 +1787,235 @@ class BlinkBridgeTests(unittest.TestCase):
         notes = load_expert_notes(self.engine.weights_dir)
         self.assertEqual(notes.get("Mandible/expert_v20260501_090000.pth"), "appointed")
         self.assertNotIn("Mandible/expert_v20260422_100000.pth", notes)
+
+    def test_active_managed_publication_cannot_be_deleted_as_single_file(self):
+        cascade_manager = CascadingManager(self.engine)
+        self.engine.cascade_manager = cascade_manager
+        published_path, published_manifest = self._publish_active_expert(
+            "blink-ui-delete-guard"
+        )
+        publication_path = published_path.parents[1] / "publication.json"
+        widget = BlinkLabWidget(self.engine, self.pm)
+        item = self._select_model_item_by_expert_id(
+            widget,
+            "Mandible",
+            "Mandible/expert_published.pth",
+        )
+
+        self.assertEqual(
+            item.data(0, Qt.UserRole + 3).get("publication_run_id"),
+            "blink-ui-delete-guard",
+        )
+        self.assertFalse(widget.btn_delete_expert.isEnabled())
+        self.assertIn("cannot be deleted", widget.btn_delete_expert.toolTip())
+        with patch("ui.blink_lab.QMessageBox.information") as information, \
+             patch("ui.blink_lab.os.remove") as remove_file, \
+             patch("ui.blink_lab.themed_yes_no_question") as confirm:
+            widget.delete_expert_model()
+
+        information.assert_called_once()
+        remove_file.assert_not_called()
+        confirm.assert_not_called()
+        self.assertTrue(published_path.exists())
+        self.assertTrue(published_manifest.exists())
+        self.assertTrue(publication_path.exists())
+        self.assertTrue(cascade_manager.list_available_experts())
+
+    def test_managed_publication_delete_guard_does_not_trust_tree_metadata(self):
+        cascade_manager = CascadingManager(self.engine)
+        self.engine.cascade_manager = cascade_manager
+        published_path, published_manifest = self._publish_active_expert(
+            "blink-ui-delete-forged-metadata"
+        )
+        publication_path = published_path.parents[1] / "publication.json"
+        widget = BlinkLabWidget(self.engine, self.pm)
+        item = self._select_model_item_by_expert_id(
+            widget,
+            "Mandible",
+            "Mandible/expert_published.pth",
+        )
+        item.setData(0, Qt.UserRole + 3, None)
+
+        with patch("ui.blink_lab.QMessageBox.information") as information, \
+             patch("ui.blink_lab.os.remove") as remove_file, \
+             patch("ui.blink_lab.themed_yes_no_question") as confirm:
+            widget.delete_expert_model()
+
+        information.assert_called_once()
+        confirm.assert_not_called()
+        remove_file.assert_not_called()
+        self.assertTrue(published_path.exists())
+        self.assertTrue(published_manifest.exists())
+        self.assertTrue(publication_path.exists())
+
+    def test_single_file_delete_rechecks_ancestor_after_confirmation(self):
+        file_path = self._create_expert_file(
+            "Mandible",
+            "expert_v20260501_090000.pth",
+            b"must remain",
+        )
+        bucket_path = file_path.parent
+        widget = BlinkLabWidget(self.engine, self.pm)
+        self._select_model_item_by_expert_id(
+            widget,
+            "Mandible",
+            "Mandible/expert_v20260501_090000.pth",
+        )
+        original_lstat = os.lstat
+        state = {"reparse": False}
+
+        def guarded_lstat(path):
+            observed = original_lstat(path)
+            if state["reparse"] and os.path.normcase(os.path.abspath(path)) == os.path.normcase(str(bucket_path)):
+                return types.SimpleNamespace(
+                    st_mode=observed.st_mode,
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_file_attributes=0x400,
+                )
+            return observed
+
+        def confirm_then_swap(*_args, **_kwargs):
+            state["reparse"] = True
+            return QMessageBox.StandardButton.Yes
+
+        with patch("ui.blink_lab.os.lstat", side_effect=guarded_lstat), \
+             patch("ui.blink_lab.themed_yes_no_question", side_effect=confirm_then_swap), \
+             patch("ui.blink_lab.os.remove") as remove_file, \
+             patch("ui.blink_lab.QMessageBox.critical") as critical:
+            widget.delete_expert_model()
+
+        remove_file.assert_not_called()
+        critical.assert_called_once()
+        self.assertTrue(file_path.exists())
+
+    def test_single_file_delete_rechecks_fingerprint_after_confirmation(self):
+        file_path = self._create_expert_file(
+            "Mandible",
+            "expert_v20260501_090000.pth",
+            b"before confirmation",
+        )
+        widget = BlinkLabWidget(self.engine, self.pm)
+        self._select_model_item_by_expert_id(
+            widget,
+            "Mandible",
+            "Mandible/expert_v20260501_090000.pth",
+        )
+
+        def confirm_then_replace(*_args, **_kwargs):
+            file_path.write_bytes(b"replacement after confirmation")
+            return QMessageBox.StandardButton.Yes
+
+        with patch("ui.blink_lab.themed_yes_no_question", side_effect=confirm_then_replace), \
+             patch("ui.blink_lab.os.remove") as remove_file, \
+             patch("ui.blink_lab.QMessageBox.critical") as critical:
+            widget.delete_expert_model()
+
+        remove_file.assert_not_called()
+        critical.assert_called_once()
+        self.assertTrue(file_path.exists())
+        self.assertEqual(file_path.read_bytes(), b"replacement after confirmation")
+
+    def test_managed_training_root_is_never_exposed_as_deletable_bucket(self):
+        cascade_manager = CascadingManager(self.engine)
+        self.engine.cascade_manager = cascade_manager
+        published_path, published_manifest = self._publish_active_expert(
+            "blink-ui-reserved-bucket"
+        )
+        widget = BlinkLabWidget(self.engine, self.pm)
+        bucket_names = [
+            widget.expert_tree.topLevelItem(index).text(0)
+            for index in range(widget.expert_tree.topLevelItemCount())
+        ]
+
+        self.assertNotIn(TRAINING_BUNDLE_DIRECTORY, bucket_names)
+        self.assertIsNone(widget._selected_expert_bucket_info())
+        self.assertFalse(widget.btn_delete_expert.isEnabled())
+        with self.assertRaisesRegex(ValueError, "unsafe_expert_bucket"):
+            widget._delete_expert_bucket_files(
+                str(Path(self.engine.weights_dir) / "experts" / TRAINING_BUNDLE_DIRECTORY)
+            )
+        self.assertTrue(published_path.exists())
+        self.assertTrue(published_manifest.exists())
+
+    def test_bucket_delete_rejects_windows_reparse_directory_flag(self):
+        file_path = self._create_expert_file(
+            "Mandible",
+            "expert_v20260501_090000.pth",
+        )
+        bucket_path = file_path.parent
+        original_lstat = os.lstat
+
+        def reparse_bucket(path):
+            observed = original_lstat(path)
+            if os.path.normcase(os.path.abspath(path)) != os.path.normcase(
+                str(bucket_path)
+            ):
+                return observed
+            return types.SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_file_attributes=0x400,
+            )
+
+        widget = BlinkLabWidget(self.engine, self.pm)
+        with patch("ui.blink_lab.os.lstat", side_effect=reparse_bucket):
+            self.assertFalse(widget._is_safe_expert_bucket_path(str(bucket_path)))
+            with self.assertRaisesRegex(ValueError, "unsafe_expert_bucket"):
+                widget._delete_expert_bucket_files(str(bucket_path))
+        self.assertTrue(file_path.exists())
+
+    def test_bucket_delete_rejects_unlisted_nested_directory(self):
+        file_path = self._create_expert_file(
+            "Mandible",
+            "expert_v20260501_090000.pth",
+        )
+        nested_file = file_path.parent / "nested" / "unlisted.bin"
+        nested_file.parent.mkdir()
+        nested_file.write_bytes(b"must remain")
+        widget = BlinkLabWidget(self.engine, self.pm)
+        self._select_bucket_item(widget, "Mandible")
+
+        with patch("ui.blink_lab.QMessageBox.critical") as critical, \
+             patch.object(widget, "_show_bucket_delete_preview_dialog") as preview:
+            widget.delete_expert_model()
+
+        critical.assert_called_once()
+        preview.assert_not_called()
+        self.assertTrue(file_path.exists())
+        self.assertTrue(nested_file.exists())
+
+    def test_bucket_delete_rejects_change_after_preview(self):
+        file_path = self._create_expert_file(
+            "Mandible",
+            "expert_v20260501_090000.pth",
+            b"before preview",
+        )
+        widget = BlinkLabWidget(self.engine, self.pm)
+        self._select_bucket_item(widget, "Mandible")
+
+        def mutate_then_confirm(**_kwargs):
+            file_path.write_bytes(b"changed after preview")
+            return True, True, None
+
+        with patch.object(
+            widget,
+            "_show_bucket_delete_preview_dialog",
+            side_effect=mutate_then_confirm,
+        ), patch.object(
+            widget,
+            "_show_bucket_delete_type_confirm_dialog",
+            return_value=(True, None),
+        ), patch("ui.blink_lab.QMessageBox.critical") as critical:
+            widget.delete_expert_model()
+
+        critical.assert_called_once()
+        self.assertTrue(file_path.exists())
+        self.assertEqual(file_path.read_bytes(), b"changed after preview")
+        self.assertEqual(self.pm.route_cleanup_calls, [])
 
     def test_refresh_expert_registry_skips_unsafe_bucket_names(self):
         expert_root = Path(self.engine.weights_dir) / "experts"

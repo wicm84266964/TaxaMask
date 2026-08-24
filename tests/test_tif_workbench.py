@@ -259,6 +259,45 @@ class TifWorkbenchTests(unittest.TestCase):
         widget.render_current_slice()
         return widget
 
+    def _make_draft_handoff_widget(self, root):
+        manager = TifProjectManager()
+        project_root = root / "draft_handoff"
+        manager.create_project("draft_handoff", project_root)
+        manager.create_specimen_scaffold(
+            "draft-specimen",
+            material_map={
+                "materials": [
+                    {"id": 0, "name": "background", "trainable": False},
+                    {"id": 1, "name": "brain", "trainable": True},
+                ]
+            },
+        )
+        image = np.arange(3 * 8 * 8, dtype=np.uint8).reshape((3, 8, 8))
+        working = np.ones((3, 8, 8), dtype=np.uint16)
+        truth = np.full((3, 8, 8), 2, dtype=np.uint16)
+        draft = np.full((3, 8, 8), 3, dtype=np.uint16)
+        image_rel = "specimens/draft-specimen/working/image.ome.zarr"
+        working_rel = "specimens/draft-specimen/labels/working_edit.ome.zarr"
+        truth_rel = "specimens/draft-specimen/labels/manual_truth.ome.zarr"
+        draft_rel = "specimens/draft-specimen/labels/model_draft/prediction.ome.zarr"
+        image_meta = write_volume_sidecar(project_root / image_rel, image, role="working_image")
+        working_meta = write_volume_sidecar(project_root / working_rel, working, role="working_edit")
+        truth_meta = write_volume_sidecar(project_root / truth_rel, truth, role="manual_truth")
+        draft_meta = write_volume_sidecar(project_root / draft_rel, draft, role="model_draft")
+        manager.register_working_volume("draft-specimen", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
+        manager.register_label_volume("draft-specimen", "working_edit", working_rel, working_meta["shape_zyx"], working_meta["dtype"], save=False)
+        manager.register_label_volume("draft-specimen", "manual_truth", truth_rel, truth_meta["shape_zyx"], truth_meta["dtype"], save=False)
+        manager.add_model_draft("draft-specimen", draft_rel, draft_meta["shape_zyx"], draft_meta["dtype"], "prediction", save=True)
+        return TifWorkbenchWidget(manager, "en"), {
+            "manager": manager,
+            "project_root": project_root,
+            "working_path": project_root / working_rel,
+            "truth_path": project_root / truth_rel,
+            "working": working,
+            "truth": truth,
+            "draft": draft,
+        }
+
     def _wait_for_local_axis_export(self, widget, timeout_ms=10000):
         deadline = datetime.now().timestamp() + (float(timeout_ms) / 1000.0)
         while widget.local_axis_controller.export_running():
@@ -519,35 +558,8 @@ class TifWorkbenchTests(unittest.TestCase):
     def test_copy_model_draft_releases_open_working_edit_before_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            manager = TifProjectManager()
-            manager.create_project("draft_handoff", root / "draft_handoff")
-            manager.create_specimen_scaffold(
-                "draft-specimen",
-                material_map={
-                    "materials": [
-                        {"id": 0, "name": "background", "trainable": False},
-                        {"id": 1, "name": "brain", "trainable": True},
-                    ]
-                },
-            )
-            image = np.arange(3 * 8 * 8, dtype=np.uint8).reshape((3, 8, 8))
-            working = np.ones((3, 8, 8), dtype=np.uint16)
-            truth = np.full((3, 8, 8), 2, dtype=np.uint16)
-            draft = np.full((3, 8, 8), 3, dtype=np.uint16)
-            image_rel = "specimens/draft-specimen/working/image.ome.zarr"
-            working_rel = "specimens/draft-specimen/labels/working_edit.ome.zarr"
-            truth_rel = "specimens/draft-specimen/labels/manual_truth.ome.zarr"
-            draft_rel = "specimens/draft-specimen/labels/model_draft/prediction.ome.zarr"
-            image_meta = write_volume_sidecar(root / "draft_handoff" / image_rel, image, role="working_image")
-            working_meta = write_volume_sidecar(root / "draft_handoff" / working_rel, working, role="working_edit")
-            truth_meta = write_volume_sidecar(root / "draft_handoff" / truth_rel, truth, role="manual_truth")
-            draft_meta = write_volume_sidecar(root / "draft_handoff" / draft_rel, draft, role="model_draft")
-            manager.register_working_volume("draft-specimen", image_rel, image_meta["shape_zyx"], image_meta["dtype"], save=False)
-            manager.register_label_volume("draft-specimen", "working_edit", working_rel, working_meta["shape_zyx"], working_meta["dtype"], save=False)
-            manager.register_label_volume("draft-specimen", "manual_truth", truth_rel, truth_meta["shape_zyx"], truth_meta["dtype"], save=False)
-            manager.add_model_draft("draft-specimen", draft_rel, draft_meta["shape_zyx"], draft_meta["dtype"], "prediction", save=True)
-
-            widget = TifWorkbenchWidget(manager, "en")
+            widget, fixture = self._make_draft_handoff_widget(root)
+            manager = fixture["manager"]
             try:
                 self.assertIsInstance(widget.edit_volume, np.memmap)
                 original_copy = manager.copy_label_layer_to_working_edit
@@ -565,10 +577,243 @@ class TifWorkbenchTests(unittest.TestCase):
                 self.assertIsNone(observed["edit_volume"])
                 self.assertIsNone(observed["label_volume"])
                 warning.assert_not_called()
-                np.testing.assert_array_equal(load_volume_sidecar(root / "draft_handoff" / working_rel), draft)
-                np.testing.assert_array_equal(load_volume_sidecar(root / "draft_handoff" / truth_rel), truth)
+                np.testing.assert_array_equal(load_volume_sidecar(fixture["working_path"]), fixture["draft"])
+                np.testing.assert_array_equal(load_volume_sidecar(fixture["truth_path"]), fixture["truth"])
                 self.assertIsInstance(widget.edit_volume, np.memmap)
             finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_copy_model_draft_failure_restores_unsaved_working_edit(self):
+        for failure in ("copy", "release_timeout"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+                manager = fixture["manager"]
+                try:
+                    controller = widget.annotation_workflow_controller
+                    controller.push_undo_for_slice(0)
+                    widget.edit_volume[0, 0, 0] = 9
+                    controller.mark_slice_dirty(0)
+                    controller.mark_working_edit_dirty()
+                    original_revision = controller.state.slice_revisions[0]
+                    original_copy = manager.copy_label_layer_to_working_edit
+
+                    with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes), \
+                         patch("AntSleap.ui.tif_workbench.QMessageBox.warning") as warning:
+                        if failure == "copy":
+                            with patch.object(manager, "copy_label_layer_to_working_edit", side_effect=RuntimeError("copy failed")) as copy_mock:
+                                widget.copy_latest_model_draft_to_working_edit()
+                        else:
+                            with patch.object(widget.project_lifecycle_controller, "wait_for_volume_array_releases", return_value=False), \
+                                 patch.object(manager, "copy_label_layer_to_working_edit", wraps=original_copy) as copy_mock:
+                                widget.copy_latest_model_draft_to_working_edit()
+
+                    warning.assert_called_once()
+                    if failure == "copy":
+                        copy_mock.assert_called_once()
+                    else:
+                        copy_mock.assert_not_called()
+                    self.assertEqual(int(widget.edit_volume[0, 0, 0]), 9)
+                    self.assertTrue(controller.state.dirty)
+                    self.assertEqual(controller.state.dirty_slices, {0})
+                    self.assertEqual(controller.state.slice_revisions[0], original_revision)
+                    self.assertEqual(len(controller.state.undo_stack), 1)
+                    np.testing.assert_array_equal(load_volume_sidecar(fixture["working_path"]), fixture["working"])
+                    np.testing.assert_array_equal(load_volume_sidecar(fixture["truth_path"]), fixture["truth"])
+                finally:
+                    widget.close_project(prompt_unsaved=False)
+                    widget.deleteLater()
+
+    def test_copy_model_draft_dirty_without_slice_indexes_blocks_destructive_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            try:
+                controller.set_dirty(True)
+                self.assertEqual(controller.state.dirty_slices, set())
+                widget.auto_save_timer.setInterval(1)
+                widget.auto_save_timer.start()
+                with patch.object(controller, "start_auto_save", return_value=True) as start_auto_save, \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.question") as question, \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning") as warning, \
+                     patch.object(fixture["manager"], "copy_label_layer_to_working_edit") as copy_mock:
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                question.assert_not_called()
+                warning.assert_called_once()
+                self.assertIn("changed slices are unknown", warning.call_args.args[2])
+                copy_mock.assert_not_called()
+                start_auto_save.assert_not_called()
+                self.assertTrue(widget.auto_save_timer.isActive())
+                widget.auto_save_timer.stop()
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_copy_model_draft_context_mismatch_restores_auto_save_timer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            try:
+                widget.edit_volume[0, 0, 0] = 9
+                controller.mark_slice_dirty(0)
+                controller.mark_working_edit_dirty()
+                pending = controller.snapshot_unsaved_edit()
+                pending["context"] = {**pending["context"], "specimen_id": "other-specimen"}
+                controller.pending_unsaved_edit_recovery = pending
+                widget.auto_save_timer.start()
+
+                with patch("AntSleap.ui.tif_workbench.QMessageBox.warning") as warning, patch.object(
+                    fixture["manager"], "copy_label_layer_to_working_edit"
+                ) as copy_mock:
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                warning.assert_called_once()
+                copy_mock.assert_not_called()
+                self.assertTrue(controller.state.dirty)
+                self.assertTrue(widget.auto_save_timer.isActive())
+                widget.auto_save_timer.stop()
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_copy_model_draft_rechecks_write_lock_after_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            try:
+                widget.edit_volume[0, 0, 0] = 9
+                controller.mark_slice_dirty(0)
+                controller.mark_working_edit_dirty()
+
+                with patch.object(controller, "wait_for_auto_save", wraps=controller.wait_for_auto_save) as wait_mock, \
+                     patch.object(widget.coordinator, "guard_backend_write_lock", side_effect=[True, False]) as guard_mock, \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes), \
+                     patch.object(widget, "release_loaded_volume_arrays") as release_mock, \
+                     patch.object(fixture["manager"], "copy_label_layer_to_working_edit") as copy_mock:
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                self.assertEqual(wait_mock.call_count, 2)
+                self.assertEqual(guard_mock.call_count, 2)
+                release_mock.assert_not_called()
+                copy_mock.assert_not_called()
+                self.assertTrue(controller.state.dirty)
+                widget.auto_save_timer.stop()
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_copy_model_draft_copy_and_reload_failure_keeps_pending_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            original_load_specimen = widget.load_specimen
+            try:
+                widget.part_mask_workflow_controller._set_current_material_id(0)
+                controller.push_undo_for_slice(0)
+                widget.edit_volume[0, 0, 0] = 9
+                controller.mark_slice_dirty(0)
+                controller.mark_working_edit_dirty()
+
+                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes), \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning") as warning, \
+                     patch.object(fixture["manager"], "copy_label_layer_to_working_edit", side_effect=RuntimeError("copy failed")), \
+                     patch.object(widget, "load_specimen", side_effect=RuntimeError("reload failed")):
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                self.assertIsNone(widget.edit_volume)
+                self.assertIsNotNone(controller.pending_unsaved_edit_recovery)
+                warning.assert_called_once()
+                self.assertIn("copy failed", warning.call_args.args[2])
+                self.assertIn("reload failed", warning.call_args.args[2])
+
+                pending = controller.pending_unsaved_edit_recovery
+                controller.reset_dirty_tracking()
+                with patch("AntSleap.ui.tif_annotation_workflow_controller.QMessageBox.warning"):
+                    self.assertFalse(widget.close_project(prompt_unsaved=True))
+                self.assertIs(controller.pending_unsaved_edit_recovery, pending)
+
+                original_load_specimen("draft-specimen")
+                widget.auto_save_timer.stop()
+
+                self.assertIsNone(controller.pending_unsaved_edit_recovery)
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 9)
+                self.assertEqual(widget.current_material_id, 0)
+                self.assertEqual(controller.state.dirty_slices, {0})
+                controller.undo()
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 1)
+                controller.redo()
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 9)
+                np.testing.assert_array_equal(load_volume_sidecar(fixture["working_path"]), fixture["working"])
+            finally:
+                widget.auto_save_timer.stop()
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_copy_model_draft_second_attempt_reuses_pending_recovery_after_double_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            original_load_specimen = widget.load_specimen
+            try:
+                controller.push_undo_for_slice(0)
+                widget.edit_volume[0, 0, 0] = 9
+                controller.mark_slice_dirty(0)
+                controller.mark_working_edit_dirty()
+
+                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes), \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning"), \
+                     patch.object(fixture["manager"], "copy_label_layer_to_working_edit", side_effect=RuntimeError("copy failed")), \
+                     patch.object(widget, "load_specimen", side_effect=RuntimeError("reload failed")):
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                self.assertIsNone(widget.edit_volume)
+                pending = controller.pending_unsaved_edit_recovery
+                self.assertIsNotNone(pending)
+
+                with patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes) as question, \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning"), \
+                     patch.object(fixture["manager"], "copy_label_layer_to_working_edit", side_effect=RuntimeError("copy failed again")), \
+                     patch.object(widget, "load_specimen", wraps=original_load_specimen):
+                    widget.copy_latest_model_draft_to_working_edit()
+
+                question.assert_called_once()
+                self.assertIsNone(controller.pending_unsaved_edit_recovery)
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 9)
+                self.assertTrue(controller.state.dirty)
+                self.assertEqual(controller.state.dirty_slices, {0})
+                controller.undo()
+                self.assertEqual(int(widget.edit_volume[0, 0, 0]), 1)
+                np.testing.assert_array_equal(
+                    load_volume_sidecar(fixture["working_path"]), fixture["working"]
+                )
+                np.testing.assert_array_equal(
+                    load_volume_sidecar(fixture["truth_path"]), fixture["truth"]
+                )
+            finally:
+                widget.auto_save_timer.stop()
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
+
+    def test_sync_save_metadata_failure_preserves_dirty_slice_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget, _fixture = self._make_draft_handoff_widget(Path(tmp))
+            controller = widget.annotation_workflow_controller
+            try:
+                widget.edit_volume[0, 0, 0] = 9
+                controller.mark_slice_dirty(0)
+                controller.mark_working_edit_dirty()
+
+                with patch.object(widget, "_finalize_full_edit_save_metadata", side_effect=RuntimeError("metadata failed")), \
+                     patch("AntSleap.ui.tif_workbench.QMessageBox.warning"):
+                    self.assertFalse(widget.save_working_edit(show_message=False))
+
+                snapshot = controller.snapshot_unsaved_edit()
+                self.assertTrue(controller.state.dirty)
+                self.assertEqual(controller.state.dirty_slices, {0})
+                self.assertEqual(int(snapshot["slices"][0][0, 0]), 9)
+            finally:
+                widget.auto_save_timer.stop()
                 widget.close_project(prompt_unsaved=False)
                 widget.deleteLater()
 

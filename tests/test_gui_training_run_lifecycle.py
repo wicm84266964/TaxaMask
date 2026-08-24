@@ -13,10 +13,18 @@ from AntSleap.ui.main_window_workers import TrainingThread
 
 
 class _Engine:
-    def __init__(self, root, *, fail=False, fail_report=False):
+    def __init__(
+        self,
+        root,
+        *,
+        fail=False,
+        fail_report=False,
+        replace_locator_runtime=False,
+    ):
         self.root = Path(root)
         self.fail = fail
         self.fail_report = fail_report
+        self.replace_locator_runtime = replace_locator_runtime
         self.device = "cpu"
         self.weights_dir = str(self.root / "models")
         Path(self.weights_dir).mkdir()
@@ -34,6 +42,9 @@ class _Engine:
         return 0.2
 
     def validate_epoch(self, *_args, **_kwargs):
+        if self.replace_locator_runtime:
+            self.locator = object()
+            self.opt_loc = object()
         return {"loss": 0.1, "pixel_error": 1.0}
 
     def save_weights(self, *, output_dir, artifact_key, **_kwargs):
@@ -227,6 +238,41 @@ class GuiTrainingRunLifecycleTests(unittest.TestCase):
             retry_record = retry.run.recorder.load(retry.run.run_id)
             self.assertEqual(retry_record["retry_of"], prepared.run.run_id)
             retry.run.cancel(stage="test_cleanup")
+
+    def test_runtime_replacement_fails_before_publishing_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _manager, prepared, preflight = self._prepared(root)
+            engine = _Engine(root, replace_locator_runtime=True)
+            thread = TrainingThread(
+                engine,
+                preflight,
+                ["Head"],
+                ["Head"],
+                epochs=1,
+                batch_size=1,
+                train_segmenter=False,
+                training_run=prepared.run,
+                model_output_root=engine.weights_dir,
+            )
+            errors = []
+            thread.error_signal.connect(errors.append)
+            thread.run()
+
+            record = prepared.run.recorder.load(prepared.run.run_id)
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(errors)
+            self.assertIn(
+                "parent_training_locator_runtime_changed",
+                errors[0]["message"],
+            )
+            self.assertFalse(
+                (
+                    Path(engine.weights_dir)
+                    / "training_runs"
+                    / prepared.run.run_id
+                ).exists()
+            )
 
     def test_report_failure_cleans_pending_weight_publication(self):
         with tempfile.TemporaryDirectory() as tmp:

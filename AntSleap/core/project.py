@@ -1,7 +1,10 @@
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportCallIssue=false, reportIndexIssue=false
 
+import copy
+import hashlib
 import json
 import os
+import secrets
 import shutil
 import time
 from PIL import Image, ImageDraw
@@ -36,6 +39,7 @@ from .model_profiles import (
 from .vlm_preannotation import DEFAULT_VLM_PROMPT_PROFILE_ID, sanitize_vlm_prompt_profile
 from .sqlite_storage import LEGACY_JSON_BACKEND, PROJECT_MANIFEST_SCHEMA_VERSION, SQLITE_BACKEND, write_project_manifest
 from .path_identity import canonical_path, path_identity
+from .safe_io import AdvisoryFileLock, _fsync_directory
 from .training_truth import (
     LABEL_PART_METADATA_FIELD,
     TRAINING_ACCEPT_MANUAL_EDIT,
@@ -89,6 +93,8 @@ AI_TRAINING_TRUTH_SOURCES = frozenset(
 PROJECT_BACKUP_LIMIT = 30
 PROJECT_BACKUP_MIN_INTERVAL_SECONDS = 300
 LABEL_JOURNAL_SCHEMA_VERSION = "taxamask-label-journal-v1"
+LABEL_JOURNAL_TRANSACTION_MAX_RECORDS = 10000
+LABEL_JOURNAL_TRANSACTION_MAX_BYTES = 64 * 1024 * 1024
 
 
 class ProjectManager:
@@ -138,8 +144,36 @@ class ProjectManager:
         self._legacy_json_write_enabled = False
         self.known_relocated_roots = []
         self._last_label_journal_fsync = 0.0
+        self._label_journal_transaction_entries = []
+        self._label_journal_transaction_bytes = 0
+        self._label_journal_transaction_stack = []
         self._image_path_identity_cache = set()
         self._image_path_identity_cache_signature = None
+
+    def _snapshot_runtime_state(self, deep=False):
+        """Snapshot by reference for replace-only flows, or deeply for staged mutation."""
+        state = {
+            "project_data": self.project_data,
+            "current_project_path": self.current_project_path,
+            "current_storage_backend": self.current_storage_backend,
+            "current_database_path": self.current_database_path,
+            "_sqlite_dirty_images": self._sqlite_dirty_images,
+            "_sqlite_deleted_images": self._sqlite_deleted_images,
+            "_sqlite_label_dirty_images": self._sqlite_label_dirty_images,
+            "_sqlite_project_dirty": self._sqlite_project_dirty,
+            "_pending_project_data_version_id": self._pending_project_data_version_id,
+            "_traceability_backfill_needed": self._traceability_backfill_needed,
+            "_legacy_json_write_enabled": self._legacy_json_write_enabled,
+            "known_relocated_roots": self.known_relocated_roots,
+            "_last_label_journal_fsync": self._last_label_journal_fsync,
+            "_image_path_identity_cache": self._image_path_identity_cache,
+            "_image_path_identity_cache_signature": self._image_path_identity_cache_signature,
+        }
+        return copy.deepcopy(state) if deep else state
+
+    def _restore_runtime_state(self, state):
+        for name, value in state.items():
+            setattr(self, name, value)
 
     def set_known_relocated_roots(self, root_mappings):
         clean_mappings = []
@@ -490,6 +524,203 @@ class ProjectManager:
             print(f"Project backup skipped: {exc}")
             return ""
 
+    def begin_label_journal_transaction(self):
+        """Buffer legacy journal records until the outer transaction commits."""
+        token = object()
+        self._label_journal_transaction_stack.append(
+            {
+                "token": token,
+                "entry_count": len(self._label_journal_transaction_entries),
+                "byte_count": self._label_journal_transaction_bytes,
+            }
+        )
+        return token
+
+    def _pop_label_journal_transaction(self, token):
+        if not self._label_journal_transaction_stack:
+            raise RuntimeError("label_journal_transaction_not_active")
+        transaction = self._label_journal_transaction_stack[-1]
+        if token is not None and transaction["token"] is not token:
+            raise RuntimeError("label_journal_transactions_must_close_in_lifo_order")
+        self._label_journal_transaction_stack.pop()
+        return transaction
+
+    def commit_label_journal_transaction(self, token=None):
+        """Commit buffered records only when the outer transaction closes."""
+        if not self._label_journal_transaction_stack:
+            raise RuntimeError("label_journal_transaction_not_active")
+        transaction = self._label_journal_transaction_stack[-1]
+        if token is not None and transaction["token"] is not token:
+            raise RuntimeError("label_journal_transactions_must_close_in_lifo_order")
+        if len(self._label_journal_transaction_stack) > 1:
+            self._pop_label_journal_transaction(token)
+            return True
+
+        entries = list(self._label_journal_transaction_entries)
+        if not entries:
+            self._pop_label_journal_transaction(token)
+            self._label_journal_transaction_entries = []
+            self._label_journal_transaction_bytes = 0
+            return True
+
+        journal_paths = {entry_path for entry_path, _line in entries}
+        if len(journal_paths) != 1:
+            print("Label journal write skipped: transaction spans multiple journals")
+            return False
+        journal_path = next(iter(journal_paths))
+        lines = [line for _entry_path, line in entries]
+        if not self._write_label_journal_lines(journal_path, lines):
+            return False
+
+        self._pop_label_journal_transaction(token)
+        self._label_journal_transaction_entries = []
+        self._label_journal_transaction_bytes = 0
+        return True
+
+    def _ensure_label_journal_transaction_inactive(self, operation):
+        if self._label_journal_transaction_stack:
+            raise RuntimeError(
+                f"label_journal_transaction_active:{str(operation or 'operation')}"
+            )
+
+    def rollback_label_journal_transaction(self, token=None):
+        """Discard records added since the matching nested transaction began."""
+        transaction = self._pop_label_journal_transaction(token)
+        del self._label_journal_transaction_entries[transaction["entry_count"] :]
+        self._label_journal_transaction_bytes = transaction["byte_count"]
+        return True
+
+    def _write_label_journal_lines(self, journal_path, lines):
+        if not journal_path or not lines:
+            return False
+        if any(not isinstance(line, str) or not line.endswith("\n") for line in lines):
+            return False
+        journal_path = os.path.abspath(journal_path)
+        journal_dir = os.path.dirname(journal_path) or os.getcwd()
+        tmp_path = os.path.join(
+            journal_dir,
+            f".{os.path.basename(journal_path)}.{secrets.token_hex(8)}.tmp",
+        )
+        lock_path = f"{journal_path}.lock"
+        payload = "".join(lines).encode("utf-8")
+        expected_size = None
+        try:
+            os.makedirs(journal_dir, exist_ok=True)
+            with AdvisoryFileLock(
+                lock_path,
+                trusted_root=journal_dir,
+                timeout=5.0,
+            ):
+                with open(tmp_path, "w+b") as target:
+                    staged_hasher = hashlib.sha256()
+                    if os.path.exists(journal_path):
+                        with open(journal_path, "rb") as source:
+                            copied_size = self._copy_label_journal_checked(
+                                source,
+                                target,
+                                staged_hasher,
+                            )
+                            if copied_size != os.fstat(source.fileno()).st_size:
+                                raise OSError(
+                                    "label_journal_source_changed_during_copy"
+                                )
+                        if target.tell() and not self._file_ends_with_newline(target):
+                            raise ValueError("label_journal_existing_record_is_incomplete")
+                    expected_size = target.tell() + len(payload)
+                    written = target.write(payload)
+                    if written != len(payload) or target.tell() != expected_size:
+                        raise OSError("label_journal_short_write")
+                    staged_hasher.update(payload)
+                    target.flush()
+                    os.fsync(target.fileno())
+                    if not self._file_matches_digest(
+                        target,
+                        expected_size,
+                        staged_hasher.hexdigest(),
+                    ):
+                        raise OSError("label_journal_staged_content_mismatch")
+                try:
+                    os.replace(tmp_path, journal_path)
+                except Exception:
+                    if not self._label_journal_publish_matches(
+                        journal_path,
+                        expected_size,
+                        staged_hasher.hexdigest(),
+                    ):
+                        raise
+                _fsync_directory(journal_dir)
+            self._last_label_journal_fsync = time.time()
+            return True
+        except Exception as exc:
+            print(f"Label journal write skipped: {exc}")
+            return False
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _file_ends_with_newline(handle):
+        position = handle.tell()
+        if position <= 0:
+            return True
+        handle.seek(-1, os.SEEK_END)
+        last_byte = handle.read(1)
+        handle.seek(position, os.SEEK_SET)
+        return last_byte == b"\n"
+
+    @staticmethod
+    def _copy_label_journal_checked(source, target, hasher):
+        copied_size = 0
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                return copied_size
+            written = target.write(chunk)
+            if written != len(chunk):
+                raise OSError("label_journal_prefix_short_write")
+            copied_size += written
+            hasher.update(chunk)
+
+    @staticmethod
+    def _label_journal_publish_matches(
+        journal_path,
+        expected_size,
+        expected_digest,
+    ):
+        try:
+            with open(journal_path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                return ProjectManager._file_matches_digest(
+                    handle,
+                    expected_size,
+                    expected_digest,
+                )
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _file_matches_digest(handle, expected_size, expected_digest):
+        try:
+            if handle.tell() != expected_size:
+                return False
+            handle.seek(0, os.SEEK_SET)
+            observed = hashlib.sha256()
+            remaining = expected_size
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return False
+                observed.update(chunk)
+                remaining -= len(chunk)
+            matched = observed.hexdigest() == expected_digest
+            handle.seek(expected_size, os.SEEK_SET)
+            return matched
+        except (OSError, ValueError):
+            return False
+
     def _append_label_journal_entry(self, image_path, action):
         if self.is_sqlite_project():
             self._mark_sqlite_label_dirty(image_path)
@@ -502,7 +733,6 @@ class ProjectManager:
         labels = self.project_data.get("labels", {})
         label_entry = labels.get(image_path, self._default_label_entry())
         try:
-            os.makedirs(os.path.dirname(journal_path), exist_ok=True)
             record = {
                 "schema_version": LABEL_JOURNAL_SCHEMA_VERSION,
                 "timestamp": self._json_timestamp(),
@@ -511,16 +741,31 @@ class ProjectManager:
                 "image_path": self._to_relative(image_path),
                 "label": label_entry if isinstance(label_entry, dict) else self._default_label_entry(),
             }
-            with open(journal_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._last_label_journal_fsync = time.time()
-            return True
+            line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
         except Exception as exc:
             print(f"Label journal write skipped: {exc}")
             return False
+
+        if self._label_journal_transaction_stack:
+            line_bytes = len(line.encode("utf-8"))
+            if (
+                len(self._label_journal_transaction_entries) + 1
+                > LABEL_JOURNAL_TRANSACTION_MAX_RECORDS
+                or self._label_journal_transaction_bytes + line_bytes
+                > LABEL_JOURNAL_TRANSACTION_MAX_BYTES
+            ):
+                raise RuntimeError("label_journal_transaction_buffer_limit_exceeded")
+            if (
+                self._label_journal_transaction_entries
+                and self._label_journal_transaction_entries[0][0] != journal_path
+            ):
+                raise RuntimeError(
+                    "label_journal_transaction_multiple_projects_not_supported"
+                )
+            self._label_journal_transaction_entries.append((journal_path, line))
+            self._label_journal_transaction_bytes += line_bytes
+            return True
+        return self._write_label_journal_lines(journal_path, [line])
 
     def recover_labels_from_journal(self, journal_path=None, save=True):
         """Restore journal data and report labels awaiting recovery review."""
@@ -859,6 +1104,19 @@ class ProjectManager:
             raise
 
     def create_project(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._create_project_in_place(
+                name,
+                save_dir,
+                template_id=template_id,
+                storage_backend=storage_backend,
+            )
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _create_project_in_place(self, name, save_dir, template_id=None, storage_backend=SQLITE_BACKEND):
         self.clear()
         os.makedirs(save_dir, exist_ok=True)
         template = get_project_template(template_id or PROJECT_TEMPLATE_ANT)
@@ -1056,6 +1314,7 @@ class ProjectManager:
 
     def clear(self):
         """Resets the project data to a clean state."""
+        self._ensure_label_journal_transaction_inactive("clear")
         traceability = new_project_traceability(PROJECT_KIND_2D)
         self.project_data = {
             **traceability,
@@ -1384,7 +1643,31 @@ class ProjectManager:
                 else:
                     self.project_data["image_provenance"][project_key] = dict(provenance)
 
+        labels = self.project_data.get("labels", {})
+        for image_path, provenance in self.project_data["image_provenance"].items():
+            if not isinstance(provenance, dict):
+                continue
+            source_type = str(provenance.get("source_type") or "").strip()
+            if source_type != "stl_rendered_view":
+                continue
+            label_entry = labels.get(image_path) if isinstance(labels, dict) else None
+            if not isinstance(label_entry, dict):
+                continue
+            label_entry["view"] = str(provenance.get("view_name") or "")
+            label_entry["specimen_id"] = str(provenance.get("specimen_id") or "")
+            label_entry["metadata_ref"] = str(provenance.get("metadata_ref") or "")
+            label_entry["review_mode"] = source_type
+
     def load_project(self, path):
+        self._ensure_label_journal_transaction_inactive("load_project")
+        previous_state = self._snapshot_runtime_state()
+        try:
+            return self._load_project_in_place(path)
+        except Exception:
+            self._restore_runtime_state(previous_state)
+            raise
+
+    def _load_project_in_place(self, path):
         with open(path, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
 
@@ -1487,6 +1770,12 @@ class ProjectManager:
         return data_to_save
 
     def save_project(self, force=False):
+        """Persist the project and return only after its durable commit point.
+
+        Backends must raise before committing. Cleanup that can fail after a
+        durable commit is best-effort so callers can treat an exception as an
+        uncommitted save and a normal return as the commit acknowledgement.
+        """
         if getattr(self, "current_storage_backend", "json") == SQLITE_BACKEND:
             if force:
                 return self.flush_sqlite_changes(

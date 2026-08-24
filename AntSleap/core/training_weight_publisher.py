@@ -24,6 +24,7 @@ from AntSleap.core.integrity_manifest_service import (
     IntegrityManifestError,
     validate_relative_path,
 )
+from AntSleap.core.path_identity import canonicalize_posix_root_alias
 from AntSleap.core.safe_io import atomic_write_json
 
 
@@ -184,7 +185,7 @@ def _require_regular_file(path):
 def _require_existing_components_safe(path):
     """Reject a managed root reached through an existing link or reparse point."""
 
-    absolute = os.path.abspath(os.fspath(path))
+    absolute = canonicalize_posix_root_alias(path)
     drive, tail = os.path.splitdrive(absolute)
     if tail.startswith((os.sep, os.altsep or os.sep)):
         current = drive + os.sep

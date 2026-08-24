@@ -1,5 +1,8 @@
 # pyright: reportMissingImports=false
 
+import copy
+import hashlib
+import io
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -16,10 +19,13 @@ from ultralytics import SAM
 
 try:
     from AntSleap.models.networks import TraitRegressor
-    from AntSleap.models.sam_trainable import TrainableSAM
+    from AntSleap.models.sam_trainable import (
+        TrainableSAM,
+        load_sam_from_checkpoint_bytes,
+    )
 except ImportError:
     from models.networks import TraitRegressor
-    from models.sam_trainable import TrainableSAM
+    from models.sam_trainable import TrainableSAM, load_sam_from_checkpoint_bytes
 from .dataset import TwoStageDataset
 from .reporter import ExperimentReporter
 from .cascade_manager import CascadingManager
@@ -29,9 +35,37 @@ from .training_preflight import format_size_pair
 from .cascade_routes import route_manifest_has_routes
 from .runtime_device import normalize_device_preference, resolve_torch_device
 from .model_profiles import DEFAULT_LOCATOR_LOSS_WEIGHTS, sanitize_loss_weights
+from .sam_decoder_checkpoint import (
+    build_sam_decoder_checkpoint,
+    parse_sam_decoder_checkpoint,
+    require_matching_base_sam,
+)
 
 
 _WEIGHT_ARTIFACT_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,240}$")
+LOCATOR_CHECKPOINT_SCHEMA_VERSION = "taxamask_locator_checkpoint_v2"
+LOCATOR_ARCHITECTURE_ID = "trait_regressor_unet_wh_v1"
+
+
+def _checkpoint_locator_scope(value, expected_count):
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("locator_checkpoint_scope_invalid")
+    scope = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("locator_checkpoint_scope_invalid")
+        part_name = item.strip()
+        if part_name in seen:
+            raise ValueError("locator_checkpoint_scope_duplicate")
+        seen.add(part_name)
+        scope.append(part_name)
+    if len(scope) != int(expected_count):
+        raise ValueError(
+            "locator_checkpoint_scope_count_mismatch:"
+            f"expected={int(expected_count)}:observed={len(scope)}"
+        )
+    return scope
 
 
 def _fsync_directory(path):
@@ -157,23 +191,37 @@ class AntEngine:
         num_classes=None,
         device="auto",
         locator_loss_weights=None,
+        weights_dir=None,
+        locator_scope=None,
     ):
         self.device_preference = normalize_device_preference(device)
         self.device = resolve_torch_device(device)
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.weights_dir = os.path.join(base_dir, "weights")
+        default_weights_dir = os.path.join(base_dir, "weights")
+        self.weights_dir = os.path.abspath(
+            os.fspath(default_weights_dir if weights_dir is None else weights_dir)
+        )
         if not os.path.exists(self.weights_dir): os.makedirs(self.weights_dir)
         
         if num_classes is None:
             num_classes = len(DEFAULT_LOCATOR_SCOPE)
         self.current_num_classes = num_classes
+        self.current_locator_scope = (
+            _checkpoint_locator_scope(locator_scope, num_classes)
+            if locator_scope is not None
+            else []
+        )
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.set_locator_loss_weights(locator_loss_weights)
         self.locator_resolution = (512, 512)
         self.loaded_locator_timestamp = None
         self.loaded_locator_reference = ""
+        self.loaded_locator_identity = {}
+        self.loaded_locator_schema_version = ""
+        self.loaded_locator_scope = []
         self.loaded_sam_decoder_reference = ""
+        self.loaded_sam_decoder_identity = {}
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -189,6 +237,8 @@ class AntEngine:
         # 2. SAM
         base_sam_path = os.path.join(self.weights_dir, "sam_b.pt")
         self.base_sam_path = base_sam_path
+        self._verified_base_sam_bytes = None
+        self.verified_base_sam_identity = {}
         self.base_sam_predictor = None
         self.parts_model = None
         self.opt_parts = None
@@ -235,13 +285,87 @@ class AntEngine:
         if not hasattr(self, "_parts_model_lock"):
             self._parts_model_lock = threading.Lock()
         with self._parts_model_lock:
-            if self.parts_model is None:
-                self.parts_model = TrainableSAM(model_path=self.base_sam_path, device=self.device)
-                trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
-                self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+            if getattr(self, "parts_model", None) is None:
+                try:
+                    candidate, optimizer = self._new_parts_runtime()
+                except BaseException:
+                    self._clear_failed_parts_load()
+                    raise
+                self.parts_model = candidate
+                self.opt_parts = optimizer
+                self.loaded_sam_decoder_reference = ""
+                self.loaded_sam_decoder_identity = {}
         if self.parts_model is None:
             raise RuntimeError("SAM parts model failed to load.")
         return self.parts_model
+
+    def _new_parts_runtime(self):
+        kwargs = {
+            "model_path": self.base_sam_path,
+            "device": self.device,
+        }
+        checkpoint_bytes = getattr(self, "_verified_base_sam_bytes", None)
+        if checkpoint_bytes is not None:
+            kwargs["checkpoint_bytes"] = checkpoint_bytes
+        candidate = TrainableSAM(**kwargs)
+        trainable_params = [
+            parameter
+            for parameter in candidate.parameters()
+            if parameter.requires_grad
+        ]
+        if not trainable_params:
+            raise ValueError("sam_parts_trainable_parameters_empty")
+        optimizer = optim.Adam(
+            trainable_params,
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+        )
+        return candidate, optimizer
+
+    def _clear_failed_parts_load(self):
+        self.parts_model = None
+        self.opt_parts = None
+        self.base_sam_predictor = None
+        self.loaded_sam_decoder_reference = ""
+        self.loaded_sam_decoder_identity = {}
+
+    def configure_verified_base_sam(
+        self,
+        checkpoint_bytes,
+        *,
+        reference="",
+        fingerprint=None,
+    ):
+        if not isinstance(checkpoint_bytes, (bytes, bytearray, memoryview)):
+            raise TypeError("base_sam_checkpoint_bytes_invalid")
+        stable_bytes = bytes(checkpoint_bytes)
+        if not stable_bytes:
+            raise ValueError("base_sam_checkpoint_bytes_empty")
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(stable_bytes),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(stable_bytes).hexdigest(),
+        }
+        if fingerprint is not None:
+            if not isinstance(fingerprint, dict):
+                raise TypeError("base_sam_fingerprint_invalid")
+            keys = ("size_bytes", "hash_algorithm", "digest")
+            if any(fingerprint.get(key) != observed[key] for key in keys):
+                raise ValueError("base_sam_fingerprint_mismatch")
+            if fingerprint.get("entry_kind", "file") != "file":
+                raise ValueError("base_sam_fingerprint_mismatch")
+        identity = {
+            **observed,
+            "reference": str(reference or self.base_sam_path),
+        }
+        if not hasattr(self, "_parts_model_lock"):
+            self._parts_model_lock = threading.Lock()
+        with self._parts_model_lock:
+            self._verified_base_sam_bytes = stable_bytes
+            self.verified_base_sam_identity = identity
+            self._clear_failed_parts_load()
+        return dict(identity)
 
     def set_device_preference(self, device_preference):
         clean_preference = normalize_device_preference(device_preference)
@@ -278,6 +402,7 @@ class AntEngine:
         if num_classes == self.current_num_classes: return
         print(f"Rebuilding Locator for {num_classes} classes...")
         self.current_num_classes = num_classes
+        self.current_locator_scope = []
         if self.locator is not None:
             self.locator = TraitRegressor(in_channels=3, out_channels=num_classes).to(self.device)
             self.opt_loc = optim.Adam(self.locator.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -285,6 +410,9 @@ class AntEngine:
             self.opt_loc = None
         self.loaded_locator_timestamp = None
         self.loaded_locator_reference = ""
+        self.loaded_locator_identity = {}
+        self.loaded_locator_schema_version = ""
+        self.loaded_locator_scope = []
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -295,6 +423,9 @@ class AntEngine:
         self.locator_resolution = (512, 512)
         self.loaded_locator_timestamp = None
         self.loaded_locator_reference = ""
+        self.loaded_locator_identity = {}
+        self.loaded_locator_schema_version = ""
+        self.loaded_locator_scope = []
         self.loaded_locator_requires_legacy_confirmation = False
         self.loaded_locator_is_legacy_512 = False
 
@@ -328,8 +459,27 @@ class AntEngine:
         return None
 
     def _get_base_sam_predictor(self):
-        if self.base_sam_predictor is None:
-            self.base_sam_predictor = SAM(self.base_sam_path)
+        if not hasattr(self, "_parts_model_lock"):
+            self._parts_model_lock = threading.Lock()
+        with self._parts_model_lock:
+            if self.base_sam_predictor is None:
+                try:
+                    checkpoint_bytes = getattr(
+                        self,
+                        "_verified_base_sam_bytes",
+                        None,
+                    )
+                    if checkpoint_bytes is None:
+                        candidate = SAM(self.base_sam_path)
+                    else:
+                        candidate = load_sam_from_checkpoint_bytes(
+                            self.base_sam_path,
+                            checkpoint_bytes,
+                        )
+                except BaseException:
+                    self._clear_failed_parts_load()
+                    raise
+                self.base_sam_predictor = candidate
         return self.base_sam_predictor
 
     def _polygon_from_predictor(self, predictor, image_input, prompt_box, left, top, poly_epsilon, image_size=None):
@@ -524,123 +674,431 @@ class AntEngine:
         if timestamp:
             self.load_sam_decoder(timestamp)
 
-    def load_locator(self, timestamp, *, checkpoint_path=None):
-        suffix = f"_{timestamp}" if timestamp else ""
-        loc_path = os.path.abspath(
-            checkpoint_path
-            or os.path.join(self.weights_dir, f"locator{suffix}.pth")
-        )
-        weights_root = os.path.abspath(self.weights_dir)
+    def _clear_failed_locator_load(self):
+        self.locator = None
+        self.opt_loc = None
+        self.locator_resolution = (512, 512)
+        self.loaded_locator_timestamp = None
+        self.loaded_locator_reference = ""
+        self.loaded_locator_identity = {}
+        self.loaded_locator_schema_version = ""
+        self.loaded_locator_scope = []
+        self.loaded_locator_requires_legacy_confirmation = False
+        self.loaded_locator_is_legacy_512 = False
+
+    def _new_locator_load_candidate(self):
+        current_locator = getattr(self, "locator", None)
+        if current_locator is None or isinstance(current_locator, TraitRegressor):
+            candidate = TraitRegressor(
+                in_channels=3,
+                out_channels=self.current_num_classes,
+            )
+        else:
+            candidate = copy.deepcopy(current_locator)
+        return candidate.to(self.device)
+
+    def load_locator(
+        self,
+        timestamp,
+        *,
+        checkpoint_path=None,
+        checkpoint_bytes=None,
+        checkpoint_payload=None,
+        require_complete=False,
+        expected_locator_scope=None,
+    ):
+        loc_path = ""
         try:
-            inside = os.path.normcase(os.path.commonpath([weights_root, loc_path])) == os.path.normcase(weights_root)
-        except ValueError:
-            inside = False
-        if not inside:
-            raise ValueError("locator_checkpoint_outside_managed_model_root")
-        
-        # If specific timestamp not found, try to find latest? No, strict loading for specific selection.
-        if os.path.exists(loc_path):
+            suffix = f"_{timestamp}" if timestamp else ""
+            loc_path = os.path.abspath(
+                checkpoint_path
+                or os.path.join(self.weights_dir, f"locator{suffix}.pth")
+            )
+            weights_root = os.path.abspath(self.weights_dir)
             try:
-                saved_state = torch.load(loc_path, map_location=self.device, weights_only=True)
+                inside = os.path.normcase(
+                    os.path.commonpath([weights_root, loc_path])
+                ) == os.path.normcase(weights_root)
+            except ValueError:
+                inside = False
+            if not inside:
+                raise ValueError("locator_checkpoint_outside_managed_model_root")
+
+            if checkpoint_bytes is not None and checkpoint_payload is not None:
+                raise ValueError("locator_checkpoint_bytes_ambiguous")
+            stable_bytes = None
+            stable_payload = (
+                checkpoint_bytes
+                if checkpoint_bytes is not None
+                else checkpoint_payload
+            )
+            if stable_payload is None:
+                if not os.path.isfile(loc_path):
+                    raise FileNotFoundError(
+                        f"locator_checkpoint_missing:{os.path.basename(loc_path)}"
+                    )
+                checkpoint_source = loc_path
+            else:
+                if not isinstance(stable_payload, (bytes, bytearray, memoryview)):
+                    raise TypeError("locator_checkpoint_bytes_invalid")
+                stable_bytes = bytes(stable_payload)
+                if not stable_bytes:
+                    raise ValueError("locator_checkpoint_bytes_empty")
+                checkpoint_source = io.BytesIO(stable_bytes)
+
+            saved_state = torch.load(
+                checkpoint_source,
+                map_location=self.device,
+                weights_only=True,
+            )
+            checkpoint_meta = {}
+            checkpoint_schema = ""
+            if isinstance(saved_state, dict) and "state_dict" in saved_state:
+                checkpoint_state = saved_state.get("state_dict")
+                if not isinstance(checkpoint_state, dict):
+                    raise ValueError("locator_checkpoint_state_invalid")
+                raw_meta = saved_state.get("meta")
+                if raw_meta is not None and not isinstance(raw_meta, dict):
+                    raise ValueError("locator_checkpoint_meta_invalid")
+                checkpoint_meta = dict(raw_meta or {})
+                checkpoint_schema = str(saved_state.get("schema_version") or "")
+            elif isinstance(saved_state, dict):
                 checkpoint_state = saved_state
-                checkpoint_meta = {}
+            else:
+                raise ValueError("locator_checkpoint_payload_invalid")
 
-                if isinstance(saved_state, dict) and isinstance(saved_state.get("state_dict"), dict):
-                    checkpoint_state = saved_state.get("state_dict", {})
-                    checkpoint_meta = saved_state.get("meta", {}) if isinstance(saved_state.get("meta"), dict) else {}
-                elif isinstance(saved_state, dict):
-                    checkpoint_meta = saved_state.get("meta", {}) if isinstance(saved_state.get("meta"), dict) else {}
-                
-                # Architecture check
-                if 'outc.conv.weight' in checkpoint_state:
-                     if checkpoint_state['outc.conv.weight'].shape[0] != self.current_num_classes:
-                          print(f"Locator architecture mismatch for {timestamp}. Skipping.")
-                          return
+            if not checkpoint_state:
+                raise ValueError("locator_checkpoint_state_empty")
+            if not all(
+                isinstance(key, str)
+                and isinstance(value, (torch.Tensor, nn.Parameter))
+                for key, value in checkpoint_state.items()
+            ):
+                raise ValueError("locator_checkpoint_state_invalid")
 
-                locator = self.ensure_locator_loaded()
-                locator.load_state_dict(checkpoint_state, strict=False)
-                saved_resolution = checkpoint_meta.get("locator_size")
-                legacy_resolution = checkpoint_meta.get("locator_resolution")
-                if saved_resolution is None and legacy_resolution is not None:
-                    try:
-                        legacy_side = max(1, int(legacy_resolution))
-                    except Exception:
-                        legacy_side = 512
-                    saved_resolution = [legacy_side, legacy_side]
-
-                if saved_resolution is None:
-                    self.locator_resolution = (512, 512)
-                    self.loaded_locator_requires_legacy_confirmation = True
-                    self.loaded_locator_is_legacy_512 = True
-                else:
-                    try:
-                        self.locator_resolution = (max(1, int(saved_resolution[0])), max(1, int(saved_resolution[1])))
-                    except Exception:
-                        self.locator_resolution = (512, 512)
-                    self.loaded_locator_requires_legacy_confirmation = False
-                    self.loaded_locator_is_legacy_512 = False
-                self.loaded_locator_timestamp = timestamp
-                self.loaded_locator_reference = os.path.relpath(
-                    loc_path, weights_root
-                ).replace("\\", "/")
-                print(f"Loaded Locator: {os.path.basename(loc_path)}")
-            except Exception as e:
-                print(f"ERROR loading Locator {loc_path}: {e}")
-        else:
-            print(f"Locator weights not found: {loc_path}")
-
-    def load_sam_decoder(self, timestamp, *, checkpoint_path=None):
-        suffix = f"_{timestamp}" if timestamp else ""
-        sam_path = os.path.abspath(
-            checkpoint_path
-            or os.path.join(self.weights_dir, f"sam_decoder_lora{suffix}.pth")
-        )
-        weights_root = os.path.abspath(self.weights_dir)
-        try:
-            inside = os.path.normcase(os.path.commonpath([weights_root, sam_path])) == os.path.normcase(weights_root)
-        except ValueError:
-            inside = False
-        if not inside:
-            raise ValueError("segmenter_checkpoint_outside_managed_model_root")
-        
-        if os.path.exists(sam_path):
-            try:
-                parts_model = self.ensure_parts_model_loaded()
-                parts_model.sam_model.mask_decoder.load_state_dict(
-                    torch.load(sam_path, map_location=self.device, weights_only=True)
+            if (
+                require_complete
+                and checkpoint_schema != LOCATOR_CHECKPOINT_SCHEMA_VERSION
+            ):
+                raise ValueError("locator_checkpoint_schema_required")
+            if (
+                checkpoint_schema
+                and checkpoint_schema != LOCATOR_CHECKPOINT_SCHEMA_VERSION
+            ):
+                raise ValueError(
+                    f"locator_checkpoint_schema_unsupported:{checkpoint_schema}"
                 )
-                self.loaded_sam_decoder_reference = os.path.relpath(
-                    sam_path, weights_root
-                ).replace("\\", "/")
-                print(f"Loaded Segmenter (Fine-tuned): {os.path.basename(sam_path)}")
-            except Exception as e:
-                print(f"ERROR loading SAM Decoder {sam_path}: {e}")
-        else:
-            print(f"Segmenter weights not found: {sam_path}")
+
+            saved_scope = []
+            if checkpoint_schema == LOCATOR_CHECKPOINT_SCHEMA_VERSION:
+                if checkpoint_meta.get("architecture_id") != LOCATOR_ARCHITECTURE_ID:
+                    raise ValueError("locator_checkpoint_architecture_mismatch")
+                if "num_classes" not in checkpoint_meta:
+                    raise ValueError("locator_checkpoint_num_classes_missing")
+                saved_scope = _checkpoint_locator_scope(
+                    checkpoint_meta.get("locator_scope"),
+                    self.current_num_classes,
+                )
+            if require_complete and expected_locator_scope is None:
+                raise ValueError("locator_checkpoint_expected_scope_required")
+            if expected_locator_scope is not None:
+                expected_scope = _checkpoint_locator_scope(
+                    expected_locator_scope,
+                    self.current_num_classes,
+                )
+                if saved_scope and saved_scope != expected_scope:
+                    raise ValueError(
+                        "locator_checkpoint_scope_mismatch:"
+                        f"expected={expected_scope!r}:observed={saved_scope!r}"
+                    )
+
+            saved_num_classes = checkpoint_meta.get("num_classes")
+            if saved_num_classes is not None:
+                try:
+                    saved_num_classes = int(saved_num_classes)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "locator_checkpoint_num_classes_invalid"
+                    ) from exc
+                if saved_num_classes != int(self.current_num_classes):
+                    raise ValueError(
+                        "locator_checkpoint_num_classes_mismatch:"
+                        f"expected={self.current_num_classes}:"
+                        f"observed={saved_num_classes}"
+                    )
+
+            output_weight = checkpoint_state.get("outc.conv.weight")
+            if output_weight is not None and (
+                output_weight.ndim < 1
+                or int(output_weight.shape[0]) != int(self.current_num_classes)
+            ):
+                observed_classes = (
+                    int(output_weight.shape[0]) if output_weight.ndim >= 1 else -1
+                )
+                raise ValueError(
+                    "locator_checkpoint_num_classes_mismatch:"
+                    f"expected={self.current_num_classes}:"
+                    f"observed={observed_classes}"
+                )
+
+            candidate = self._new_locator_load_candidate()
+            expected_state = candidate.state_dict()
+            expected_keys = set(expected_state)
+            observed_keys = set(checkpoint_state)
+            missing_keys = sorted(expected_keys - observed_keys)
+            unexpected_keys = sorted(observed_keys - expected_keys)
+            if missing_keys or unexpected_keys:
+                details = []
+                if missing_keys:
+                    details.append(f"missing={','.join(missing_keys[:5])}")
+                if unexpected_keys:
+                    details.append(
+                        f"unexpected={','.join(unexpected_keys[:5])}"
+                    )
+                raise RuntimeError(
+                    "locator_checkpoint_state_mismatch:" + ":".join(details)
+                )
+            candidate.load_state_dict(checkpoint_state, strict=True)
+
+            saved_resolution = checkpoint_meta.get("locator_size")
+            legacy_resolution = checkpoint_meta.get("locator_resolution")
+            if saved_resolution is None and legacy_resolution is not None:
+                try:
+                    legacy_side = max(1, int(legacy_resolution))
+                except Exception:
+                    legacy_side = 512
+                saved_resolution = [legacy_side, legacy_side]
+
+            if saved_resolution is None:
+                locator_resolution = (512, 512)
+                resolution_fell_back = True
+            else:
+                try:
+                    locator_resolution = (
+                        max(1, int(saved_resolution[0])),
+                        max(1, int(saved_resolution[1])),
+                    )
+                    resolution_fell_back = False
+                except Exception:
+                    locator_resolution = (512, 512)
+                    resolution_fell_back = True
+            requires_legacy_confirmation = bool(
+                not checkpoint_schema or resolution_fell_back
+            )
+            is_legacy_512 = resolution_fell_back
+
+            optimizer = optim.Adam(
+                candidate.parameters(),
+                lr=getattr(self, "learning_rate", 1e-4),
+                weight_decay=getattr(self, "weight_decay", 1e-4),
+            )
+            self.locator = candidate
+            self.opt_loc = optimizer
+            self.locator_resolution = locator_resolution
+            self.loaded_locator_requires_legacy_confirmation = (
+                requires_legacy_confirmation
+            )
+            self.loaded_locator_is_legacy_512 = is_legacy_512
+            self.loaded_locator_timestamp = timestamp
+            self.loaded_locator_reference = os.path.relpath(
+                loc_path,
+                weights_root,
+            ).replace("\\", "/")
+            if stable_bytes is None:
+                self.loaded_locator_identity = {
+                    "source": "path",
+                    "reference": self.loaded_locator_reference,
+                }
+            else:
+                self.loaded_locator_identity = {
+                    "source": "memory",
+                    "reference": self.loaded_locator_reference,
+                    "size_bytes": len(stable_bytes),
+                    "hash_algorithm": "sha256",
+                    "digest": hashlib.sha256(stable_bytes).hexdigest(),
+                }
+            self.loaded_locator_schema_version = checkpoint_schema
+            self.loaded_locator_scope = list(saved_scope)
+            if saved_scope:
+                self.current_locator_scope = list(saved_scope)
+            print(f"Loaded Locator: {os.path.basename(loc_path)}")
+        except Exception as exc:
+            self._clear_failed_locator_load()
+            display_path = loc_path or str(checkpoint_path or "")
+            print(f"ERROR loading Locator {display_path}: {exc}")
+            raise
+
+    def load_sam_decoder(
+        self,
+        timestamp,
+        *,
+        checkpoint_path=None,
+        checkpoint_bytes=None,
+        checkpoint_payload=None,
+        expected_base_sam_fingerprint=None,
+        require_base_sam_match=False,
+    ):
+        sam_path = ""
+        try:
+            suffix = f"_{timestamp}" if timestamp else ""
+            sam_path = os.path.abspath(
+                checkpoint_path
+                or os.path.join(
+                    self.weights_dir,
+                    f"sam_decoder_lora{suffix}.pth",
+                )
+            )
+            weights_root = os.path.abspath(self.weights_dir)
+            try:
+                inside = os.path.normcase(
+                    os.path.commonpath([weights_root, sam_path])
+                ) == os.path.normcase(weights_root)
+            except ValueError:
+                inside = False
+            if not inside:
+                raise ValueError("segmenter_checkpoint_outside_managed_model_root")
+
+            if checkpoint_bytes is not None and checkpoint_payload is not None:
+                raise ValueError("sam_decoder_checkpoint_bytes_ambiguous")
+            stable_payload = (
+                checkpoint_bytes
+                if checkpoint_bytes is not None
+                else checkpoint_payload
+            )
+            stable_bytes = None
+            if stable_payload is None:
+                if not os.path.isfile(sam_path):
+                    raise FileNotFoundError(
+                        f"sam_decoder_checkpoint_missing:{os.path.basename(sam_path)}"
+                    )
+                checkpoint_source = sam_path
+            else:
+                if not isinstance(stable_payload, (bytes, bytearray, memoryview)):
+                    raise TypeError("sam_decoder_checkpoint_bytes_invalid")
+                stable_bytes = bytes(stable_payload)
+                if not stable_bytes:
+                    raise ValueError("sam_decoder_checkpoint_bytes_empty")
+                checkpoint_source = io.BytesIO(stable_bytes)
+
+            saved_payload = torch.load(
+                checkpoint_source,
+                map_location=self.device,
+                weights_only=True,
+            )
+            parsed_checkpoint = parse_sam_decoder_checkpoint(
+                saved_payload,
+                require_bound_base=bool(require_base_sam_match),
+            )
+            checkpoint_state = parsed_checkpoint["state_dict"]
+            checkpoint_base_sam = parsed_checkpoint["base_sam"]
+            if checkpoint_base_sam is not None or require_base_sam_match:
+                require_matching_base_sam(
+                    checkpoint_base_sam,
+                    expected_base_sam_fingerprint,
+                    getattr(self, "verified_base_sam_identity", None),
+                )
+            if not isinstance(checkpoint_state, dict):
+                raise ValueError("sam_decoder_checkpoint_state_invalid")
+            if not checkpoint_state:
+                raise ValueError("sam_decoder_checkpoint_state_empty")
+            if not all(
+                isinstance(key, str)
+                and isinstance(value, (torch.Tensor, nn.Parameter))
+                for key, value in checkpoint_state.items()
+            ):
+                raise ValueError("sam_decoder_checkpoint_state_invalid")
+
+            if not hasattr(self, "_parts_model_lock"):
+                self._parts_model_lock = threading.Lock()
+            with self._parts_model_lock:
+                parts_model = getattr(self, "parts_model", None)
+                if parts_model is None or getattr(self, "opt_parts", None) is None:
+                    parts_model, _base_optimizer = self._new_parts_runtime()
+                decoder = parts_model.sam_model.mask_decoder
+                expected_state = decoder.state_dict()
+                expected_keys = set(expected_state)
+                observed_keys = set(checkpoint_state)
+                if observed_keys != expected_keys:
+                    missing = sorted(expected_keys - observed_keys)
+                    unexpected = sorted(observed_keys - expected_keys)
+                    raise RuntimeError(
+                        "sam_decoder_checkpoint_state_mismatch:"
+                        f"missing={missing}:unexpected={unexpected}"
+                    )
+                for key, expected_value in expected_state.items():
+                    observed_value = checkpoint_state[key]
+                    if tuple(observed_value.shape) != tuple(expected_value.shape):
+                        raise ValueError(
+                            "sam_decoder_checkpoint_shape_mismatch:"
+                            f"key={key}:expected={tuple(expected_value.shape)}:"
+                            f"observed={tuple(observed_value.shape)}"
+                        )
+
+                candidate_decoder = copy.deepcopy(decoder)
+                candidate_decoder.load_state_dict(checkpoint_state, strict=True)
+                candidate_decoder.to(self.device)
+                trainable_params = [
+                    parameter
+                    for parameter in candidate_decoder.parameters()
+                    if parameter.requires_grad
+                ]
+                if not trainable_params:
+                    raise ValueError("sam_decoder_trainable_parameters_empty")
+                optimizer = optim.Adam(
+                    trainable_params,
+                    lr=self.learning_rate,
+                    weight_decay=self.weight_decay,
+                )
+                parts_model.sam_model.mask_decoder = candidate_decoder
+                self.parts_model = parts_model
+                self.opt_parts = optimizer
+                reference = os.path.relpath(sam_path, weights_root).replace(
+                    "\\",
+                    "/",
+                )
+                self.loaded_sam_decoder_reference = reference
+                if stable_bytes is None:
+                    self.loaded_sam_decoder_identity = {
+                        "source": "path",
+                        "reference": reference,
+                    }
+                else:
+                    self.loaded_sam_decoder_identity = {
+                        "source": "memory",
+                        "reference": reference,
+                        "size_bytes": len(stable_bytes),
+                        "hash_algorithm": "sha256",
+                        "digest": hashlib.sha256(stable_bytes).hexdigest(),
+                    }
+            print(f"Loaded Segmenter (Fine-tuned): {os.path.basename(sam_path)}")
+            return self.parts_model
+        except BaseException as exc:
+            if not hasattr(self, "_parts_model_lock"):
+                self._parts_model_lock = threading.Lock()
+            with self._parts_model_lock:
+                self._clear_failed_parts_load()
+            display_path = sam_path or str(checkpoint_path or "")
+            print(f"ERROR loading SAM Decoder {display_path}: {exc}")
+            raise
 
     def reset_sam_to_base(self):
         print("Resetting Segmenter to Base SAM (Original)...")
-        # To reset, we reload the original weights from the base model file
-        # Or simpler: re-instantiate the parts_model? No, that's heavy.
-        # We can re-load the state dict from the base file if we kept a copy?
-        # Actually, since we only trained the mask decoder, we can reload just the mask decoder 
-        # from the original "sam_b.pt".
-        # But "sam_b.pt" is a full checkpoint.
-        
+        if not hasattr(self, "_parts_model_lock"):
+            self._parts_model_lock = threading.Lock()
         try:
-            # Re-initialize the TrainableSAM class is the safest way to ensure clean slate
-            # But we want to avoid reloading the heavy Image Encoder if possible.
-            # Ideally, we should have saved the "initial_state" of the decoder.
-            # For now, let's just re-create the wrapper. It's fast enough (~1-2s).
-            self.parts_model = TrainableSAM(model_path=self.base_sam_path, device=self.device)
-            self.loaded_sam_decoder_reference = ""
-            
-            # We also need to re-create the optimizer because parameters changed objects
-            trainable_params = [p for p in self.parts_model.parameters() if p.requires_grad]
-            self.opt_parts = optim.Adam(trainable_params, lr=self.learning_rate, weight_decay=self.weight_decay)
+            with self._parts_model_lock:
+                candidate, optimizer = self._new_parts_runtime()
+                self.parts_model = candidate
+                self.opt_parts = optimizer
+                self.loaded_sam_decoder_reference = ""
+                self.loaded_sam_decoder_identity = {}
             print("Segmenter reset complete.")
-        except Exception as e:
-            print(f"Error resetting SAM: {e}")
+            return self.parts_model
+        except BaseException as exc:
+            with self._parts_model_lock:
+                self._clear_failed_parts_load()
+            print(f"Error resetting SAM: {exc}")
+            raise
 
     def reset_to_base_model(self):
         """Resets everything (Locator + SAM)"""
@@ -655,6 +1113,7 @@ class AntEngine:
         *,
         output_dir=None,
         artifact_key=None,
+        locator_scope=None,
     ):
         import datetime
 
@@ -681,23 +1140,39 @@ class AntEngine:
             raise FileExistsError("weight_checkpoint_exists")
         if save_locator:
             locator = self.ensure_locator_loaded()
+            scope = _checkpoint_locator_scope(
+                locator_scope
+                if locator_scope is not None
+                else getattr(self, "current_locator_scope", None),
+                self.current_num_classes,
+            )
             locator_payload = {
+                "schema_version": LOCATOR_CHECKPOINT_SCHEMA_VERSION,
                 "state_dict": locator.state_dict(),
-                    "meta": {
+                "meta": {
+                    "architecture_id": LOCATOR_ARCHITECTURE_ID,
                     "locator_size": [int(self.locator_resolution[0]), int(self.locator_resolution[1])],
                     "locator_resolution": int(self.locator_resolution[0]),
                     "num_classes": int(self.current_num_classes),
+                    "locator_scope": list(scope),
                     "loss_config": self.loss_config_snapshot,
                 },
             }
             _atomic_torch_save(locator_payload, locator_path)
+            self.current_locator_scope = list(scope)
             self.loaded_locator_timestamp = artifact_key
+            self.loaded_locator_schema_version = LOCATOR_CHECKPOINT_SCHEMA_VERSION
+            self.loaded_locator_scope = list(scope)
             self.loaded_locator_requires_legacy_confirmation = False
             self.loaded_locator_is_legacy_512 = False
         if save_segmenter:
             parts_model = self.ensure_parts_model_loaded()
             _atomic_torch_save(
-                parts_model.sam_model.mask_decoder.state_dict(), segmenter_path
+                build_sam_decoder_checkpoint(
+                    parts_model.sam_model.mask_decoder.state_dict(),
+                    getattr(self, "verified_base_sam_identity", None),
+                ),
+                segmenter_path,
             )
         return artifact_key
 
@@ -828,6 +1303,33 @@ class AntEngine:
             box_pad=box_pad,
             noise_floor=noise_floor,
             poly_epsilon=poly_epsilon,
+            project_route_manifest=project_route_manifest,
+            model_profile_context=model_profile_context,
+        )
+
+    def predict_box_pipeline(
+        self,
+        image_path,
+        current_taxonomy=None,
+        locator_scope=None,
+        conf_thresh=0.1,
+        adapt_thresh=0.4,
+        box_pad=0.4,
+        noise_floor=0.15,
+        project_route_manifest=None,
+        model_profile_context=None,
+    ):
+        from .prediction_pipeline import predict_box_pipeline
+
+        return predict_box_pipeline(
+            self,
+            image_path,
+            current_taxonomy=current_taxonomy,
+            locator_scope=locator_scope,
+            conf_thresh=conf_thresh,
+            adapt_thresh=adapt_thresh,
+            box_pad=box_pad,
+            noise_floor=noise_floor,
             project_route_manifest=project_route_manifest,
             model_profile_context=model_profile_context,
         )

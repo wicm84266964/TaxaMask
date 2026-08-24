@@ -62,6 +62,7 @@ class TifAnnotationWorkflowController(QObject):
         self.promote_task_id = ""
         self.saving_working_edit = False
         self.pending_promote_after_save = None
+        self.pending_unsaved_edit_recovery = None
 
     def initialize_compatibility_state(self):
         return self.state
@@ -192,6 +193,105 @@ class TifAnnotationWorkflowController(QObject):
         self._sync_mirror()
         self.workbench._sync_undo_redo_buttons()
 
+    def _current_edit_context(self):
+        workbench = self.workbench
+        project = getattr(workbench, "project", None)
+        project_path = getattr(project, "current_project_path", "") if project is not None else ""
+        return {
+            "project_path": str(project_path or ""),
+            "specimen_id": str(getattr(workbench, "current_specimen_id", "") or ""),
+            "scope": str(getattr(workbench, "current_volume_scope", "") or ""),
+            "part_id": str(getattr(workbench, "current_part_id", "") or ""),
+            "reslice_id": str(getattr(workbench, "current_reslice_id", "") or ""),
+        }
+
+    def snapshot_unsaved_edit(self):
+        workbench = self.workbench
+        if not self.state.dirty or workbench.edit_volume is None:
+            return None
+        slices = {}
+        depth = int(workbench.edit_volume.shape[0])
+        for z_index in sorted(self.state.dirty_slices):
+            z_index = int(z_index)
+            if 0 <= z_index < depth:
+                slices[z_index] = np.asarray(workbench.edit_volume[z_index]).copy()
+        part_mask_controller = getattr(workbench, "part_mask_workflow_controller", None)
+        part_mask_state = getattr(part_mask_controller, "state", None)
+        return {
+            "context": self._current_edit_context(),
+            "slices": slices,
+            "dirty_slices": set(self.state.dirty_slices),
+            "slice_revisions": dict(self.state.slice_revisions),
+            "revision_counter": int(self.state.revision_counter),
+            "undo_stack": list(self.state.undo_stack),
+            "redo_stack": list(self.state.redo_stack),
+            "tool_mode": str(self.state.tool_mode or "brush"),
+            "current_material_id": int(getattr(part_mask_state, "current_material_id", 0) or 0),
+        }
+
+    def restore_unsaved_edit(self, snapshot):
+        workbench = self.workbench
+        snapshot = dict(snapshot or {})
+        if not snapshot:
+            return False
+        context = dict(snapshot.get("context") or {})
+        if context != self._current_edit_context() or workbench.edit_volume is None:
+            return False
+        slices = dict(snapshot.get("slices") or {})
+        depth = int(workbench.edit_volume.shape[0])
+        for z_index, slice_array in slices.items():
+            z_index = int(z_index)
+            if z_index < 0 or z_index >= depth:
+                return False
+            restored = np.asarray(slice_array)
+            if tuple(restored.shape) != tuple(workbench.edit_volume[z_index].shape):
+                return False
+        for z_index, slice_array in slices.items():
+            workbench.edit_volume[int(z_index)] = slice_array
+        dirty_slices = snapshot.get("dirty_slices")
+        if dirty_slices is None:
+            dirty_slices = slices
+        self.state.dirty_slices = {int(value) for value in dirty_slices}
+        self.state.slice_revisions = {
+            int(key): int(value)
+            for key, value in (snapshot.get("slice_revisions") or {}).items()
+        }
+        self.state.revision_counter = max(
+            int(self.state.revision_counter),
+            int(snapshot.get("revision_counter", 0) or 0),
+        )
+        self.state.dirty = True
+        self.state.undo_stack = list(snapshot.get("undo_stack") or [])
+        self.state.redo_stack = list(snapshot.get("redo_stack") or [])
+        self.reset_annotation_stroke()
+        self.set_tool_mode(snapshot.get("tool_mode", "brush"), show_message=False)
+        part_mask_controller = getattr(workbench, "part_mask_workflow_controller", None)
+        set_material = getattr(part_mask_controller, "_set_current_material_id", None)
+        if callable(set_material):
+            set_material(snapshot.get("current_material_id", 0), select_row=True, show_message=False)
+        self._sync_mirror()
+        workbench._sync_undo_redo_buttons()
+        workbench._update_save_status()
+        if workbench.auto_save_check.isChecked():
+            workbench.auto_save_timer.start()
+        workbench.render_current_slice()
+        return True
+
+    def stash_unsaved_edit_recovery(self, snapshot):
+        if snapshot:
+            self.pending_unsaved_edit_recovery = snapshot
+        return self.pending_unsaved_edit_recovery is not None
+
+    def clear_unsaved_edit_recovery(self):
+        self.pending_unsaved_edit_recovery = None
+
+    def restore_pending_unsaved_edit(self):
+        snapshot = self.pending_unsaved_edit_recovery
+        if snapshot is None or not self.restore_unsaved_edit(snapshot):
+            return False
+        self.pending_unsaved_edit_recovery = None
+        return True
+
     def reset_annotation_stroke(self):
         self.state.stroke_active = False
         self.state.stroke_undo_pushed = False
@@ -316,7 +416,7 @@ class TifAnnotationWorkflowController(QObject):
         return self.workbench.project.to_absolute((record or {}).get("path", ""))
 
     def has_unsaved_changes(self):
-        return bool(self.state.dirty)
+        return bool(self.state.dirty or self.pending_unsaved_edit_recovery is not None)
 
     def sync_dirty_from_slices(self):
         self.state.dirty = bool(self.state.dirty_slices)
@@ -783,7 +883,21 @@ class TifAnnotationWorkflowController(QObject):
             workbench._set_operation_feedback(message)
             workbench._update_save_status(state="saving")
             return False
-        self.wait_for_auto_save()
+        if not self.wait_for_auto_save():
+            return False
+        if self.pending_unsaved_edit_recovery is not None and not self.restore_pending_unsaved_edit():
+            QMessageBox.warning(
+                workbench,
+                tt("Unsaved working edit", workbench.lang),
+                tt("Unsaved current labels could not be restored after the model draft copy failed.", workbench.lang),
+            )
+            return False
+        auto_save_was_active = bool(workbench.auto_save_timer.isActive())
+
+        def restore_auto_save_timer():
+            if auto_save_was_active:
+                workbench.auto_save_timer.start()
+
         workbench.auto_save_timer.stop()
         workbench._update_save_status()
         if not self.state.dirty:
@@ -792,9 +906,13 @@ class TifAnnotationWorkflowController(QObject):
         prompt = tt("Save changes to the current editable AI result before continuing?", workbench.lang) if workbench.current_volume_scope == "part" else tt("Save changes to the current labels before continuing?", workbench.lang)
         reply = QMessageBox.question(workbench, title, prompt, QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
         if reply == QMessageBox.Cancel:
+            restore_auto_save_timer()
             return False
         if reply == QMessageBox.Save:
-            return workbench.save_working_edit(show_message=True)
+            saved = bool(workbench.save_working_edit(show_message=True))
+            if not saved:
+                restore_auto_save_timer()
+            return saved
         self.reset_dirty_tracking()
         workbench._update_save_status()
         if workbench.current_specimen_id:
@@ -917,11 +1035,20 @@ class TifAnnotationWorkflowController(QObject):
         workbench = self.workbench
         thread = self.auto_save_thread
         if thread is None:
-            return
+            return True
         worker = self.auto_save_worker
-        if thread.isRunning():
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            running = False
+        if running:
             thread.quit()
-            thread.wait(30000)
+            if not thread.wait(30000):
+                workbench._set_operation_feedback(
+                    tt("Auto-save is still finishing. Wait a moment, then try again.", workbench.lang)
+                )
+                workbench._update_save_status(state="saving")
+                return False
         if worker is not None:
             result = getattr(worker, "last_result", None)
             error = getattr(worker, "last_error", None)
@@ -935,6 +1062,7 @@ class TifAnnotationWorkflowController(QObject):
         else:
             workbench._cancel_tif_task(self.auto_save_task_id, "label_auto_save_worker_missing")
             self.cleanup_auto_save()
+        return True
 
     def save_async(self, show_message=True, promote_request=None):
         workbench = self.workbench
@@ -1098,13 +1226,26 @@ class TifAnnotationWorkflowController(QObject):
             self.pending_promote_after_save = None
             workbench._pending_backend_action_after_save = None
             return
+        try:
+            if workbench.current_volume_scope == "part":
+                workbench._finalize_part_editable_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
+            else:
+                workbench._finalize_full_edit_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
+        except Exception as exc:
+            result["error"] = str(exc)
+            workbench._fail_tif_task(self.auto_save_task_id, result["error"], payload=result)
+            self.cleanup_auto_save()
+            self.set_dirty(True)
+            message = tt("Save failed: {0}", workbench.lang).format(result["error"])
+            workbench._set_operation_feedback(message)
+            workbench._update_save_status(state="failed", detail=result["error"])
+            self.pending_manual_save_after_auto = None
+            self.pending_promote_after_save = None
+            workbench._pending_backend_action_after_save = None
+            return
         self.clear_saved_slices(result.get("slice_revisions") or {})
         workbench._finish_tif_task(self.auto_save_task_id, payload=result, message="label_auto_save_finished")
         self.cleanup_auto_save()
-        if workbench.current_volume_scope == "part":
-            workbench._finalize_part_editable_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
-        else:
-            workbench._finalize_full_edit_save_metadata(result.get("metadata") or {}, auto_saved=True, refresh_volumes=False)
         if self.state.dirty and workbench.auto_save_check.isChecked():
             workbench.auto_save_timer.start()
         workbench._update_save_status()
@@ -1150,13 +1291,18 @@ class TifAnnotationWorkflowController(QObject):
             self.cleanup_manual_save()
             workbench._pending_backend_action_after_save = None
             return
+        try:
+            if workbench.current_volume_scope == "part":
+                workbench._finalize_part_editable_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
+                message = tt("Editable AI result saved.", workbench.lang)
+            else:
+                workbench._finalize_full_edit_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
+                message = tt("Current labels saved.", workbench.lang)
+        except Exception as exc:
+            result["error"] = str(exc)
+            self.on_manual_save_failed(result)
+            return
         self.clear_saved_slices(result.get("slice_revisions") or {})
-        if workbench.current_volume_scope == "part":
-            workbench._finalize_part_editable_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
-            message = tt("Editable AI result saved.", workbench.lang)
-        else:
-            workbench._finalize_full_edit_save_metadata(result.get("metadata") or {}, refresh_volumes=True)
-            message = tt("Current labels saved.", workbench.lang)
         workbench._finish_tif_task(self.manual_save_task_id, payload=result, message=message)
         self.cleanup_manual_save()
         workbench._update_save_status()
@@ -1200,6 +1346,8 @@ class TifAnnotationWorkflowController(QObject):
             QMessageBox.warning(workbench, tt("Unsaved working edit", workbench.lang), message)
             return
         self.set_dirty(True)
+        if workbench.auto_save_check.isChecked():
+            workbench.auto_save_timer.start()
         message = tt("Save failed: {0}", workbench.lang).format(str(result.get("error", "")))
         workbench._set_operation_feedback(message)
         workbench._update_save_status(state="failed", detail=str(result.get("error", "")))

@@ -88,7 +88,15 @@ class BlinkTrajectoryDataset(Dataset):
         return CoordinateMapper.clamp_bbox_to_size(box, width, height)
 
     def _img_to_tensor(self, img_np):
-        img_resized = cv2.resize(img_np, self.target_size)
+        target_width, target_height = self.target_size
+        if img_np.shape[:2] == (target_height, target_width):
+            img_resized = img_np
+        else:
+            img_resized = cv2.resize(
+                img_np,
+                self.target_size,
+                interpolation=cv2.INTER_CUBIC,
+            )
         return torch.from_numpy(img_resized.copy()).permute(2, 0, 1).float() / 255.0
         
     def _load_data(self):

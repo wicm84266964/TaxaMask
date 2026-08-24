@@ -23,7 +23,7 @@ import AntSleap.ui.route_management_panel as route_management_module
 from AntSleap.main import ExportDialog, BlinkEntryDialog, ModelSettingsDialog, RouteManagementPanel, TrainingPreflightDialog, TrainingReportDialog
 from AntSleap.ui.blink_lab import BlinkLabWidget
 from AntSleap.ui.cropper import ImageCropper
-from AntSleap.ui.pdf_processing_widget import PdfProcessingWidget
+from AntSleap.ui.pdf_processing_widget import PDFWorker, PdfProcessingWidget
 from AntSleap.core.cascade_routes import ROUTE_BACKEND_HEATMAP_BLINK
 from AntSleap.core.expert_notes import set_expert_note
 from AntSleap.core.model_profiles import DEFAULT_MODEL_PROFILE_ID, PARENT_BACKEND_EXTERNAL
@@ -301,6 +301,53 @@ class UiLocalizationTests(unittest.TestCase):
         self.assertIn("background-color: #FDFEFF", part_advanced_style)
         self.assertNotIn("qlineargradient", part_advanced_style)
         self.assertIn("background-color: #DC2626", widget.btn_delete_part_description_profile.styleSheet())
+
+    def test_pdf_worker_logs_import_ready_export_failure_in_english_and_chinese(self):
+        stats = {
+            "import_ready_export_status": "error",
+            "import_ready_export_error": "PermissionError: locked manifest",
+        }
+        english_messages = []
+        english_worker = PDFWorker("extract", lang="en")
+        english_worker.log_signal.connect(english_messages.append)
+        english_worker._log_extract_pdf_warnings(stats)
+
+        chinese_messages = []
+        chinese_worker = PDFWorker("extract", lang="zh")
+        chinese_worker.log_signal.connect(chinese_messages.append)
+        chinese_worker._log_extract_pdf_warnings(stats)
+
+        self.assertEqual(len(english_messages), 1)
+        self.assertIn("database results were saved", english_messages[0])
+        self.assertIn("Re-run the same PDF", english_messages[0])
+        self.assertIn("PermissionError: locked manifest", english_messages[0])
+        self.assertEqual(len(chinese_messages), 1)
+        self.assertIn("数据库结果已保存", chinese_messages[0])
+        self.assertIn("重新运行同一 PDF", chinese_messages[0])
+        self.assertIn("PermissionError: locked manifest", chinese_messages[0])
+
+    def test_pdf_worker_logs_import_ready_cleanup_warning_in_english_and_chinese(self):
+        stats = {
+            "import_ready_export_status": "success",
+            "import_ready_cleanup_warning": "PermissionError: locked backup",
+            "import_ready_cleanup_directory": "projection-stage",
+        }
+        english_messages = []
+        english_worker = PDFWorker("extract", lang="en")
+        english_worker.log_signal.connect(english_messages.append)
+        english_worker._log_extract_pdf_warnings(stats)
+
+        chinese_messages = []
+        chinese_worker = PDFWorker("extract", lang="zh")
+        chinese_worker.log_signal.connect(chinese_messages.append)
+        chinese_worker._log_extract_pdf_warnings(stats)
+
+        self.assertEqual(len(english_messages), 1)
+        self.assertIn("temporary backup cleanup was incomplete", english_messages[0])
+        self.assertIn("projection-stage", english_messages[0])
+        self.assertEqual(len(chinese_messages), 1)
+        self.assertIn("临时备份清理不完整", chinese_messages[0])
+        self.assertIn("projection-stage", chinese_messages[0])
 
     def test_main_translates_added_common_dialog_strings(self):
         self.assertEqual(main_module.tr("Close", "zh"), "关闭")

@@ -90,11 +90,14 @@ def _as_run_relative(contract, path):
     text = str(path or "").strip()
     if not text:
         return ""
-    base = os.path.dirname(os.path.abspath(contract["result_json"]))
+    base = os.path.realpath(
+        os.path.dirname(os.path.abspath(contract["result_json"]))
+    )
+    target = os.path.realpath(os.path.abspath(text))
     try:
-        return os.path.relpath(os.path.abspath(text), base).replace("\\", "/")
+        return os.path.relpath(target, base).replace("\\", "/")
     except ValueError:
-        return os.path.abspath(text)
+        return target
 
 
 def _as_manifest_relative(manifest_path, path):

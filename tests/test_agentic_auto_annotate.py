@@ -1726,7 +1726,10 @@ class AgenticAutoAnnotateTests(unittest.TestCase):
                 [fixture["manager"].get_cascade_routes()] * 3,
             )
             self.assertEqual(
-                FakeEngine.loaded_paths,
+                [
+                    (root.resolve(), checkpoint.resolve())
+                    for root, checkpoint in FakeEngine.loaded_paths
+                ],
                 [
                     (
                         fixture["managed_model_root"].resolve(),
@@ -2195,8 +2198,11 @@ class AgenticAutoAnnotateTests(unittest.TestCase):
 
             self.assertEqual(len(records), 3)
             self.assertEqual(
-                FakeEngine.observed_base_sam,
-                [str(base_sam.resolve())] * 3,
+                [
+                    Path(path).resolve()
+                    for path in FakeEngine.observed_base_sam
+                ],
+                [base_sam.resolve()] * 3,
             )
             self.assertEqual(
                 evidence["base_sam_evidence"]["status"],

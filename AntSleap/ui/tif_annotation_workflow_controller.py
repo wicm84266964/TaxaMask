@@ -11,12 +11,14 @@ from PySide6.QtWidgets import QMessageBox
 
 try:
     from AntSleap.core.tif_part_extraction import signed_distance
+    from AntSleap.core.tif_storage import ensure_label_value_fits_dtype
     from AntSleap.ui.tif_workbench_translations import tt
     from AntSleap.ui.tif_workbench_workers import TifLabelAutoSaveWorker, TifLabelManualSaveWorker, TifPromoteWorkingEditWorker
 except ModuleNotFoundError as exc:
     if exc.name != "AntSleap":
         raise
     from core.tif_part_extraction import signed_distance
+    from core.tif_storage import ensure_label_value_fits_dtype
     from ui.tif_workbench_translations import tt
     from ui.tif_workbench_workers import TifLabelAutoSaveWorker, TifLabelManualSaveWorker, TifPromoteWorkingEditWorker
 
@@ -63,6 +65,21 @@ class TifAnnotationWorkflowController(QObject):
         self.saving_working_edit = False
         self.pending_promote_after_save = None
         self.pending_unsaved_edit_recovery = None
+
+    def _validated_label_value(self, value):
+        volume = self.workbench.edit_volume
+        if volume is None:
+            return None
+        try:
+            return ensure_label_value_fits_dtype(value, volume.dtype)
+        except (TypeError, ValueError, OverflowError):
+            self.workbench._set_operation_feedback(
+                tt(
+                    "Label {0} cannot be stored in the current label layer ({1}). Create or migrate the layer with a wider label dtype before painting.",
+                    self.workbench.lang,
+                ).format(int(value), np.dtype(volume.dtype).name)
+            )
+            return None
 
     def initialize_compatibility_state(self):
         return self.state
@@ -499,6 +516,9 @@ class TifAnnotationWorkflowController(QObject):
         workbench = self.workbench
         if workbench.edit_volume is None:
             return False
+        value = self._validated_label_value(value)
+        if value is None:
+            return False
         height, width = workbench.edit_volume.shape[1], workbench.edit_volume.shape[2]
         px = max(0, min(width - 1, int(px)))
         py = max(0, min(height - 1, int(py)))
@@ -513,8 +533,8 @@ class TifAnnotationWorkflowController(QObject):
         mask = (xx - px) ** 2 + (yy - py) ** 2 <= radius ** 2
         target = workbench.edit_volume[int(z_index), y0:y1, x0:x1]
         before = target[mask].copy()
-        target[mask] = int(value)
-        return bool(np.any(before != int(value)))
+        target[mask] = value
+        return bool(np.any(before != value))
 
     def _paint_interpolated_stroke_on_slice(self, z_index, start_pixel, end_pixel, radius, value):
         workbench = self.workbench
@@ -561,6 +581,9 @@ class TifAnnotationWorkflowController(QObject):
         previous_pixel = annotation_state.stroke_last_pixel if active_stroke else None
         self.ensure_annotation_undo_for_slice(z_index)
         value = 0 if erase else int(workbench.current_material_id)
+        value = self._validated_label_value(value)
+        if value is None:
+            return
         changed = self._paint_interpolated_stroke_on_slice(z_index, previous_pixel, pixel, radius, value)
         if active_stroke:
             annotation_state.stroke_last_pixel = tuple(pixel)
@@ -691,7 +714,9 @@ class TifAnnotationWorkflowController(QObject):
             workbench._set_operation_feedback(tt("Shape fill is too small. Drag a wider area before releasing.", workbench.lang))
             return False
         current_slice = workbench.edit_volume[z_index]
-        value = int(value)
+        value = self._validated_label_value(value)
+        if value is None:
+            return False
         changed_mask = mask & (current_slice != value)
         changed_count = int(np.count_nonzero(changed_mask))
         if changed_count <= 0:
@@ -804,6 +829,9 @@ class TifAnnotationWorkflowController(QObject):
         material_id = int(workbench.current_material_id)
         if material_id == 0:
             workbench._set_operation_feedback(tt("Background label 0 is not supported by this helper.", workbench.lang))
+            return False
+        material_id = self._validated_label_value(material_id)
+        if material_id is None:
             return False
         volume = workbench.edit_volume
         key_slices = []

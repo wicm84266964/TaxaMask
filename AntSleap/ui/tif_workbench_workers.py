@@ -768,3 +768,52 @@ class TifBackendActionWorker(QObject):
             self.failed.emit(str(exc), context)
             return
         self.finished.emit(result)
+
+
+class TifStorageScanWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, mode="inventory"):
+        super().__init__()
+        self.project_manager = project_manager
+        self.mode = str(mode or "inventory")
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _is_cancelled(self):
+        return bool(self._cancel_requested)
+
+    def run(self):
+        try:
+            from AntSleap.core.tif_storage_lifecycle import TifStorageLifecycleManager
+        except ModuleNotFoundError as exc:
+            if exc.name != "AntSleap":
+                raise
+            from core.tif_storage_lifecycle import TifStorageLifecycleManager
+        try:
+            lifecycle = TifStorageLifecycleManager(self.project_manager)
+            self.progress.emit(5, 100, "Scanning project storage...")
+            inventory = lifecycle.analyze(cancel_check=self._is_cancelled)
+            if inventory.get("cancelled"):
+                raise RuntimeError("tif_storage_scan_cancelled")
+            plan = None
+            report_paths = inventory.get("report_paths") or {}
+            if self.mode == "cleanup_plan":
+                self.progress.emit(70, 100, "Building dry-run cleanup plan...")
+                plan = lifecycle.create_cleanup_plan(inventory=inventory)
+                report_paths = plan.get("report_paths") or report_paths
+            self.progress.emit(100, 100, "Storage scan finished")
+            self.finished.emit(
+                {
+                    "mode": self.mode,
+                    "inventory": inventory,
+                    "plan": plan,
+                    "report_paths": report_paths,
+                }
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))

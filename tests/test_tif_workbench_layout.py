@@ -94,8 +94,9 @@ class TifWorkbenchLayoutTests(unittest.TestCase):
         self.assertEqual(parts["annotation_task_page"].widget().objectName(), "tifAnnotationTaskPage")
         self.assertEqual(parts["training_task_page"].widget().objectName(), "tifTrainingTaskPage")
         self.assertEqual(parts["result_compare_page"].widget().objectName(), "tifResultCompareTaskPage")
+        self.assertEqual(parts["storage_task_page"].widget().objectName(), "tifStorageTaskPage")
         self.assertEqual(parts["task_tabs"].count(), 3)
-        self.assertEqual(parts["training_mode_tabs"].count(), 3)
+        self.assertEqual(parts["training_mode_tabs"].count(), 4)
 
     def test_right_control_panel_preserves_operation_section(self):
         panel_titles = {}

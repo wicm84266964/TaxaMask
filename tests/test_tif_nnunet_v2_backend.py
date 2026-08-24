@@ -385,6 +385,36 @@ class TifNnunetV2BackendTests(unittest.TestCase):
                 manifest = json.load(handle)
             self.assertEqual(manifest["label_id_mode"], "compact")
             self.assertEqual(manifest["label_id_mapping"]["source_to_nnunet"]["1"], 1)
+            self.assertFalse((dataset_dir / "part_volumes").exists())
+            self.assertFalse((dataset_dir / "part_labels").exists())
+            self.assertEqual(result["contract"]["dataset_formats"], ["nnunet_nifti"])
+            self.assertEqual(len(result["contract"]["input_assets"]), 2)
+            self.assertEqual(len(result["result"]["materializations"]), 2)
+            self.assertTrue(
+                all(
+                    item["cache_hit"] is False
+                    for item in result["result"]["materializations"]
+                )
+            )
+
+            repeated = runner.run_action(
+                "prepare_dataset",
+                part_refs=[
+                    {
+                        "specimen_id": "01-0101-11",
+                        "part_id": "brain",
+                        "reslice_id": "brain_axis_001",
+                    }
+                ],
+            )
+            self.assertNotEqual(result["run_id"], repeated["run_id"])
+            self.assertEqual(len(repeated["result"]["materializations"]), 2)
+            self.assertTrue(
+                all(
+                    item["cache_hit"] is True
+                    for item in repeated["result"]["materializations"]
+                )
+            )
 
     def test_adapter_train_runs_fake_nnunet_and_writes_usable_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

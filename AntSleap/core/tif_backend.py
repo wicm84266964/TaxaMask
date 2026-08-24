@@ -10,9 +10,11 @@ from pathlib import Path
 
 from .external_command import render_external_command
 from .safe_io import atomic_write_json
+from .tif_integrity_bridge import tif_integrity_asset_references
 from .tif_prediction_policy import can_import_prediction_target, validate_prediction_volume
 from .tif_project import TifProjectManager
 from .tif_export import _reslice_exchange_metadata, _sanitize_exchange_metadata, export_tif_part_training_dataset, export_tif_training_dataset
+from .tif_storage import enforce_storage_preflight, estimate_storage_preflight
 from .tif_volume_io import copy_volume_sidecar, read_volume_metadata, volume_sidecar_exists
 from .tif_write_guard import WriteIntent, ensure_write_allowed
 from .training_run_recorder import TrainingRunRecorder
@@ -42,7 +44,9 @@ DEFAULT_TIF_BACKEND_CONFIG = {
     "train_command": "",
     "predict_command": "",
     "model_manifest": "",
-    "export_formats": "ome_tiff,nrrd,mha,nifti",
+    "export_formats": "",
+    "materialization_policy": "generic_preexport",
+    "required_formats": "",
 }
 
 
@@ -56,7 +60,9 @@ def nnunet_v2_tif_backend_preset(python_executable="python"):
         "train_command": command,
         "predict_command": command,
         "model_manifest": "",
-        "export_formats": "ome_tiff,nrrd,mha,nifti",
+        "export_formats": "",
+        "materialization_policy": "backend_owned",
+        "required_formats": "nnunet_nifti",
     }
 
 
@@ -301,7 +307,7 @@ def normalize_tif_backend_runtime_config(config, action="", command_template="",
 
 
 def _now_stamp():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
 def _now_iso():
@@ -324,6 +330,9 @@ def sanitize_tif_backend_config(config):
     clean["backend_id"] = _safe_id(clean.get("backend_id") or "custom_tif_backend")
     clean["display_name"] = clean.get("display_name") or clean["backend_id"]
     clean["python_executable"] = clean.get("python_executable") or "python"
+    if clean["backend_id"] == TIF_NNUNET_V2_BACKEND_ID:
+        clean["materialization_policy"] = "backend_owned"
+        clean["required_formats"] = "nnunet_nifti"
     return clean
 
 
@@ -465,7 +474,7 @@ class TifBackendRunner:
             if not selected_specimens:
                 raise ValueError(f"no_tif_specimen_samples:{action}")
             scope = "top_level_volume"
-        return {
+        contract = {
             "schema_version": TIF_BACKEND_CONTRACT_SCHEMA_VERSION,
             "action": action,
             "backend_id": self.backend_config.get("backend_id"),
@@ -491,6 +500,67 @@ class TifBackendRunner:
                 "allow_overwrite_outputs": False,
             },
         }
+        owner_keys = []
+        if scope == "part_reslice":
+            for sample in selected_parts:
+                prefix = (
+                    f"reslice.{sample.get('specimen_id', '')}."
+                    f"{sample.get('part_id', '')}.{sample.get('reslice_id', '')}"
+                )
+                owner_keys.append(f"{prefix}.image")
+                if action in {"prepare_dataset", "train"}:
+                    owner_keys.append(f"{prefix}.manual_truth")
+        else:
+            for sample in selected_specimens:
+                specimen_id = str(sample.get("specimen_id") or "")
+                owner_keys.append(f"specimen.{specimen_id}.working")
+                if action in {"prepare_dataset", "train"}:
+                    owner_keys.append(f"specimen.{specimen_id}.manual_truth")
+        input_assets = tif_integrity_asset_references(
+            self.project_manager,
+            owner_keys,
+            require_all=False,
+        )
+        materialization_policy = str(
+            self.backend_config.get("materialization_policy")
+            or "generic_preexport"
+        )
+        required_formats = [
+            item.strip()
+            for item in str(self.backend_config.get("required_formats") or "").split(",")
+            if item.strip()
+        ]
+        if not required_formats and action == "prepare_dataset":
+            required_formats = [
+                item.strip()
+                for item in str(self.backend_config.get("export_formats") or "").split(",")
+                if item.strip()
+            ]
+        contract["input_assets"] = input_assets
+        requested_owner_keys = set(owner_keys)
+        resolved_owner_keys = {
+            str(item.get("owner_key") or "") for item in input_assets
+        }
+        contract["asset_identity"] = {
+            "requested_owner_keys": sorted(set(owner_keys)),
+            "resolved_owner_keys": sorted(resolved_owner_keys),
+            "status": (
+                "verified_registry_refs"
+                if requested_owner_keys and requested_owner_keys == resolved_owner_keys
+                else "partial_registry_refs"
+                if resolved_owner_keys
+                else "unavailable"
+            ),
+        }
+        contract["materialization_policy"] = materialization_policy
+        contract["required_formats"] = required_formats
+        contract["disk_preflight"] = estimate_storage_preflight(
+            contract,
+            run_dir,
+            backend_id=contract.get("backend_id", ""),
+            required_formats=required_formats,
+        )
+        return contract
 
     def write_contract(self, contract):
         path = os.path.join(contract["run_dir"], "contract.json")
@@ -517,13 +587,14 @@ class TifBackendRunner:
         if _cancel_requested(cancel_check):
             raise RuntimeError(f"tif_backend_{action}_cancelled")
         contract = self.build_contract(action, specimen_ids, run_id, run_dir, dataset_dir, model_manifest, part_refs=part_refs, input_scope=input_scope)
+        enforce_storage_preflight(contract.get("disk_preflight"))
         self.last_result_json = os.path.abspath(contract.get("result_json") or self.last_result_json)
         sample_count = len(contract.get("part_samples", []) or []) if contract.get("input_scope") == "part_reslice" else len(contract.get("specimens", []) or [])
         sample_label = "part sample" if contract.get("input_scope") == "part_reslice" else "top-level volume"
         _emit_progress(progress_callback, 5, 100, f"Built {action} contract for {sample_count} {sample_label}(s).\nResult JSON: {self.last_result_json}")
         if _cancel_requested(cancel_check):
             raise RuntimeError(f"tif_backend_{action}_cancelled")
-        if action == "prepare_dataset":
+        if action == "prepare_dataset" and contract.get("materialization_policy") != "backend_owned":
             export_formats = [
                 item.strip()
                 for item in str(self.backend_config.get("export_formats", "")).split(",")
@@ -557,6 +628,14 @@ class TifBackendRunner:
             contract["dataset_manifest"] = export_result["manifest_path"]
             contract["dataset_formats"] = export_result["manifest"].get("formats", [])
             _emit_progress(progress_callback, 35, 100, f"Prepared dataset manifest: {export_result['manifest_path']}")
+        elif action == "prepare_dataset":
+            contract["dataset_formats"] = list(contract.get("required_formats") or [])
+            _emit_progress(
+                progress_callback,
+                35,
+                100,
+                "Backend will materialize only its declared dataset format.",
+            )
         if _cancel_requested(cancel_check):
             raise RuntimeError(f"tif_backend_{action}_cancelled")
         contract_path = self.write_contract(contract)
@@ -733,6 +812,7 @@ class TifBackendRunner:
                 part_refs=part_refs,
                 input_scope=input_scope,
             )
+            enforce_storage_preflight(contract.get("disk_preflight"))
             pending_config = self._pending_training_config(contract)
             contract["training_config"] = dict(pending_config)
             attach_tif_training_evidence(
@@ -1296,6 +1376,20 @@ class TifBackendRunner:
                 "backend_id": contract.get("backend_id"),
                 "run_dir": contract.get("run_dir"),
                 "result_status": result.get("status"),
+                "input_assets": [
+                    dict(item)
+                    for item in (contract.get("input_assets") or [])
+                    if isinstance(item, dict)
+                ],
+                "materializations": [
+                    dict(item)
+                    for item in (result.get("materializations") or [])
+                    if isinstance(item, dict)
+                ],
+                "storage_budget": dict(contract.get("disk_preflight") or {}),
+                "materialization_policy": str(
+                    contract.get("materialization_policy") or ""
+                ),
                 "created_at": _now_iso(),
             }
         )

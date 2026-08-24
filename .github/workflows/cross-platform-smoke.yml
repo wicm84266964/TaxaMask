@@ -60,6 +60,9 @@ jobs:
       - name: Run v2.4.10 release regressions
         run: python scripts/run_validation_suite.py --suite v2410_release_audit --timeout 300
 
+      - name: Run v2.5.0 storage release regressions
+        run: python scripts/run_validation_suite.py --suite v250_release_audit --timeout 300
+
       - name: Verify link-capable runner
         if: runner.os != 'Windows'
         run: python -c "import tempfile; from pathlib import Path; tmp = tempfile.TemporaryDirectory(); root = Path(tmp.name); target = root / 'target'; target.write_text('ok', encoding='utf-8'); link = root / 'link'; link.symlink_to(target); assert link.is_symlink(); tmp.cleanup()"

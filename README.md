@@ -164,6 +164,10 @@ Current TIF/CT capabilities include:
 - ROI high-detail 3D inspection for checking local structures without editing source data.
 - Metadata-only TIF registration followed by explicit working-volume materialization for large stacks.
 - SQLite-backed TIF project indexing with volume, mask, and export data kept as sidecar files.
+- Compact label-volume storage that selects the smallest safe integer dtype for the actual label-ID range and rejects overflow before data is written.
+- Backend-owned, on-demand materialization for nnU-Net v2: required NIfTI files are generated when needed instead of pre-exporting every generic exchange format.
+- Content-addressed materialization reuse, hard-link reuse where the filesystem permits it, and a disk peak preflight before large external-backend runs begin.
+- A storage-management panel for read-only occupancy analysis, auditable cleanup-plan generation, embedded-Agent handoff, and opening the latest report. Registered reproducible caches may enter a recoverable cleanup lifecycle; source TIFFs, reviewed truth, model weights, experiment contracts, and unregistered historical files remain protected by default.
 - Z/Y/X slice navigation for multi-direction review.
 - Local Axis Reslice for a selected part volume.
 - Source Z-axis display as a locked reference.

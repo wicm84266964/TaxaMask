@@ -235,7 +235,7 @@ def _tif_roi_shell_mask_from_keyframes(keyframes, parent_bbox, source_shape):
     if not local_frames:
         return None
     local_frames.sort(key=lambda item: item[0])
-    mask = np.zeros(shape, dtype=np.uint16)
+    mask = np.zeros(shape, dtype=np.uint8)
 
     def fill_slice(slice_index, rect_values):
         x0, y0, x1, y1 = [int(value) for value in rect_values]

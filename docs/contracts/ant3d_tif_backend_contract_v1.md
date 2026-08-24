@@ -121,6 +121,30 @@ Available placeholders:
   "schema_version": "ant3d_tif_backend_contract_v1",
   "action": "predict",
   "backend_id": "custom_tif_backend",
+  "input_assets": [
+    {
+      "asset_id": "asset-id",
+      "revision_id": "revision-id",
+      "owner_key": "reslice.ANTSCAN_0001.target_part.reslice_001.image",
+      "role": "training_image",
+      "content_hash": "sha256:...",
+      "size_bytes": 123456,
+      "verification_status": "verified"
+    }
+  ],
+  "asset_identity": {
+    "requested_owner_keys": ["reslice.ANTSCAN_0001.target_part.reslice_001.image"],
+    "resolved_owner_keys": ["reslice.ANTSCAN_0001.target_part.reslice_001.image"],
+    "status": "verified_registry_refs"
+  },
+  "materialization_policy": "backend_owned",
+  "required_formats": ["nnunet_nifti"],
+  "disk_preflight": {
+    "required_peak_bytes": 123456789,
+    "available_bytes": 987654321,
+    "sufficient": true,
+    "confidence": "low_conservative"
+  },
   "project_json": "C:/path/project.tif_sqlite_manifest.json",
   "run_id": "predict_20260702_103000_custom_tif_backend",
   "run_dir": "C:/path/project/runs/predict/predict_20260702_103000_custom_tif_backend",
@@ -184,6 +208,14 @@ Available placeholders:
 }
 ```
 
+The storage fields above are optional for third-party backends but binding when present:
+
+- `input_assets` carries registered content identities for the selected image and reviewed-label inputs. A backend should treat these inputs as read-only and should preserve their identity in its provenance.
+- `asset_identity` reports whether every requested project owner key resolved to a current registered asset reference. It is an audit summary, not permission to overwrite the source path.
+- `materialization_policy: "generic_preexport"` means TaxaMask prepares the formats listed in `required_formats` before invoking the backend. This is the compatibility mode for backends that consume generic exchange files.
+- `materialization_policy: "backend_owned"` means the backend creates only the working format it actually needs. The bundled nnU-Net v2 adapter uses this mode with `required_formats: ["nnunet_nifti"]`; TaxaMask does not also pre-export OME-TIFF, NRRD, MHA, and NIfTI copies.
+- `disk_preflight` is a conservative peak-space estimate based on uncompressed shape and dtype. TaxaMask blocks the run before launching the external process when `sufficient` is false. It is a safety gate, not an exact prediction of nnU-Net preprocessing size.
+
 For `prepare_dataset` and `train`, each selected sample must be train-ready. TaxaMask includes a `label_volume` with `role: "manual_truth"` for those actions. A label schema by itself is not a training sample; it only defines numeric label meaning.
 
 For `predict`, `label_volume.role` is `none`; the backend should predict from `input_volume` and must not require `manual_truth`.
@@ -212,6 +244,21 @@ The backend must write the result to `contract["result_json"]`.
       "role": "editable_ai_result"
     }
   ],
+  "materializations": [
+    {
+      "cache_key": "sha256:...",
+      "format": "nnunet_nifti_image",
+      "cache_path": "cache/materializations/...",
+      "run_path": "runs/prepare_dataset/.../imagesTr/case_0000.nii.gz",
+      "lifecycle": "reproducible_cache",
+      "status": "verified",
+      "content_hash": "sha256:...",
+      "size_bytes": 123456,
+      "link_method": "hardlink",
+      "cache_hit": true,
+      "read_only_contract": "backend_must_not_modify_input_in_place"
+    }
+  ],
   "metrics": {
     "summary": {},
     "by_material": {}
@@ -229,6 +276,8 @@ The backend must write the result to `contract["result_json"]`.
   }
 }
 ```
+
+`materializations` records the exact backend working files created or reused for this run. A cache hit or hard link reduces duplicate bytes, but the backend must still treat the run input as read-only. These entries may later be eligible for the audited reproducible-cache cleanup lifecycle; prediction artifacts, model weights, contracts, and reviewed truth are not made disposable by appearing in the same run directory.
 
 ## Prediction Import Rules
 

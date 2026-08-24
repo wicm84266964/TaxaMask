@@ -1,7 +1,9 @@
 import ast
 import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -113,12 +115,99 @@ class TifWorkbenchShellTests(unittest.TestCase):
                     "volume_render",
                     "local_axis",
                     "backend_panel",
+                    "storage_panel",
                     "result_review",
                 ),
             )
         finally:
             widget.workbench_shell.shutdown()
             widget.deleteLater()
+
+    def test_storage_panel_exposes_guided_agent_handoff_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TifProjectManager()
+            manager.create_project("storage_agent", Path(tmp) / "storage_agent")
+            widget = TifWorkbenchWidget(manager, "zh")
+            contexts = []
+            widget.agent_requested.connect(contexts.append)
+            try:
+                self.assertEqual(widget.btn_analyze_storage.text(), "分析占用")
+                self.assertEqual(widget.btn_generate_cleanup_plan.text(), "生成清理计划")
+                self.assertEqual(widget.btn_storage_agent.text(), "交给内嵌智能体")
+                self.assertEqual(widget.btn_open_storage_report.text(), "打开最新报告")
+                self.assertFalse(hasattr(widget, "btn_execute_cleanup"))
+                self.assertFalse(hasattr(widget, "btn_restore_cleanup"))
+                self.assertFalse(hasattr(widget, "btn_pin_storage_item"))
+
+                report_dir = Path(manager.project_dir) / "storage_reports"
+                report_dir.mkdir(parents=True, exist_ok=True)
+                inventory_path = report_dir / "inventory_zh.md"
+                cleanup_path = report_dir / "cleanup_plan_zh.md"
+                inventory_path.write_text("inventory", encoding="utf-8")
+                cleanup_path.write_text("cleanup", encoding="utf-8")
+
+                controller = widget.storage_panel_controller
+                self.assertFalse(widget.btn_storage_agent.isEnabled())
+                controller.last_inventory = {
+                    "summary": {
+                        "logical_bytes": 309_836_225_286,
+                        "unique_allocated_bytes": 309_836_225_286,
+                    },
+                    "items": [
+                        {"classification_reason": "unknown_is_protected"}
+                    ],
+                    "report_paths": {
+                        "markdown_path": os.path.relpath(
+                            inventory_path, manager.project_dir
+                        )
+                    },
+                }
+                controller.last_plan = {
+                    "plan_id": "cleanup_test",
+                    "state": "planned",
+                    "expected_release_bytes": 1024,
+                    "items": [
+                        {"eligibility": "eligible"},
+                        {"eligibility": "blocked"},
+                    ],
+                    "report_paths": {
+                        "markdown_path": os.path.relpath(
+                            cleanup_path, manager.project_dir
+                        )
+                    },
+                }
+                controller.last_report_paths = controller.last_plan["report_paths"]
+                controller._sync_button_state()
+
+                self.assertTrue(widget.btn_storage_agent.isEnabled())
+                widget.btn_storage_agent.click()
+
+                self.assertEqual(len(contexts), 1)
+                context = contexts[0]
+                self.assertEqual(context["source_workbench"], "tif_storage")
+                self.assertEqual(
+                    context["storage_inventory_report"], str(inventory_path.resolve())
+                )
+                self.assertEqual(
+                    context["storage_cleanup_report"], str(cleanup_path.resolve())
+                )
+                self.assertEqual(context["storage_candidate_count"], "1")
+                self.assertEqual(context["storage_blocked_count"], "1")
+                self.assertEqual(context["storage_unknown_protected_count"], "1")
+                self.assertIn("309.84 GB", context["storage_logical_bytes"])
+                self.assertIn("不得移动或删除", context["storage_agent_request"])
+
+                with patch(
+                    "AntSleap.ui.tif_storage_panel_controller.QDesktopServices.openUrl"
+                ) as open_url:
+                    widget.btn_open_storage_report.click()
+                open_url.assert_called_once()
+                self.assertIn(
+                    str(cleanup_path.resolve()), widget.storage_summary_label.text()
+                )
+            finally:
+                widget.close_project(prompt_unsaved=False)
+                widget.deleteLater()
 
     def test_extracted_modules_do_not_call_missing_workbench_methods(self):
         widget = TifWorkbenchWidget(TifProjectManager(), "en")

@@ -125,6 +125,29 @@ class ValidationSuiteScriptTests(unittest.TestCase):
         self.assertNotIn("v2410_release_audit", module.DEFAULT_ORDER)
         self.assertNotIn("v249_post_release_audit", module.DEFAULT_ORDER)
 
+    def test_v250_release_audit_is_loadable_unique_and_release_only(self):
+        spec = importlib.util.spec_from_file_location("run_validation_suite_for_v250", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        audit = module.SUITES["v250_release_audit"]
+        loaded_ids = module._test_ids(audit)
+        self.assertTrue(audit)
+        self.assertTrue(loaded_ids)
+        self.assertEqual(len(audit), len(set(audit)))
+        self.assertEqual(len(loaded_ids), len(set(loaded_ids)))
+        self.assertIn("tests.test_tif_storage", audit)
+        self.assertIn("tests.test_tif_nnunet_v2_backend", audit)
+        self.assertIn(
+            "tests.test_tif_workbench.TifWorkbenchTests.test_training_handoff_controls_are_visible",
+            audit,
+        )
+        self.assertGreater(
+            module.SUITE_DEFAULT_CHUNK_SIZES["v250_release_audit"],
+            0,
+        )
+        self.assertNotIn("v250_release_audit", module.DEFAULT_ORDER)
+
     def test_chunked_suite_runs_single_fast_tooling_test(self):
         result = subprocess.run(
             [

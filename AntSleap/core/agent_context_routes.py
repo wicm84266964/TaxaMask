@@ -185,6 +185,31 @@ AGENT_CONTEXT_ROUTES = {
         ),
         "suggested_agent_action": "Check volume_lifecycle_summary, display_mode, slice axis/position, volume renderer, shape/spacing, label role, label schema, material ID, selected part/reslice item, train-ready sample counts, selected model manifest, backend run state, and Local Axis draft/output state before interpreting a stall, missing overlay, GPU preview issue, training readiness issue, prediction import problem, or reslice request.",
     },
+    "tif_storage": {
+        "diagnostic_route": "tif_storage_inventory_and_cleanup",
+        "diagnostic_focus": "Latest read-only TIF storage inventory, dry-run cleanup plan, protected historical data, registered reproducible caches, estimated reclaimable bytes, and report paths.",
+        "llm_context_refs": (
+            "docs/designs/2026-08-24_TIF大体积存储分层去重与生命周期优化设计稿.md",
+            "LLM_CONTEXT_DETAILED.md -> 8. TIF/CT Project Model",
+            "LLM_CONTEXT_DETAILED.md -> 9. TIF Workbench",
+        ),
+        "source_code_refs": (
+            "AntSleap/ui/tif_storage_panel_controller.py",
+            "AntSleap/core/tif_storage_inventory.py",
+            "AntSleap/core/tif_storage_lifecycle.py",
+            "AntSleap/tools/tif_storage_manager.py",
+        ),
+        "artifact_hints": (
+            "Read storage_inventory_report and storage_cleanup_report first. Compare logical/unique occupancy, cleanup candidates, blocked entries, unknown protected entries, expected release, and the plan state before recommending any action.",
+        ),
+        "safety_notes": COMMON_SAFETY_NOTES
+        + (
+            "Occupancy analysis and cleanup-plan generation are read-only; a plan is not an instruction to delete files.",
+            "Unknown historical files, source volumes, manual_truth, annotations, model evidence, and unregistered artifacts remain protected by default.",
+            "Do not move, quarantine, or delete files without explicit researcher authorization. After authorization, revalidate the current plan and use the lifecycle manager rather than raw filesystem deletion.",
+        ),
+        "suggested_agent_action": "Open and interpret the supplied inventory and cleanup reports, answer whether the large TIF footprint should be retained or reclaimed, and explain the evidence in plain language. If the researcher explicitly authorizes cleanup, revalidate candidates, use reversible lifecycle quarantine first, and report the exact paths and bytes affected.",
+    },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
         "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: stage 0 decide whether PDFs already exist or whether daily review, topic search, selected-paper acquisition, or batch harvest is needed; then check key/model readiness, screening criteria, figure-review criteria, and run/results.",

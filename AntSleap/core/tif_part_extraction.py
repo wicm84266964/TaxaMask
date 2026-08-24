@@ -106,7 +106,7 @@ def crop_volume_to_part(project_manager, specimen_id, part_id, bbox_zyx, display
             "parent_bbox_zyx": bbox,
         },
     )
-    mask = np.zeros(crop.shape, dtype=np.uint16)
+    mask = np.zeros(crop.shape, dtype=np.uint8)
     mask_meta = write_volume_sidecar(
         mask_abs,
         mask,
@@ -441,7 +441,7 @@ def interpolate_masks_from_keyframes(keyframes, shape_zyx, cancel_callback=None)
             if len(polygon) >= 3:
                 records.append((slice_index, polygon))
     if not records:
-        return np.zeros(shape, dtype=np.uint16)
+        return np.zeros(shape, dtype=np.uint8)
 
     all_points = np.asarray([point for _slice_index, polygon in records for point in polygon], dtype=np.float32)
     padding = 2
@@ -450,7 +450,7 @@ def interpolate_masks_from_keyframes(keyframes, shape_zyx, cancel_callback=None)
     y0 = max(0, int(np.floor(float(np.min(all_points[:, 1])))) - padding)
     y1 = min(shape[1], int(np.ceil(float(np.max(all_points[:, 1])))) + padding + 1)
     if x1 <= x0 or y1 <= y0:
-        return np.zeros(shape, dtype=np.uint16)
+        return np.zeros(shape, dtype=np.uint8)
 
     normalized = []
     local_shape = (y1 - y0, x1 - x0)
@@ -466,10 +466,10 @@ def interpolate_masks_from_keyframes(keyframes, shape_zyx, cancel_callback=None)
             )
         )
     normalized.sort(key=lambda item: item[0])
-    result = np.zeros(shape, dtype=np.uint16)
+    result = np.zeros(shape, dtype=np.uint8)
     for index, mask in normalized:
         check_cancelled()
-        result[index, y0:y1, x0:x1] = mask.astype(np.uint16)
+        result[index, y0:y1, x0:x1] = mask.astype(np.uint8)
     distance_cache = {}
 
     def cached_signed_distance(index, mask):
@@ -489,7 +489,7 @@ def interpolate_masks_from_keyframes(keyframes, shape_zyx, cancel_callback=None)
             check_cancelled()
             weight = float(z_index - start_idx) / span
             dist = (1.0 - weight) * start_dist + weight * end_dist
-            result[z_index, y0:y1, x0:x1] = (dist <= 0.0).astype(np.uint16)
+            result[z_index, y0:y1, x0:x1] = (dist <= 0.0).astype(np.uint8)
     return result
 
 

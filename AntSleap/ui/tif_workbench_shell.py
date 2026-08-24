@@ -19,6 +19,7 @@ try:
     from AntSleap.ui.tif_agent_context import TifAgentContextBuilder
     from AntSleap.ui.tif_annotation_workflow_controller import TifAnnotationWorkflowController
     from AntSleap.ui.tif_backend_panel_controller import TifBackendPanelController
+    from AntSleap.ui.tif_storage_panel_controller import TifStoragePanelController
     from AntSleap.ui.tif_local_axis_controller import TifLocalAxisController
     from AntSleap.ui.tif_project_lifecycle_controller import TifProjectLifecycleController
     from AntSleap.ui.tif_part_mask_workflow_controller import TifPartMaskWorkflowController
@@ -48,6 +49,7 @@ except ModuleNotFoundError as exc:
     from ui.tif_agent_context import TifAgentContextBuilder
     from ui.tif_annotation_workflow_controller import TifAnnotationWorkflowController
     from ui.tif_backend_panel_controller import TifBackendPanelController
+    from ui.tif_storage_panel_controller import TifStoragePanelController
     from ui.tif_local_axis_controller import TifLocalAxisController
     from ui.tif_project_lifecycle_controller import TifProjectLifecycleController
     from ui.tif_part_mask_workflow_controller import TifPartMaskWorkflowController
@@ -93,6 +95,7 @@ class TifWorkbenchShell:
         workbench.agent_context_builder = TifAgentContextBuilder(workbench)
         workbench.coordinator = TifWorkbenchCoordinator(workbench)
         workbench.backend_panel_controller = TifBackendPanelController(workbench)
+        workbench.storage_panel_controller = TifStoragePanelController(workbench)
         workbench.result_review_controller = TifResultReviewController(workbench)
         workbench.local_axis_controller = TifLocalAxisController(workbench)
         workbench.preview_controller = TifPreviewController(workbench)
@@ -113,6 +116,7 @@ class TifWorkbenchShell:
                 ("volume_render", workbench.volume_render_controller),
                 ("local_axis", workbench.local_axis_controller),
                 ("backend_panel", workbench.backend_panel_controller),
+                ("storage_panel", workbench.storage_panel_controller),
                 ("result_review", workbench.result_review_controller),
             )
         )
@@ -197,6 +201,7 @@ class TifWorkbenchShell:
         workbench.volume_render_controller.bind_signals()
         workbench.local_axis_controller.bind_signals()
         workbench.backend_panel_controller.bind_signals()
+        workbench.storage_panel_controller.bind_signals()
         workbench.result_review_controller.bind_signals()
         workbench.refresh_project()
 

@@ -182,11 +182,14 @@ class LocationRegistryTests(unittest.TestCase):
 
     def test_windows_reparse_path_is_rejected_without_os_privileges(self):
         original_lstat = os.lstat
-        target_identity = os.path.normcase(os.path.abspath(self.file_path))
 
         def flagged_lstat(path):
             result = original_lstat(path)
-            if os.path.normcase(os.path.abspath(os.fspath(path))) == target_identity:
+            try:
+                is_target = os.path.samefile(path, self.file_path)
+            except (OSError, TypeError, ValueError):
+                is_target = False
+            if is_target:
                 return SimpleNamespace(
                     st_mode=result.st_mode,
                     st_file_attributes=int(

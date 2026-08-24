@@ -177,7 +177,14 @@ class Project2DSQLiteSaveTests(unittest.TestCase):
             manager, manifest_path, _db_path = _sqlite_manager(root)
             image_path = manager.project_data["images"][0]
             original = load_2d_sqlite_project_manifest(manifest_path)["project_data"]
-            original_taxon = original["labels"][image_path].get("taxon")
+            stored_image_paths = [
+                stored_path
+                for stored_path in original["labels"]
+                if Path(stored_path).resolve() == Path(image_path).resolve()
+            ]
+            self.assertEqual(len(stored_image_paths), 1)
+            stored_image_path = stored_image_paths[0]
+            original_taxon = original["labels"][stored_image_path].get("taxon")
             original_version = original.get("project_data_version_id")
 
             manager.set_taxon(
@@ -209,7 +216,7 @@ class Project2DSQLiteSaveTests(unittest.TestCase):
             reloaded = load_2d_sqlite_project_manifest(manifest_path)
             self.assertEqual(transaction_states, [True])
             self.assertEqual(
-                reloaded["project_data"]["labels"][image_path].get("taxon"),
+                reloaded["project_data"]["labels"][stored_image_path].get("taxon"),
                 original_taxon,
             )
             self.assertEqual(
@@ -234,7 +241,7 @@ class Project2DSQLiteSaveTests(unittest.TestCase):
             self.assertEqual(manager._pending_project_data_version_id, "")
             retried = load_2d_sqlite_project_manifest(manifest_path)
             self.assertEqual(
-                retried["project_data"]["labels"][image_path].get("taxon"),
+                retried["project_data"]["labels"][stored_image_path].get("taxon"),
                 "Formica rollback-test",
             )
 

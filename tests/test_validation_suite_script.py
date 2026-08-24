@@ -114,6 +114,14 @@ class ValidationSuiteScriptTests(unittest.TestCase):
         self.assertEqual(len(audit), len(set(audit)))
         self.assertEqual(module._test_ids(audit), audit)
         self.assertEqual(module.SUITES["v249_post_release_audit"], audit)
+        self.assertGreater(
+            module.SUITE_DEFAULT_CHUNK_SIZES["v2410_release_audit"],
+            0,
+        )
+        self.assertEqual(
+            module.SUITE_DEFAULT_CHUNK_SIZES["v249_post_release_audit"],
+            module.SUITE_DEFAULT_CHUNK_SIZES["v2410_release_audit"],
+        )
         self.assertNotIn("v2410_release_audit", module.DEFAULT_ORDER)
         self.assertNotIn("v249_post_release_audit", module.DEFAULT_ORDER)
 

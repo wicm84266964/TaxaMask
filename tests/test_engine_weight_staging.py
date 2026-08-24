@@ -46,6 +46,7 @@ class EngineWeightStagingTests(unittest.TestCase):
                 save_segmenter=False,
                 output_dir=staging,
                 artifact_key="train_fixture_001",
+                locator_scope=["Head"],
             )
 
             self.assertEqual(artifact_key, "train_fixture_001")
@@ -71,6 +72,7 @@ class EngineWeightStagingTests(unittest.TestCase):
                 save_segmenter=False,
                 output_dir=tmp,
                 artifact_key="train_fixture_002",
+                locator_scope=["Head"],
             )
             original = (Path(tmp) / "locator_train_fixture_002.pth").read_bytes()
 
@@ -80,6 +82,7 @@ class EngineWeightStagingTests(unittest.TestCase):
                     save_segmenter=False,
                     output_dir=tmp,
                     artifact_key="train_fixture_002",
+                    locator_scope=["Head"],
                 )
 
             self.assertEqual(

@@ -66,11 +66,15 @@ class MainWindowShellMixin:
             weight_decay=self.train_wd,
             num_classes=len(self.project.get_locator_scope()),
             device=self.runtime_device,
+            locator_scope=self.project.get_locator_scope(),
         )
         self.current_image = None
         self.inf_thread = None
         self.sam_thread = None
         self.sam_worker = None
+        self.sam_base_reload_pending = False
+        self.sam_decoder_apply_pending = None
+        self.sam_decoder_request_serial = 0
         self.sam_busy = False
         self.pending_sam_part = None
         self.pending_sam_image = None
@@ -104,6 +108,7 @@ class MainWindowShellMixin:
         self.project_save_timer.setSingleShot(True)
         self.project_save_timer.timeout.connect(self._flush_pending_project_save)
         self.last_confirmed_locator_timestamp = None
+        self.last_confirmed_segmenter_timestamp = None
         self.pending_training_preflight = None
         self.training_preflight_thread = None
         self.training_preflight_dialog = None

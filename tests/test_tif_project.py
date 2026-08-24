@@ -1,10 +1,12 @@
 import copy
+import inspect
 import json
 import multiprocessing
 import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1966,6 +1968,40 @@ class TifProjectTests(unittest.TestCase):
                 os.fstat(descriptors[0])
             self.assertEqual(list(root.glob(".warning.json.tmp-*")), [])
 
+    def test_safe_json_accepts_alias_of_trusted_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            physical_root = fixture_root / "physical"
+            physical_root.mkdir()
+            alias_root = fixture_root / "trusted-alias"
+            self._create_directory_alias(alias_root, physical_root)
+            try:
+                target = alias_root / "nested" / "warning.json"
+                safe_io.atomic_write_json_in_root(
+                    target,
+                    {"status": "ready"},
+                    trusted_root=alias_root,
+                )
+
+                physical_target = physical_root / "nested" / "warning.json"
+                self.assertEqual(
+                    json.loads(physical_target.read_text(encoding="utf-8")),
+                    {"status": "ready"},
+                )
+
+                canonical_target = physical_root / "canonical.json"
+                safe_io.atomic_write_json_in_root(
+                    canonical_target,
+                    {"status": "canonical"},
+                    trusted_root=alias_root,
+                )
+                self.assertEqual(
+                    json.loads(canonical_target.read_text(encoding="utf-8")),
+                    {"status": "canonical"},
+                )
+            finally:
+                self._remove_directory_alias(alias_root)
+
     def test_posix_parent_fstat_failure_closes_new_directory_descriptor(self):
         if not safe_io._directory_fd_guards_available():
             self.skipTest("POSIX directory-fd guards are unavailable")
@@ -2011,6 +2047,217 @@ class TifProjectTests(unittest.TestCase):
             self.assertEqual(len(child_descriptors), 1)
             with self.assertRaises(OSError):
                 os.fstat(child_descriptors[0])
+
+    def test_posix_root_fstat_interruption_closes_root_descriptor(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "warning.json"
+            real_open = safe_io.os.open
+            descriptors = []
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "fstat",
+                side_effect=KeyboardInterrupt("simulated root fstat interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated root fstat interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+
+    def test_posix_child_fstat_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            target = root / "nested" / "warning.json"
+            real_open = safe_io.os.open
+            real_fstat = safe_io.os.fstat
+            descriptors = []
+            calls = {"count": 0}
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_child_fstat(descriptor):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise KeyboardInterrupt(
+                        "simulated child fstat interruption"
+                    )
+                return real_fstat(descriptor)
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "fstat",
+                side_effect=interrupt_child_fstat,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated child fstat interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_posix_nested_parent_transfer_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "first" / "second").mkdir(parents=True)
+            target = root / "first" / "second" / "warning.json"
+            real_open = safe_io.os.open
+            real_close = safe_io.os.close
+            descriptors = []
+            child_descriptors = []
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                if kwargs.get("dir_fd") is not None:
+                    child_descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_after_first_child_close(descriptor):
+                real_close(descriptor)
+                if child_descriptors and descriptor == child_descriptors[0]:
+                    raise KeyboardInterrupt(
+                        "simulated nested parent transfer interruption"
+                    )
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ), patch.object(
+                safe_io.os,
+                "close",
+                side_effect=interrupt_after_first_child_close,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated nested parent transfer interruption",
+                ):
+                    safe_io._open_safe_parent(
+                        target,
+                        root,
+                        create=False,
+                    )
+
+            self.assertEqual(len(descriptors), 3)
+            self.assertEqual(len(child_descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_posix_parent_transfer_boundary_interruption_closes_all_descriptors(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "nested").mkdir()
+            target = root / "nested" / "warning.json"
+            real_open = safe_io.os.open
+            descriptors = []
+            source_lines, first_line = inspect.getsourcelines(
+                safe_io._open_safe_parent
+            )
+            transfer_line = next(
+                first_line + index
+                for index, line in enumerate(source_lines)
+                if "previous_fd, current_fd, next_fd =" in line
+            )
+
+            def tracked_open(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                descriptors.append(descriptor)
+                return descriptor
+
+            def interrupt_at_transfer(frame, event, _arg):
+                if (
+                    frame.f_code is safe_io._open_safe_parent.__code__
+                    and event == "line"
+                    and frame.f_lineno == transfer_line
+                ):
+                    raise KeyboardInterrupt(
+                        "simulated parent transfer boundary interruption"
+                    )
+                return interrupt_at_transfer
+
+            with patch.object(
+                safe_io,
+                "_directory_fd_guards_available",
+                return_value=True,
+            ), patch.object(
+                safe_io.os,
+                "open",
+                side_effect=tracked_open,
+            ):
+                try:
+                    sys.settrace(interrupt_at_transfer)
+                    with self.assertRaisesRegex(
+                        KeyboardInterrupt,
+                        "simulated parent transfer boundary interruption",
+                    ):
+                        safe_io._open_safe_parent(
+                            target,
+                            root,
+                            create=False,
+                        )
+                finally:
+                    sys.settrace(None)
+
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
 
     def test_advisory_lock_fdopen_failure_closes_open_descriptor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2063,6 +2310,556 @@ class TifProjectTests(unittest.TestCase):
             )
             self.assertTrue(replacement_lock.acquire())
             replacement_lock.release()
+
+    def test_advisory_lock_retries_transient_missing_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_require_entry = safe_io._require_safe_regular_entry_at
+            real_fdopen = safe_io.os.fdopen
+            calls = {"count": 0}
+            handles = []
+
+            def missing_once(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise FileNotFoundError("simulated transient lock disappearance")
+                return real_require_entry(*args, **kwargs)
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            with patch.object(
+                safe_io,
+                "_require_safe_regular_entry_at",
+                side_effect=missing_once,
+            ), patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(len(handles), 2)
+            self.assertTrue(handles[0].closed)
+            self.assertFalse(handles[1].closed)
+            lock.release()
+            self.assertTrue(handles[1].closed)
+
+    def test_advisory_lock_revalidates_named_entry_after_os_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_fdopen = safe_io.os.fdopen
+            calls = {"count": 0}
+            handles = []
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_validate = lock._locked_candidate_is_current
+
+            def missing_during_first_post_lock_validation(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise FileNotFoundError(
+                        "simulated post-lock directory-entry disappearance"
+                    )
+                return real_validate(*args, **kwargs)
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=missing_during_first_post_lock_validation,
+            ), patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(len(handles), 2)
+            self.assertTrue(handles[0].closed)
+            self.assertFalse(handles[1].closed)
+            lock.release()
+            self.assertTrue(handles[1].closed)
+
+    def test_advisory_lock_retries_real_post_lock_identity_replacement(self):
+        if os.name == "nt":
+            self.skipTest("renaming an open lock entry is POSIX-specific")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            displaced_path = root / "warning.displaced.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_acquire_os_lock = lock._acquire_os_lock
+            calls = {"count": 0}
+
+            def replace_after_first_lock(handle, deadline):
+                acquired = real_acquire_os_lock(handle, deadline)
+                calls["count"] += 1
+                if acquired and calls["count"] == 1:
+                    os.replace(lock_path, displaced_path)
+                    lock_path.write_bytes(b"0")
+                return acquired
+
+            with patch.object(
+                lock,
+                "_acquire_os_lock",
+                side_effect=replace_after_first_lock,
+            ):
+                self.assertTrue(lock.acquire())
+
+            self.assertEqual(calls["count"], 2)
+            self.assertTrue(displaced_path.is_file())
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            self.assertFalse(contender.acquire())
+            lock.release()
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_parent_guard_blocks_post_validation_replacement(self):
+        if os.name == "nt":
+            self.skipTest("renaming an open lock entry is POSIX-specific")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            displaced_path = root / "warning.displaced.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.5,
+                poll_interval=0.001,
+            )
+            real_validate = lock._locked_candidate_is_current
+            replaced = {"done": False}
+
+            def replace_after_validation(*args, **kwargs):
+                current = real_validate(*args, **kwargs)
+                if current and not replaced["done"]:
+                    os.replace(lock_path, displaced_path)
+                    lock_path.write_bytes(b"0")
+                    replaced["done"] = True
+                return current
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=replace_after_validation,
+            ):
+                self.assertTrue(lock.acquire())
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            self.assertFalse(contender.acquire())
+            lock.release()
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_releases_candidate_on_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = safe_io.AdvisoryFileLock(lock_path, trusted_root=root)
+
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                side_effect=KeyboardInterrupt("simulated interruption"),
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated interruption",
+                ):
+                    lock.acquire()
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_transfer_interruption_clears_object_handle(self):
+        class InterruptAfterTransferLock(safe_io.AdvisoryFileLock):
+            interrupt_after_transfer = False
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+                if (
+                    name == "handle"
+                    and value is not None
+                    and self.interrupt_after_transfer
+                ):
+                    object.__setattr__(self, "interrupt_after_transfer", False)
+                    raise KeyboardInterrupt("simulated transfer interruption")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptAfterTransferLock(lock_path, trusted_root=root)
+            lock.interrupt_after_transfer = True
+
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated transfer interruption",
+            ):
+                lock.acquire()
+
+            self.assertIsNone(lock.handle)
+            lock.release()
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_return_interruption_reclaims_transferred_handle(self):
+        class InterruptBeforeReturnLock(safe_io.AdvisoryFileLock):
+            interrupt_on_transferred_read = False
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+                if name == "handle" and value is not None:
+                    object.__setattr__(
+                        self,
+                        "interrupt_on_transferred_read",
+                        True,
+                    )
+
+            def __getattribute__(self, name):
+                if name == "handle" and object.__getattribute__(
+                    self,
+                    "interrupt_on_transferred_read",
+                ):
+                    object.__setattr__(
+                        self,
+                        "interrupt_on_transferred_read",
+                        False,
+                    )
+                    raise KeyboardInterrupt("simulated return interruption")
+                return object.__getattribute__(self, name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptBeforeReturnLock(lock_path, trusted_root=root)
+
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated return interruption",
+            ):
+                lock.acquire()
+
+            self.assertIsNone(lock.handle)
+            lock.release()
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_candidate_parent_cleanup_interruption_closes_handle(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class InterruptFirstParentCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            interrupted_descriptor = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    self.interrupted_descriptor = descriptor
+                    raise KeyboardInterrupt("simulated candidate parent close")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            real_fdopen = safe_io.os.fdopen
+            handles = []
+
+            def tracked_fdopen(*args, **kwargs):
+                handle = real_fdopen(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            lock = InterruptFirstParentCloseLock(lock_path, trusted_root=root)
+            with patch.object(
+                safe_io.os,
+                "fdopen",
+                side_effect=tracked_fdopen,
+            ), patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    KeyboardInterrupt,
+                    "simulated candidate parent close",
+                ):
+                    lock.acquire()
+
+            self.assertEqual(len(handles), 1)
+            self.assertTrue(handles[0].closed)
+            self.assertIsNone(lock.handle)
+            self.assertGreaterEqual(lock.interrupted_descriptor, 0)
+            with self.assertRaises(OSError):
+                os.fstat(lock.interrupted_descriptor)
+
+    def test_advisory_lock_validation_parent_cleanup_interruption_releases_lock(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class InterruptSecondParentCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            interrupt_parent_close = False
+            interrupted_descriptor = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.interrupt_parent_close:
+                    self.interrupt_parent_close = False
+                    self.interrupted_descriptor = descriptor
+                    raise KeyboardInterrupt("simulated validation parent close")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = InterruptSecondParentCloseLock(lock_path, trusted_root=root)
+            self.assertTrue(lock.acquire())
+            lock.interrupt_parent_close = True
+            with self.assertRaisesRegex(
+                KeyboardInterrupt,
+                "simulated validation parent close",
+            ):
+                lock.release()
+
+            self.assertIsNone(lock.handle)
+            self.assertGreaterEqual(lock.interrupted_descriptor, 0)
+            with self.assertRaises(OSError):
+                os.fstat(lock.interrupted_descriptor)
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_candidate_parent_close_never_closes_reused_fd(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class ReuseFdAfterCandidateCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            replacement_fd = -1
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+                    self.replacement_fd = os.open(os.devnull, os.O_RDONLY)
+                    raise RuntimeError("simulated post-close failure")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = ReuseFdAfterCandidateCloseLock(
+                root / "warning.lock",
+                trusted_root=root,
+                timeout=0.0,
+            )
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated post-close failure",
+                ):
+                    lock.acquire()
+
+            try:
+                self.assertGreaterEqual(lock.replacement_fd, 0)
+                os.fstat(lock.replacement_fd)
+                self.assertEqual(lock.close_calls, 1)
+            finally:
+                if lock.replacement_fd >= 0:
+                    os.close(lock.replacement_fd)
+
+    def test_advisory_lock_validation_parent_close_never_closes_reused_fd(self):
+        if not safe_io._directory_fd_guards_available():
+            self.skipTest("POSIX directory-fd guards are unavailable")
+
+        class ReuseFdAfterValidationCloseLock(safe_io.AdvisoryFileLock):
+            close_calls = 0
+            replacement_fd = -1
+            replace_on_close = False
+
+            def _close_descriptor(self, descriptor):
+                self.close_calls += 1
+                if self.replace_on_close:
+                    self.replace_on_close = False
+                    safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+                    self.replacement_fd = os.open(os.devnull, os.O_RDONLY)
+                    raise RuntimeError("simulated validation post-close failure")
+                return safe_io.AdvisoryFileLock._close_descriptor(descriptor)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = ReuseFdAfterValidationCloseLock(
+                lock_path,
+                trusted_root=root,
+            )
+            self.assertTrue(lock.acquire())
+            lock.replace_on_close = True
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated validation post-close failure",
+            ):
+                lock.release()
+
+            try:
+                self.assertGreaterEqual(lock.replacement_fd, 0)
+                os.fstat(lock.replacement_fd)
+                self.assertEqual(lock.close_calls, 1)
+                contender = safe_io.AdvisoryFileLock(
+                    lock_path,
+                    trusted_root=root,
+                    timeout=0.1,
+                )
+                self.assertTrue(contender.acquire())
+                contender.release()
+            finally:
+                if lock.replacement_fd >= 0:
+                    os.close(lock.replacement_fd)
+
+    def test_advisory_lock_persistent_identity_change_times_out_without_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            lock = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.0,
+            )
+            with patch.object(
+                lock,
+                "_locked_candidate_is_current",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    safe_io.UnsafeFilesystemPath,
+                    "lock_identity_changed_after_acquire",
+                ):
+                    lock.acquire()
+
+            contender = safe_io.AdvisoryFileLock(
+                lock_path,
+                trusted_root=root,
+                timeout=0.1,
+            )
+            self.assertTrue(contender.acquire())
+            contender.release()
+
+    def test_advisory_lock_rejects_hardlinked_lock_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "warning.lock"
+            second_link = root / "warning.second-link.lock"
+            lock_path.write_bytes(b"0")
+            try:
+                os.link(lock_path, second_link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_lock_hardlink",
+            ):
+                safe_io.AdvisoryFileLock(
+                    lock_path,
+                    trusted_root=root,
+                ).acquire()
+
+    def test_bounded_readers_reject_hardlinks_to_files_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            trusted_root = fixture_root / "trusted"
+            trusted_root.mkdir()
+            outside_bytes = fixture_root / "outside.bin"
+            outside_json = fixture_root / "outside.json"
+            outside_bytes.write_bytes(b"outside-checkpoint")
+            outside_json.write_text('{"outside": true}', encoding="utf-8")
+            inside_bytes = trusted_root / "checkpoint.pth"
+            inside_json = trusted_root / "manifest.json"
+            try:
+                os.link(outside_bytes, inside_bytes)
+                os.link(outside_json, inside_json)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_regular_file_hardlink",
+            ):
+                safe_io.read_bytes_bounded_in_root(
+                    inside_bytes,
+                    trusted_root=trusted_root,
+                    max_bytes=1024,
+                )
+            with self.assertRaisesRegex(
+                safe_io.UnsafeFilesystemPath,
+                "unsafe_regular_file_hardlink",
+            ):
+                safe_io.read_json_bounded_in_root(
+                    inside_json,
+                    trusted_root=trusted_root,
+                    max_bytes=1024,
+                )
+            self.assertEqual(outside_bytes.read_bytes(), b"outside-checkpoint")
+            self.assertEqual(
+                json.loads(outside_json.read_text(encoding="utf-8")),
+                {"outside": True},
+            )
 
     def test_safe_json_read_rejects_content_stat_change_and_closes_fd(self):
         with tempfile.TemporaryDirectory() as tmp:

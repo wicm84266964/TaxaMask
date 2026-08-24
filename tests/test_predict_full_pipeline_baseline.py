@@ -1,6 +1,7 @@
 # pyright: reportMissingImports=false
 
 import contextlib
+import hashlib
 import inspect
 import io
 import json
@@ -14,7 +15,7 @@ import tracemalloc
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -25,6 +26,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from AntSleap.core.engine import AntEngine
+from AntSleap.core.blink_expert_manifest import (
+    build_blink_expert_manifest,
+    build_blink_preprocessing_contract,
+)
+from AntSleap.core.blink_heatmap_trainer import HeatmapBlinkNet
+from AntSleap.core.cascade_manager import CascadingManager
+from AntSleap.core.cascade_routes import ROUTE_BACKEND_HEATMAP_BLINK
+from AntSleap.core.training_weight_publisher import TrainingWeightPublisher
 
 
 BASELINE_PATH = Path(__file__).parent / "baselines" / "predict_full_pipeline_v1.json"
@@ -445,6 +454,198 @@ class PredictFullPipelineBaselineTests(unittest.TestCase):
         self.assertEqual(signature.parameters["box_pad"].default, 0.4)
         self.assertEqual(signature.parameters["noise_floor"].default, 0.15)
         self.assertEqual(signature.parameters["poly_epsilon"].default, 2.0)
+
+    def test_box_pipeline_runs_locator_and_child_route_without_loading_sam(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "box_only.png"
+            Image.new("RGB", (100, 80), color=(173, 181, 189)).save(image_path)
+
+            engine = AntEngine.__new__(AntEngine)
+            engine.device = "cpu"
+            engine.locator_resolution = (64, 64)
+            engine.locator = _FixedLocator(
+                [{"peak_xy": (32, 28), "peak": 0.875, "wh": (0.2, 0.25)}]
+            )
+            engine.cascade_manager = _FixedCascadeManager()
+            engine.ensure_parts_model_loaded = Mock(
+                side_effect=AssertionError("SAM must stay unloaded in box-only mode")
+            )
+            engine._run_sam_polygon = Mock(
+                side_effect=AssertionError("SAM must stay unused in box-only mode")
+            )
+
+            result = engine.predict_box_pipeline(
+                str(image_path),
+                current_taxonomy=["Head", "Mandible"],
+                locator_scope=["Head"],
+                conf_thresh=0.1,
+                project_route_manifest=PROJECT_ROUTE_MANIFEST,
+            )
+
+            self.assertEqual(result["polygons"], {})
+            self.assertIn("Head", result["auto_boxes"])
+            self.assertEqual(result["auto_boxes"]["Mandible"], [40.0, 25.0, 58.0, 45.0])
+            engine.ensure_parts_model_loaded.assert_not_called()
+            engine._run_sam_polygon.assert_not_called()
+
+    def test_box_pipeline_uses_active_managed_blink_bundle_in_parent_crop(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            image_path = root / "managed_route.png"
+            Image.new("RGB", (100, 80), color=(173, 181, 189)).save(image_path)
+            managed_root = root / "managed_models"
+            staging_root = root / "staging"
+            staged_dir = staging_root / "Eye"
+            staged_dir.mkdir(parents=True)
+
+            model = HeatmapBlinkNet(base_channels=4)
+            for parameter in model.parameters():
+                torch.nn.init.constant_(parameter, 0.0)
+            staged_weights = staged_dir / "eye_heatmap.pth"
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "meta": {
+                        "kind": "blink_heatmap_expert",
+                        "parent_part": "Head",
+                        "child_part": "Eye",
+                        "part_name": "Eye",
+                        "input_size": [64, 64],
+                        "preprocessing": build_blink_preprocessing_contract(),
+                        "base_channels": 4,
+                    },
+                },
+                staged_weights,
+            )
+            staged_manifest = staged_weights.with_suffix(".manifest.json")
+            staged_manifest.write_text(
+                json.dumps(
+                    build_blink_expert_manifest(
+                        str(staged_weights),
+                        expert_backend=ROUTE_BACKEND_HEATMAP_BLINK,
+                        parent_part="Head",
+                        child_part="Eye",
+                        input_size=(64, 64),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            run_id = "managed-blink-route-001"
+            publisher = TrainingWeightPublisher(managed_root / "experts")
+            publication = publisher.publish_pending(
+                run_id,
+                staging_root,
+                [
+                    {
+                        "artifact_id": "blink_checkpoint",
+                        "role": "output_weights",
+                        "relative_path": "Eye/eye_heatmap.pth",
+                        "media_type": "application/octet-stream",
+                    },
+                    {
+                        "artifact_id": "blink_model_manifest",
+                        "role": "model_manifest",
+                        "relative_path": "Eye/eye_heatmap.manifest.json",
+                        "media_type": "application/json",
+                    },
+                ],
+            )
+            active = publisher.activate(
+                run_id,
+                {
+                    "schema_version": "taxamask_training_run_v1",
+                    "run_id": run_id,
+                    "status": "succeeded",
+                    "artifacts": publication["artifacts"],
+                },
+            )
+            artifacts = {
+                item["artifact_id"]: item for item in active["artifacts"]
+            }
+            published_weights = (managed_root / "experts").joinpath(
+                *artifacts["blink_checkpoint"]["relative_path"].split("/")
+            )
+            published_manifest = (managed_root / "experts").joinpath(
+                *artifacts["blink_model_manifest"]["relative_path"].split("/")
+            )
+
+            engine = AntEngine.__new__(AntEngine)
+            engine.device = "cpu"
+            engine.weights_dir = str(managed_root)
+            engine.locator_resolution = (64, 64)
+            engine.locator = _FixedLocator(
+                [{"peak_xy": (32, 32), "peak": 0.9, "wh": (0.5, 0.5)}]
+            )
+            engine.cascade_manager = CascadingManager(engine)
+            engine.cascade_manager.project_manager = types.SimpleNamespace(
+                project_data={"project_id": "managed-route-project"}
+            )
+            route_manifest = {
+                "version": "managed-route-v1",
+                "routes": [
+                    {
+                        "parent": "Head",
+                        "child": "Eye",
+                        "enabled": True,
+                        "expert_backend": ROUTE_BACKEND_HEATMAP_BLINK,
+                        "expert_manifest": published_manifest.relative_to(
+                            managed_root / "experts"
+                        ).as_posix(),
+                        "input_size": [64, 64],
+                    }
+                ],
+            }
+
+            bundle = engine.cascade_manager._load_active_training_bundle(run_id)
+            self.assertIsNotNone(bundle)
+            checkpoint_artifact = next(
+                item
+                for item in bundle["artifacts"]
+                if item["artifact_id"] == "blink_checkpoint"
+            )
+            self.assertEqual(Path(checkpoint_artifact["path"]), published_weights)
+            self.assertEqual(
+                checkpoint_artifact["digest"],
+                hashlib.sha256(published_weights.read_bytes()).hexdigest(),
+            )
+
+            result = engine.predict_box_pipeline(
+                str(image_path),
+                current_taxonomy=["Head", "Eye"],
+                locator_scope=["Head"],
+                conf_thresh=0.1,
+                project_route_manifest=route_manifest,
+            )
+
+            parent_box = result["auto_boxes"]["Head"]
+            child_box = result["auto_boxes"]["Eye"]
+            crop_box = [
+                math.floor(parent_box[0]),
+                math.floor(parent_box[1]),
+                math.ceil(parent_box[2]),
+                math.ceil(parent_box[3]),
+            ]
+            self.assertGreater(child_box[2] - child_box[0], 0.0)
+            self.assertGreater(child_box[3] - child_box[1], 0.0)
+            self.assertGreaterEqual(child_box[0], crop_box[0])
+            self.assertGreaterEqual(child_box[1], crop_box[1])
+            self.assertLessEqual(child_box[2], crop_box[2])
+            self.assertLessEqual(child_box[3], crop_box[3])
+            self.assertAlmostEqual(child_box[0], crop_box[0], places=4)
+            self.assertAlmostEqual(child_box[1], crop_box[1], places=4)
+            self.assertAlmostEqual(
+                child_box[2],
+                crop_box[0] + (crop_box[2] - crop_box[0]) * 0.25,
+                places=4,
+            )
+            self.assertAlmostEqual(
+                child_box[3],
+                crop_box[1] + (crop_box[3] - crop_box[1]) * 0.25,
+                places=4,
+            )
+            self.assertEqual(result["meta"]["cascade_applied_count"], 1)
+            self.assertTrue(result["meta"]["cascade_applied_routes"])
 
     def test_frozen_scenarios_match_public_result_and_diagnostic_baseline(self):
         tolerances = self.baseline["tolerances"]

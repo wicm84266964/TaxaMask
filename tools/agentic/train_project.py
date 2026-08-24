@@ -41,8 +41,11 @@ from AntSleap.core.training_run_recorder import (  # noqa: E402
     TrainingRunRecorder,
 )
 from AntSleap.core.training_run_setup import (  # noqa: E402
-    build_and_attach_verified_training_inputs,
+    build_and_attach_registry_verified_training_inputs,
     resolved_registry_file_specs,
+)
+from AntSleap.core.training_initial_weights import (  # noqa: E402
+    read_verified_initial_weight,
 )
 from AntSleap.core.training_weight_publisher import (  # noqa: E402
     TrainingWeightPublicationError,
@@ -54,7 +57,6 @@ TRAINING_RUNS_ROOT = os.path.join(
     REPO_ROOT, "TaxaMask_outputs", "runtime_logs", "training_runs"
 )
 MANAGED_MODEL_ROOT = os.path.join(ANTSLEAP_ROOT, "weights")
-BASE_SAM_WEIGHTS_PATH = os.path.join(MANAGED_MODEL_ROOT, "sam_b.pt")
 HEADLESS_LEARNING_RATE = 1e-4
 HEADLESS_WEIGHT_DECAY = 1e-4
 HEADLESS_INPUT_RESOLUTION = (1024, 1024)
@@ -298,6 +300,7 @@ def _prepare_training_evidence(
     data_version_id,
     dataset_id,
     effective_config,
+    verification_batch,
     resolved_inputs,
     locator_records,
     parts_records,
@@ -310,11 +313,11 @@ def _prepare_training_evidence(
     config_relative = "inputs/effective_config.json"
     config_path = os.path.join(run.run_dir, *config_relative.split("/"))
     _write_json(config_path, effective_config)
-    file_specs = resolved_registry_file_specs(
+    registry_file_specs = resolved_registry_file_specs(
         resolved_inputs,
         included_initial_weight_slots=initial_weight_slots,
     )
-    file_specs.append(
+    local_file_specs = [
         {
             "file_id": "effective_config",
             "role": "training_config",
@@ -322,7 +325,7 @@ def _prepare_training_evidence(
             "relative_path": config_relative,
             "expected": compute_fingerprint(config_path, FULL_FILE_ALGORITHM),
         }
-    )
+    ]
     file_ids_by_uid = {}
     for item in resolved_inputs["files"]:
         if item["role"] in {"source_image", "human_confirmed_label"}:
@@ -363,9 +366,12 @@ def _prepare_training_evidence(
         if partition_by_uid[image_uid] == "validation"
     }
     validation_ratio = float(len(validation_groups)) / float(len(selected_uids))
-    return build_and_attach_verified_training_inputs(
+    return build_and_attach_registry_verified_training_inputs(
         run,
-        file_specs=file_specs,
+        verification_batch=verification_batch,
+        resolved_inputs=resolved_inputs,
+        registry_file_specs=registry_file_specs,
+        local_file_specs=local_file_specs,
         assignments=assignments,
         dataset_id=dataset_id,
         data_version_id=data_version_id,
@@ -413,6 +419,7 @@ def _initial_report(args):
         "parts_val_count": 0,
         "locator_history": [],
         "parts_history": [],
+        "base_sam_evidence": None,
         "saved_weights_timestamp": "",
         "weight_publication_status": (
             "not_started" if args.save_weights else "not_requested"
@@ -475,12 +482,12 @@ def _weight_artifact_specs(run_id, *, include_segmenter):
     return specs
 
 
-def _index_published_weights(run, publication):
-    run.register_path_base("managed_model_root", MANAGED_MODEL_ROOT)
+def _index_published_weights(run, publication, managed_model_root):
+    run.register_path_base("managed_model_root", managed_model_root)
     indexed = []
     for expected in publication.get("artifacts", []):
         relative = str(expected.get("relative_path") or "")
-        path = os.path.join(MANAGED_MODEL_ROOT, *relative.split("/"))
+        path = os.path.join(managed_model_root, *relative.split("/"))
         observed = run.add_artifact(
             artifact_id=expected["artifact_id"],
             role="output_weights",
@@ -633,11 +640,11 @@ def _print_summary(report, report_path):
     print(f"report={os.path.abspath(report_path)}")
 
 
-def _ensure_global_failure_run(run, report):
+def _ensure_global_failure_run(run, report, runs_root):
     if run is not None:
         return run
     try:
-        fallback = TrainingRunRecorder(TRAINING_RUNS_ROOT).create_pending(
+        fallback = TrainingRunRecorder(runs_root).create_pending(
             "headless_builtin_locator_sam"
         )
         report["training_run_id"] = fallback.run_id
@@ -656,8 +663,20 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20260427, help="Deterministic split seed.")
     parser.add_argument("--train-parts", action="store_true", help="Also train the SAM decoder stage.")
     parser.add_argument("--save-weights", action="store_true", help="Persist trained weights into AntSleap/weights.")
+    parser.add_argument(
+        "--runs-root",
+        default=TRAINING_RUNS_ROOT,
+        help="Directory for immutable training run records.",
+    )
+    parser.add_argument(
+        "--managed-model-root",
+        default=MANAGED_MODEL_ROOT,
+        help="Managed directory for published model bundles.",
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Compute device preference.")
     args = parser.parse_args()
+    args.runs_root = os.path.abspath(os.fspath(args.runs_root))
+    args.managed_model_root = os.path.abspath(os.fspath(args.managed_model_root))
     report = _initial_report(args)
     report_path = os.path.abspath(args.report)
     run = None
@@ -680,13 +699,13 @@ def main() -> int:
         if not manager.is_sqlite_project() or not manager.current_database_path:
             raise ValueError("sqlite_project_required_for_training")
         recorder = TrainingRunRecorder(
-            TRAINING_RUNS_ROOT,
+            args.runs_root,
             database_path=manager.current_database_path,
         )
         run = recorder.create_pending("headless_builtin_locator_sam")
         report["training_run_id"] = run.run_id
         if args.save_weights:
-            weight_publisher = TrainingWeightPublisher(MANAGED_MODEL_ROOT)
+            weight_publisher = TrainingWeightPublisher(args.managed_model_root)
             weight_publisher.recover(
                 lambda run_id: _load_run_record_or_none(recorder, run_id)
             )
@@ -697,6 +716,10 @@ def main() -> int:
             manager,
             data_version_id=data_version_id,
             max_samples=int(args.max_samples),
+            included_initial_weight_slots=(
+                ("parent.sam_base",) if args.train_parts else ()
+            ),
+            include_parts=bool(args.train_parts),
         )
         if registry_dataset["data_version_id"] != data_version_id:
             raise ValueError("project_registry_data_version_mismatch")
@@ -754,14 +777,24 @@ def main() -> int:
             raise ValueError("not_enough_reviewed_locator_samples")
         if args.train_parts and len(parts_records) < 2:
             raise ValueError("not_enough_reviewed_parts_samples")
-        initial_weight_slots = {
-            item.get("owner_key")
+        verified_base_sam_entries = [
+            item
             for item in registry_dataset["resolved_inputs"]["files"]
             if item.get("role") == "initial_weights"
-        }
-        if args.train_parts and "parent.sam_base" not in initial_weight_slots:
-            raise ValueError(
-                "headless_base_sam_not_registered_use_gui_training_once"
+            and item.get("owner_key") == "parent.sam_base"
+            and isinstance(item.get("location"), dict)
+            and str(item["location"].get("runtime_path") or "").strip()
+        ]
+        verified_base_sam_path = ""
+        if args.train_parts:
+            if len(verified_base_sam_entries) != 1:
+                raise ValueError(
+                    "headless_base_sam_not_registered_use_gui_training_once"
+                )
+            verified_base_sam_path = os.path.abspath(
+                os.fspath(
+                    verified_base_sam_entries[0]["location"]["runtime_path"]
+                )
             )
 
         sample_uid_by_path = {
@@ -798,12 +831,13 @@ def main() -> int:
             environment=_runtime_environment(args.device),
         )
 
-        _prepare_training_evidence(
+        setup = _prepare_training_evidence(
             run,
             project_root=registry_dataset["project_root"],
             data_version_id=data_version_id,
             dataset_id=project_id,
             effective_config=effective_config,
+            verification_batch=registry_dataset["verification_batch"],
             resolved_inputs=registry_dataset["resolved_inputs"],
             locator_records=locator_records,
             parts_records=parts_records,
@@ -813,7 +847,30 @@ def main() -> int:
             include_parts=bool(args.train_parts),
             initial_weight_slots=("parent.sam_base",) if args.train_parts else (),
         )
-        run.mark_running()
+        registry_dataset.pop("verification_batch", None)
+        run.mark_running_from_registry_verification(
+            setup["registry_verification_receipt"]
+        )
+
+        verified_base_sam = None
+        if args.train_parts:
+            stage = "initial_weight_load"
+            verified_base_sam = read_verified_initial_weight(
+                manager,
+                {
+                    "slot": "parent.sam_base",
+                    "path": verified_base_sam_path,
+                },
+            )
+            report["base_sam_evidence"] = {
+                "slot": "parent.sam_base",
+                "path": os.path.abspath(
+                    os.fspath(verified_base_sam["path"])
+                ),
+                "status": verified_base_sam["status"],
+                "fingerprint": dict(verified_base_sam["observed"]),
+                "loaded_from_verified_bytes": True,
+            }
 
         stage = "training"
         _seed_training(args.seed)
@@ -823,7 +880,16 @@ def main() -> int:
             num_classes=len(locator_scope),
             device=args.device,
             locator_loss_weights=effective_config["loss_weights"]["locator"],
+            locator_scope=locator_scope,
         )
+        if args.train_parts:
+            engine.configure_verified_base_sam(
+                verified_base_sam["payload"],
+                reference=os.path.abspath(
+                    os.fspath(verified_base_sam["path"])
+                ),
+                fingerprint=verified_base_sam["observed"],
+            )
         report["device"] = str(engine.device)
         report["loss_config"] = engine.loss_config_snapshot
         locator_model = engine.ensure_locator_loaded()
@@ -885,6 +951,7 @@ def main() -> int:
                     save_segmenter=bool(args.train_parts),
                     output_dir=staging_dir,
                     artifact_key=run.run_id,
+                    locator_scope=locator_scope,
                 )
                 publication = weight_publisher.publish_pending(
                     run.run_id,
@@ -894,7 +961,7 @@ def main() -> int:
                     ),
                 )
             stage = "artifact_index"
-            _index_published_weights(run, publication)
+            _index_published_weights(run, publication, args.managed_model_root)
             report["weight_publication_status"] = "pending_activation"
             report["weight_publication_error_code"] = ""
 
@@ -926,7 +993,7 @@ def main() -> int:
         else:
             exit_code = 0
     except KeyboardInterrupt as exc:
-        run = _ensure_global_failure_run(run, report)
+        run = _ensure_global_failure_run(run, report, args.runs_root)
         exit_code = _finish_unsuccessful(
             run,
             report,
@@ -937,7 +1004,7 @@ def main() -> int:
             weight_publisher=weight_publisher,
         )
     except Exception as exc:
-        run = _ensure_global_failure_run(run, report)
+        run = _ensure_global_failure_run(run, report, args.runs_root)
         exit_code = _finish_unsuccessful(
             run,
             report,

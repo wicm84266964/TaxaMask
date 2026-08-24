@@ -533,6 +533,9 @@ class MainWindow(
 ):
     sam_point_requested = Signal(str, float, float)
     sam_box_requested = Signal(str, float, float, float, float)
+    sam_base_reload_requested = Signal()
+    sam_base_reload_options_requested = Signal(object)
+    sam_runtime_apply_requested = Signal(object)
 
     def __init__(self):
         super().__init__()

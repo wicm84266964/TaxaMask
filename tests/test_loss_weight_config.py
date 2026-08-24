@@ -126,12 +126,20 @@ class LossWeightConfigTests(unittest.TestCase):
             engine.loaded_locator_is_legacy_512 = False
             engine._locator_loss_weights = {"heatmap": 1.25, "wh": 0.75}
 
-            timestamp = engine.save_weights(save_locator=True, save_segmenter=False)
+            timestamp = engine.save_weights(
+                save_locator=True,
+                save_segmenter=False,
+                locator_scope=["Head", "Thorax", "Abdomen"],
+            )
             payload = torch.load(Path(tmp_dir) / f"locator_{timestamp}.pth", map_location="cpu")
 
         self.assertEqual(
             payload["meta"]["loss_config"],
             {"locator": {"heatmap": 1.25, "wh": 0.75}},
+        )
+        self.assertEqual(
+            payload["meta"]["locator_scope"],
+            ["Head", "Thorax", "Abdomen"],
         )
 
     def test_vit_b_blink_default_outer_loss_matches_legacy_formula(self):

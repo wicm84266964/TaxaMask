@@ -30,6 +30,7 @@ class MainWindowTrainingMixin:
             item = {
                 "slot": "parent.locator",
                 "path": locator_path,
+                "selection": locator_ref,
             }
             if locator_ref in managed_by_path:
                 item["expected"] = managed_by_path[locator_ref]["expected"]
@@ -49,6 +50,7 @@ class MainWindowTrainingMixin:
                 item = {
                     "slot": "parent.sam_decoder",
                     "path": segmenter_path,
+                    "selection": segmenter_ref,
                 }
                 if segmenter_ref in managed_by_path:
                     item["expected"] = managed_by_path[segmenter_ref]["expected"]
@@ -593,6 +595,154 @@ class MainWindowTrainingMixin:
         )
         self._refresh_blink_refine_state()
 
+    def _configure_parent_training_verified_sam(self, train_segmenter):
+        if not train_segmenter:
+            return {}
+        base_entry = next(
+            (
+                item
+                for item in self._current_training_initial_weights(True)
+                if item.get("slot") == "parent.sam_base"
+            ),
+            None,
+        )
+        if base_entry is None:
+            raise ValueError("parent_training_base_sam_entry_missing")
+        verified = read_verified_initial_weight(self.project, base_entry)
+        configure = getattr(self.engine, "configure_verified_base_sam", None)
+        if not callable(configure):
+            raise RuntimeError("parent_training_verified_base_sam_unsupported")
+        reference = os.path.abspath(os.fspath(verified["path"]))
+        fingerprint = dict(verified["observed"])
+        identity = configure(
+            verified["payload"],
+            reference=reference,
+            fingerprint=fingerprint,
+        )
+        return {
+            "slot": "parent.sam_base",
+            "path": reference,
+            "status": verified["status"],
+            "fingerprint": fingerprint,
+            "runtime_identity": dict(identity or {}),
+            "loaded_from_verified_bytes": True,
+        }
+
+    @staticmethod
+    def _verified_runtime_identity_matches(identity, fingerprint):
+        if not isinstance(identity, dict) or not isinstance(fingerprint, dict):
+            return False
+        return all(
+            identity.get(key) == fingerprint.get(key)
+            for key in ("size_bytes", "hash_algorithm", "digest")
+        )
+
+    def _load_parent_training_verified_sam_decoder(self, train_segmenter):
+        if not train_segmenter:
+            return {}
+        decoder_entry = next(
+            (
+                item
+                for item in self._current_training_initial_weights(True)
+                if item.get("slot") == "parent.sam_decoder"
+            ),
+            None,
+        )
+        if decoder_entry is None:
+            return {}
+        verified = read_verified_initial_weight(self.project, decoder_entry)
+        reference = os.path.abspath(os.fspath(verified["path"]))
+        fingerprint = dict(verified["observed"])
+        self.engine.load_sam_decoder(
+            str(decoder_entry.get("selection") or ""),
+            checkpoint_path=reference,
+            checkpoint_bytes=verified["payload"],
+        )
+        runtime_identity = dict(
+            getattr(self.engine, "loaded_sam_decoder_identity", {}) or {}
+        )
+        if not self._verified_runtime_identity_matches(
+            runtime_identity,
+            fingerprint,
+        ):
+            clear_runtime = getattr(self.engine, "_clear_failed_parts_load", None)
+            if callable(clear_runtime):
+                clear_runtime()
+            raise ValueError("parent_training_sam_decoder_runtime_identity_mismatch")
+        return {
+            "slot": "parent.sam_decoder",
+            "path": reference,
+            "status": verified["status"],
+            "fingerprint": fingerprint,
+            "runtime_identity": runtime_identity,
+            "loaded_from_verified_bytes": True,
+        }
+
+    def _load_parent_training_verified_locator(self, locator_scope):
+        locator_entry = next(
+            (
+                item
+                for item in self._current_training_initial_weights(False)
+                if item.get("slot") == "parent.locator"
+            ),
+            None,
+        )
+        if locator_entry is None:
+            return {}
+        verified = read_verified_initial_weight(self.project, locator_entry)
+        reference = os.path.abspath(os.fspath(verified["path"]))
+        fingerprint = dict(verified["observed"])
+        self.engine.load_locator(
+            str(locator_entry.get("selection") or ""),
+            checkpoint_path=reference,
+            checkpoint_bytes=verified["payload"],
+            expected_locator_scope=list(locator_scope or []),
+        )
+        runtime_identity = dict(
+            getattr(self.engine, "loaded_locator_identity", {}) or {}
+        )
+        if not self._verified_runtime_identity_matches(
+            runtime_identity,
+            fingerprint,
+        ):
+            clear_runtime = getattr(self.engine, "_clear_failed_locator_load", None)
+            if callable(clear_runtime):
+                clear_runtime()
+            raise ValueError("parent_training_locator_runtime_identity_mismatch")
+        return {
+            "slot": "parent.locator",
+            "path": reference,
+            "status": verified["status"],
+            "fingerprint": fingerprint,
+            "runtime_identity": runtime_identity,
+            "loaded_from_verified_bytes": True,
+        }
+
+    def _load_parent_training_verified_models(
+        self,
+        train_segmenter,
+        locator_scope,
+    ):
+        base_sam = MainWindowTrainingMixin._configure_parent_training_verified_sam(
+            self,
+            train_segmenter,
+        )
+        sam_decoder = (
+            MainWindowTrainingMixin._load_parent_training_verified_sam_decoder(
+                self,
+                train_segmenter,
+            )
+        )
+        locator = MainWindowTrainingMixin._load_parent_training_verified_locator(
+            self,
+            locator_scope,
+        )
+        return {
+            "base_sam": base_sam,
+            "sam_decoder": sam_decoder,
+            "locator": locator,
+        }
+
     def _start_parent_training_thread(self, prepared_run, request):
         active_preflight = dict(request["preflight"])
         train_segmenter = bool(request["train_segmenter"])
@@ -602,6 +752,49 @@ class MainWindowTrainingMixin:
         scope_id = str(request["scope_id"])
         scope_label = str(request["scope_label"])
         scope_image_count = int(request["scope_image_count"])
+        try:
+            initial_model_evidence = (
+                MainWindowTrainingMixin._load_parent_training_verified_models(
+                    self,
+                    train_segmenter,
+                    request["locator_scope"],
+                )
+            )
+        except Exception as exc:
+            for clear_name in (
+                "_clear_failed_parts_load",
+                "_clear_failed_locator_load",
+            ):
+                clear_runtime = getattr(self.engine, clear_name, None)
+                if callable(clear_runtime):
+                    clear_runtime()
+            run = getattr(prepared_run, "run", None)
+            if run is not None and getattr(run, "status", "") in {
+                "pending",
+                "running",
+            }:
+                try:
+                    run.fail(exc, stage="initial_weight_load")
+                except Exception:
+                    runtime_log_exception(
+                        "parent_training_initial_weight_failure_record_failed",
+                        *sys.exc_info(),
+                    )
+            self.parent_training_failed = True
+            self.btn_train.setEnabled(True)
+            self.btn_stop_training.setEnabled(False)
+            self._set_training_progress(
+                "parent",
+                tr("Training input verification failed.", self.current_lang),
+                0,
+            )
+            QMessageBox.critical(
+                self,
+                tr("Starting model verification", self.current_lang),
+                str(exc),
+            )
+            self._refresh_blink_refine_state()
+            return
         frozen = prepared_run.dataset
         active_preflight.update(
             {
@@ -633,6 +826,9 @@ class MainWindowTrainingMixin:
                 "train_segmenter": bool(train_segmenter),
                 "locator_resolution": list(self.engine.locator_resolution),
                 "loss_config": effective_loss_config,
+                "base_sam_evidence": initial_model_evidence["base_sam"],
+                "sam_decoder_evidence": initial_model_evidence["sam_decoder"],
+                "locator_evidence": initial_model_evidence["locator"],
                 "training_scope": {
                     "scope_id": scope_id,
                     "label": scope_label,
@@ -681,7 +877,7 @@ class MainWindowTrainingMixin:
             self.log(
                 tr("Active model profile updated with trained parent weights.", self.current_lang)
             )
-        self.refresh_model_list()
+        self.refresh_model_list(allow_while_training=True)
 
     def _on_training_finished(self, worker=None):
         if worker is not None and getattr(self, "trainer", None) is not worker:
@@ -697,7 +893,7 @@ class MainWindowTrainingMixin:
             if self.active_training_kind == "parent":
                 self._set_training_progress("parent", tr("Parent-part model training finished.", self.current_lang), 100)
             if context_matches:
-                self.refresh_model_list()
+                self.refresh_model_list(allow_while_training=True)
             else:
                 self._log_stale_project_task_result("parent_training_finished", task_context)
         if not self.training_retry_requested:
@@ -809,6 +1005,10 @@ class MainWindowTrainingMixin:
 
     def run_training(self):
         self._flush_pending_project_save(defer_for_navigation=False)
+        if not self._ensure_sam_runtime_settled(
+            tr("training", self.current_lang)
+        ):
+            return
         if self.trainer and self.trainer.isRunning():
             self.log(tr("Training already running...", self.current_lang))
             return
@@ -884,7 +1084,8 @@ class MainWindowTrainingMixin:
             return
 
         if preflight.get("locator_samples"):
-            self.ensure_locator_preloaded()
+            if not self._ensure_locator_ready_for_operation():
+                return
         if not self._confirm_legacy_locator_selection_if_needed():
             return
         if train_segmenter and preflight.get("parts_samples"):

@@ -596,8 +596,8 @@ def flush_project_changes(
                 project_manager,
                 project_data_version_id=resolved_data_version_id,
             )
-        if integrity_check:
-            ensure_integrity_ok(connection)
+            if integrity_check:
+                ensure_integrity_ok(connection)
         return {
             "data_version_id": resolved_data_version_id,
             "integrity": integrity_result,

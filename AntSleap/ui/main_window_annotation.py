@@ -3,6 +3,8 @@ try:
 except ImportError:
     from ui.main_window_stage6_dependencies import *
 
+from PySide6.QtCore import QObject
+
 
 class MainWindowAnnotationMixin:
     def _auto_boxes_for_canvas(self, image_path):
@@ -97,10 +99,38 @@ class MainWindowAnnotationMixin:
         self._request_sam_box(x1, y1, x2, y2)
 
     def _sam_worker_ready(self):
-        return bool(self.sam_worker and getattr(self.sam_worker, "model", None) is not None)
+        return bool(
+            self.sam_worker
+            and getattr(self.sam_worker, "model", None) is not None
+            and not getattr(self, "sam_base_reload_pending", False)
+            and not getattr(self, "sam_decoder_apply_pending", None)
+        )
 
     def _on_sam_model_loaded(self):
+        self.sam_base_reload_pending = False
+        pending = getattr(self, "sam_decoder_apply_pending", None)
+        if isinstance(pending, dict) and pending.get("worker_request_queued"):
+            return
+        apply_pending = getattr(self, "_queue_pending_sam_decoder_to_worker", None)
+        if pending and callable(apply_pending):
+            apply_pending()
+            return
         self.log(tr("SAM Model Loaded and Ready!", self.current_lang))
+
+    def _on_sam_model_load_error(self, message):
+        self.sam_base_reload_pending = False
+        pending = getattr(self, "sam_decoder_apply_pending", None)
+        if isinstance(pending, dict) and pending.get("worker_request_queued"):
+            return
+        fail_pending = getattr(self, "_fail_pending_sam_decoder", None)
+        if pending and callable(fail_pending):
+            fail_pending(
+                "sam_worker_base_load_failed",
+                message=str(message),
+                reload_worker=False,
+            )
+            return
+        self.log(str(message))
 
     def _begin_sam_prompt(self):
         if not self.current_image:
@@ -280,11 +310,34 @@ class MainWindowAnnotationMixin:
             return
         if self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
             return
-        mp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "sam_b.pt")
+        engine = getattr(self, "engine", None)
+        mp = str(
+            getattr(engine, "base_sam_path", "")
+            or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "weights",
+                "sam_b.pt",
+            )
+        )
+        base_checkpoint_bytes = getattr(
+            engine,
+            "_verified_base_sam_bytes",
+            None,
+        )
+        base_identity = dict(
+            getattr(engine, "verified_base_sam_identity", {}) or {}
+        )
         self.log(tr("Initializing SAM (Segment Anything) on active compute device...", self.current_lang))
         self.sam_thread = QThread()
         # Pass current epsilon to worker
-        self.sam_worker = SAMWorker(model_type=mp, poly_epsilon=self.inf_poly_epsilon, device=self.runtime_device)
+        self.sam_worker = SAMWorker(
+            model_type=mp,
+            poly_epsilon=self.inf_poly_epsilon,
+            device=self.runtime_device,
+            base_checkpoint_bytes=base_checkpoint_bytes,
+            base_reference=str(base_identity.get("reference") or mp),
+            base_fingerprint=base_identity or None,
+        )
         self.sam_worker.moveToThread(self.sam_thread)
         self.sam_thread.started.connect(self.sam_worker.load_model)
         queued_connection = Qt.ConnectionType.QueuedConnection
@@ -292,22 +345,124 @@ class MainWindowAnnotationMixin:
             self.sam_point_requested.connect(self.sam_worker.predict_point, queued_connection)
         if hasattr(self.sam_worker, "predict_box"):
             self.sam_box_requested.connect(self.sam_worker.predict_box, queued_connection)
+        self.sam_base_reload_requested.connect(
+            self.sam_worker.reload_base_model,
+            queued_connection,
+        )
+        self._connect_sam_worker_runtime_protocol(self.sam_worker)
         self.sam_worker.mask_generated.connect(self.on_sam_mask_generated)
         if hasattr(self.sam_worker, "prompt_failed"):
             self.sam_worker.prompt_failed.connect(self.on_sam_prompt_failed)
         self.sam_worker.model_loaded.connect(self._on_sam_model_loaded)
-        self.sam_worker.model_load_error.connect(lambda message: self.log(str(message)))
+        self.sam_worker.model_load_error.connect(self._on_sam_model_load_error)
+        self.sam_base_reload_pending = True
         self.sam_thread.start()
+
+    def _connect_sam_worker_runtime_protocol(self, worker):
+        if worker is None:
+            return False
+        owner_id = id(self)
+        if getattr(worker, "_taxamask_runtime_protocol_owner", None) == owner_id:
+            return True
+        connection_type = (
+            Qt.ConnectionType.QueuedConnection
+            if isinstance(worker, QObject)
+            else Qt.ConnectionType.DirectConnection
+        )
+
+        def connect_queued(signal, callback):
+            try:
+                signal.connect(callback, connection_type)
+            except TypeError:
+                signal.connect(callback)
+
+        if hasattr(worker, "reload_base_model_with_options"):
+            connect_queued(
+                self.sam_base_reload_options_requested,
+                worker.reload_base_model_with_options,
+            )
+        if hasattr(worker, "apply_runtime_bundle"):
+            connect_queued(
+                self.sam_runtime_apply_requested,
+                worker.apply_runtime_bundle,
+            )
+        if hasattr(worker, "runtime_apply_succeeded"):
+            connect_queued(
+                worker.runtime_apply_succeeded,
+                self._on_sam_runtime_apply_succeeded,
+            )
+        if hasattr(worker, "runtime_apply_failed"):
+            connect_queued(
+                worker.runtime_apply_failed,
+                self._on_sam_runtime_apply_failed,
+            )
+        worker._taxamask_runtime_protocol_owner = owner_id
+        return hasattr(worker, "apply_runtime_bundle")
+
+    def _sam_base_reload_options(self):
+        engine = getattr(self, "engine", None)
+        model_type = str(getattr(engine, "base_sam_path", "") or "sam_b.pt")
+        identity = dict(
+            getattr(engine, "verified_base_sam_identity", {}) or {}
+        )
+        return {
+            "model_type": model_type,
+            "device_preference": self.runtime_device,
+            "poly_epsilon": self.inf_poly_epsilon,
+            "base_checkpoint_payload": getattr(
+                engine,
+                "_verified_base_sam_bytes",
+                None,
+            ),
+            "base_reference": str(identity.get("reference") or model_type),
+            "base_expected": identity or None,
+        }
+
+    def _request_sam_base_reload(self):
+        if getattr(self, "sam_base_reload_pending", False):
+            return False
+        worker = self.sam_worker
+        thread = self.sam_thread
+        if worker is not None and thread is not None and thread.isRunning():
+            self.sam_base_reload_pending = True
+            if hasattr(worker, "reload_base_model_with_options") and hasattr(
+                self,
+                "sam_base_reload_options_requested",
+            ):
+                self.sam_base_reload_options_requested.emit(
+                    self._sam_base_reload_options()
+                )
+            else:
+                self.sam_base_reload_requested.emit()
+            return True
+        if worker is not None and thread is not None:
+            self.sam_base_reload_pending = True
+            try:
+                thread.start()
+                if hasattr(worker, "reload_base_model_with_options") and hasattr(
+                    self,
+                    "sam_base_reload_options_requested",
+                ):
+                    self.sam_base_reload_options_requested.emit(
+                        self._sam_base_reload_options()
+                    )
+            except Exception:
+                self.sam_base_reload_pending = False
+                raise
+            return True
+
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        self.sam_thread = None
+        self.sam_worker = None
+        self.init_sam()
+        return self.sam_worker is not None
 
     def ensure_sam_preloaded(self):
         started = False
-        if self.sam_thread and self.sam_thread.isRunning():
-            pass
-        elif self.sam_worker and getattr(self.sam_worker, "model", None) is not None:
-            pass
-        else:
-            self.init_sam()
-            started = True
+        if not self._sam_worker_ready():
+            started = self._request_sam_base_reload()
 
         if self._preload_engine_parts_model_async():
             started = True

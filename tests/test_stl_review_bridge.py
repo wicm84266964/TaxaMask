@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from AntSleap.core.path_identity import path_identity
 from AntSleap.core.project import ProjectManager
 from AntSleap.core.stl_project import StlRenderedProjectManager
 from AntSleap.core.stl_review_bridge import (
@@ -109,7 +110,11 @@ class StlReviewBridgeTests(unittest.TestCase):
 
             self.assertEqual(result["registered_count"], 1)
             save_project.assert_called_once_with()
-            mark_label_dirty.assert_called_once_with(image_path)
+            self.assertEqual(mark_label_dirty.call_count, 1)
+            self.assertEqual(
+                path_identity(mark_label_dirty.call_args.args[0]),
+                path_identity(image_path),
+            )
             self.assertEqual(
                 project.project_data["project_data_version_id"], version_before
             )

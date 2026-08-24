@@ -123,6 +123,10 @@ class BlinkReproducibilityTests(unittest.TestCase):
                 _manifest_path, manifest = trainer.write_manifest(
                     str(weights_path), target_size, _EmptyDataset()
                 )
+                self.assertEqual(
+                    metadata["preprocessing"],
+                    manifest["preprocessing"],
+                )
                 self.assertEqual(manifest["initialization"], expected_initialization)
                 self.assertEqual(manifest["seeds"], expected_seeds)
                 self.assertEqual(manifest["train_params"]["random_seed"], 9753)

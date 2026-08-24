@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from AntSleap.core.training_initial_weights import register_initial_weight_version
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "tools" / "agentic" / "train_project.py"
@@ -80,6 +82,18 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
             )
         manager.initialize_integrity_baseline()
         return manager, image_paths
+
+    def _register_base_sam(self, manager, root):
+        weight_path = Path(root) / "registered_weights" / "sam_b.pt"
+        weight_path.parent.mkdir()
+        weight_path.write_bytes(b"registered base sam fixture")
+        result = register_initial_weight_version(
+            manager,
+            [{"slot": "parent.sam_base", "path": weight_path}],
+            note="Test fixture base SAM approved for parts training.",
+        )
+        self.assertTrue(result["changed"])
+        return weight_path
 
     def test_auto_only_sample_is_ineligible_for_locator_and_parts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,6 +221,128 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
                 report["error"],
                 "headless_base_sam_not_registered_use_gui_training_once",
             )
+
+    def test_registered_base_sam_is_verified_and_injected_before_parts_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, _image_paths = self._make_registered_project(root, 2)
+            base_sam_path = self._register_base_sam(manager, root)
+            report_path = root / "report.json"
+            runs_root = root / "isolated_runs"
+            observed_base_sam_paths = []
+            observed_base_sam_payloads = []
+
+            class FakeEngine:
+                def __init__(self, **kwargs):
+                    self.device = "cpu"
+                    self.locator = object()
+                    self.opt_loc = object()
+                    self.opt_parts = object()
+                    self.crit_parts = object()
+                    self.loss_config_snapshot = {
+                        "locator": dict(kwargs.get("locator_loss_weights") or {})
+                    }
+
+                def ensure_locator_loaded(self):
+                    return self.locator
+
+                def configure_verified_base_sam(
+                    self,
+                    checkpoint_bytes,
+                    *,
+                    reference="",
+                    fingerprint=None,
+                ):
+                    self.base_sam_path = reference
+                    self.base_sam_checkpoint_bytes = bytes(checkpoint_bytes)
+                    self.base_sam_fingerprint = dict(fingerprint or {})
+
+                def ensure_parts_model_loaded(self):
+                    observed_base_sam_paths.append(self.base_sam_path)
+                    observed_base_sam_payloads.append(
+                        self.base_sam_checkpoint_bytes
+                    )
+                    return object()
+
+                def train_epoch(self, *_args, **_kwargs):
+                    return 0.25
+
+                def validate_epoch(self, *_args, **_kwargs):
+                    return {
+                        "loss": 0.2,
+                        "pixel_error": 1.0,
+                        "iou": 0.75,
+                    }
+
+            argv = [
+                str(SCRIPT_PATH),
+                "--project",
+                str(manager.current_project_path),
+                "--report",
+                str(report_path),
+                "--train-parts",
+                "--runs-root",
+                str(runs_root),
+            ]
+            with patch.object(
+                TRAIN_PROJECT, "ProjectManager", return_value=manager
+            ), patch.object(TRAIN_PROJECT, "AntEngine", FakeEngine), patch.object(
+                sys, "argv", argv
+            ):
+                exit_code = TRAIN_PROJECT.main()
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0, report)
+            self.assertEqual(observed_base_sam_paths, [str(base_sam_path.resolve())])
+            self.assertEqual(
+                observed_base_sam_payloads,
+                [b"registered base sam fixture"],
+            )
+            self.assertEqual(report["base_sam_evidence"]["status"], "verified")
+            self.assertTrue(
+                report["base_sam_evidence"]["loaded_from_verified_bytes"]
+            )
+            run_path = next(runs_root.glob("*/training_run.json"))
+            run_record = json.loads(run_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_record["status"], "succeeded")
+            self.assertTrue(
+                (run_path.parent / "integrity_registry_receipt.json").is_file()
+            )
+
+    def test_registered_base_sam_digest_mismatch_stops_before_engine_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, _image_paths = self._make_registered_project(root, 2)
+            base_sam_path = self._register_base_sam(manager, root)
+            base_sam_path.write_bytes(b"tampered base sam fixture")
+            report_path = root / "report.json"
+            runs_root = root / "isolated_runs"
+            argv = [
+                str(SCRIPT_PATH),
+                "--project",
+                str(manager.current_project_path),
+                "--report",
+                str(report_path),
+                "--train-parts",
+                "--runs-root",
+                str(runs_root),
+            ]
+            with patch.object(
+                TRAIN_PROJECT, "ProjectManager", return_value=manager
+            ), patch.object(
+                TRAIN_PROJECT,
+                "AntEngine",
+                side_effect=AssertionError("training engine must not start"),
+            ), patch.object(sys, "argv", argv):
+                exit_code = TRAIN_PROJECT.main()
+
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["error"], "source_digest_mismatch")
+            run_path = next(runs_root.glob("*/training_run.json"))
+            run_record = json.loads(run_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_record["status"], "failed")
+            self.assertEqual(run_record["error"]["stage"], "integrity_preflight")
 
     def test_headless_training_passes_active_profile_loss_weights_and_reports_effective_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -406,10 +542,12 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
             report_path = root / "report.json"
             managed_model_root = root / "managed_models"
             manager, _image_paths = self._make_registered_project(root, 2)
+            engine_init_calls = []
             save_calls = []
 
             class FakeEngine:
                 def __init__(self, **kwargs):
+                    engine_init_calls.append(dict(kwargs))
                     self.device = "cpu"
                     self.locator = object()
                     self.opt_loc = object()
@@ -446,17 +584,28 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
                 "--report",
                 str(report_path),
                 "--save-weights",
+                "--runs-root",
+                str(root / "training_runs"),
+                "--managed-model-root",
+                str(managed_model_root),
             ]
             with patch.object(TRAIN_PROJECT, "AntEngine", FakeEngine), patch.object(
-                TRAIN_PROJECT, "TRAINING_RUNS_ROOT", str(root / "training_runs")
-            ), patch.object(
-                TRAIN_PROJECT, "MANAGED_MODEL_ROOT", str(managed_model_root)
-            ), patch.object(sys, "argv", argv):
+                sys, "argv", argv
+            ):
                 exit_code = TRAIN_PROJECT.main()
 
             self.assertEqual(exit_code, 0, json.loads(report_path.read_text(encoding="utf-8")))
+            self.assertEqual(len(engine_init_calls), 1)
+            self.assertEqual(
+                engine_init_calls[0]["locator_scope"],
+                manager.get_locator_scope(),
+            )
             self.assertEqual(len(save_calls), 1)
             self.assertFalse(save_calls[0]["save_segmenter"])
+            self.assertEqual(
+                save_calls[0]["locator_scope"],
+                manager.get_locator_scope(),
+            )
             run_path = next((root / "training_runs").glob("*/training_run.json"))
             run_record = json.loads(run_path.read_text(encoding="utf-8"))
             run_id = run_record["run_id"]
@@ -478,6 +627,16 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
             self.assertEqual(len(output_artifacts), 1)
             self.assertEqual(output_artifacts[0]["path_base"], "managed_model_root")
             self.assertNotIn(str(root.resolve()), run_path.read_text(encoding="utf-8"))
+            self.assertFalse(
+                (Path(TRAIN_PROJECT.TRAINING_RUNS_ROOT) / run_id).exists()
+            )
+            self.assertFalse(
+                (
+                    Path(TRAIN_PROJECT.MANAGED_MODEL_ROOT)
+                    / "training_runs"
+                    / run_id
+                ).exists()
+            )
 
     def test_unreadable_existing_run_is_not_treated_as_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -694,13 +853,13 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
                 str(root / "project.json"),
                 "--report",
                 str(report_path),
+                "--runs-root",
+                str(root / "training_runs"),
             ]
             with patch.object(TRAIN_PROJECT, "ProjectManager", BrokenManager), patch.object(
                 TRAIN_PROJECT,
                 "AntEngine",
                 side_effect=AssertionError("training engine must not start"),
-            ), patch.object(
-                TRAIN_PROJECT, "TRAINING_RUNS_ROOT", str(root / "training_runs")
             ), patch.object(sys, "argv", argv):
                 exit_code = TRAIN_PROJECT.main()
 
@@ -711,6 +870,12 @@ class AgenticTrainProjectSafetyTests(unittest.TestCase):
             run_record = json.loads(run_path.read_text(encoding="utf-8"))
             self.assertEqual(run_record["status"], "failed")
             self.assertEqual(run_record["error"]["stage"], "project_load")
+            self.assertFalse(
+                (
+                    Path(TRAIN_PROJECT.TRAINING_RUNS_ROOT)
+                    / report["training_run_id"]
+                ).exists()
+            )
 
     def test_keyboard_interrupt_is_recorded_as_cancelled(self):
         with tempfile.TemporaryDirectory() as tmp:

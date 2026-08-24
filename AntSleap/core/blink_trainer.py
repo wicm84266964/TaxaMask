@@ -26,7 +26,6 @@ from .blink_reproducibility import (
     build_random_blink_initialization,
     normalize_blink_random_seed,
 )
-from .taxonomy_defaults import is_safe_part_name
 from .model_profiles import DEFAULT_BLINK_OUTER_LOSS_WEIGHTS, sanitize_loss_weights
 from torchvision.ops import generalized_box_iou_loss, box_convert
 try:
@@ -52,13 +51,17 @@ except ImportError:
 try:
     from AntSleap.core.blink_expert_manifest import (
         BLINK_EXPERT_BACKEND_VIT_B,
+        build_blink_preprocessing_contract,
         default_manifest_path_for_weights,
+        require_safe_blink_expert_part_name,
         write_blink_expert_manifest,
     )
 except ImportError:
     from .blink_expert_manifest import (
         BLINK_EXPERT_BACKEND_VIT_B,
+        build_blink_preprocessing_contract,
         default_manifest_path_for_weights,
+        require_safe_blink_expert_part_name,
         write_blink_expert_manifest,
     )
 
@@ -94,10 +97,8 @@ class BlinkExpertTrainer:
         training_records=None,
         validation_records=None,
     ):
+        self.part_name = require_safe_blink_expert_part_name(part_name)
         self.device = resolve_torch_device(device)
-        self.part_name = str(part_name).strip()
-        if not is_safe_part_name(self.part_name):
-            raise ValueError(f"Unsafe Blink expert part name: {self.part_name}")
         self.parent_part = str(parent_part).strip() if isinstance(parent_part, str) and parent_part.strip() else None
         self.project_path = project_path
         self.learning_rate = float(learning_rate)
@@ -240,6 +241,7 @@ class BlinkExpertTrainer:
         progress_callback: Optional[Callable[[int], None]] = None,
         stop_callback: Optional[Callable[[], bool]] = None,
     ):
+        self.part_name = require_safe_blink_expert_part_name(self.part_name)
         self.seeds = apply_blink_training_seed(self.random_seed)
         target_size = self._normalize_input_size(target_size or self.input_size)
         parent_suffix = f" within {self.parent_part}" if self.parent_part else ""
@@ -480,8 +482,10 @@ class BlinkExpertTrainer:
         return {
             "kind": "blink_expert_locator",
             "part_name": self.part_name,
+            "child_part": self.part_name,
             "parent_part": self.parent_part,
             "input_size": [int(target_size[0]), int(target_size[1])],
+            "preprocessing": build_blink_preprocessing_contract(),
             "learning_rate": float(self.learning_rate),
             "weight_decay": float(self.weight_decay),
             "epochs": int(epochs),

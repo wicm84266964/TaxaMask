@@ -184,7 +184,12 @@ class MainWindowPredictionMixin:
         if _runtime_parent_backend(self.project, self.model_backend) == EXTERNAL_BACKEND_ID:
             self.run_external_prediction(self.current_image)
             return
-        self.ensure_locator_preloaded()
+        if not self._ensure_sam_runtime_settled(
+            tr("inference", self.current_lang)
+        ):
+            return
+        if not self._ensure_locator_ready_for_operation():
+            return
         if not self._confirm_legacy_locator_selection_if_needed():
             return
         self.ensure_sam_preloaded()
@@ -406,7 +411,12 @@ class MainWindowPredictionMixin:
             ) == QMessageBox.Yes:
                 self._start_external_batch_inference(ul)
             return
-        self.ensure_locator_preloaded()
+        if not self._ensure_sam_runtime_settled(
+            tr("batch inference", self.current_lang)
+        ):
+            return
+        if not self._ensure_locator_ready_for_operation():
+            return
         if not self._confirm_legacy_locator_selection_if_needed():
             return
         self.ensure_sam_preloaded()

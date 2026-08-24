@@ -1,3 +1,5 @@
+import hashlib
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,6 +31,403 @@ class FakeButton:
 
 
 class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
+    def test_parent_training_uses_verified_sam_bytes_after_path_swap(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        original = b"registered-base-sam"
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(original),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(original).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            weight_path = Path(tmp) / "sam_b.pt"
+            weight_path.write_bytes(original)
+            configured = []
+
+            class FakeEngine:
+                def configure_verified_base_sam(
+                    self,
+                    checkpoint_bytes,
+                    *,
+                    reference="",
+                    fingerprint=None,
+                ):
+                    configured.append(
+                        (checkpoint_bytes, reference, dict(fingerprint or {}))
+                    )
+                    return {
+                        **dict(fingerprint or {}),
+                        "reference": reference,
+                    }
+
+            owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+            owner.project = object()
+            owner.engine = FakeEngine()
+            owner._current_training_initial_weights = lambda _enabled: [
+                {"slot": "parent.sam_base", "path": weight_path}
+            ]
+
+            def read_then_swap(_project, entry):
+                weight_path.write_bytes(b"replacement-after-verification")
+                return {
+                    "slot": entry["slot"],
+                    "path": str(weight_path),
+                    "status": "verified",
+                    "observed": observed,
+                    "payload": original,
+                }
+
+            with patch(
+                "AntSleap.ui.main_window_training.read_verified_initial_weight",
+                side_effect=read_then_swap,
+            ):
+                evidence = owner._configure_parent_training_verified_sam(True)
+
+            self.assertEqual(weight_path.read_bytes(), b"replacement-after-verification")
+            self.assertEqual(configured, [(original, str(weight_path), observed)])
+            self.assertTrue(evidence["loaded_from_verified_bytes"])
+            self.assertNotIn("payload", evidence)
+
+    def test_parent_training_replaces_mismatched_preloaded_sam_runtime(self):
+        from AntSleap.core.engine import AntEngine
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        payload = b"verified-base-sam"
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(payload),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            weight_path = Path(tmp) / "sam_b.pt"
+            weight_path.write_bytes(payload)
+            engine = AntEngine.__new__(AntEngine)
+            engine.base_sam_path = str(weight_path)
+            engine.parts_model = type(
+                "PreloadedSAM",
+                (),
+                {"loaded_checkpoint_identity": {"digest": "wrong-base"}},
+            )()
+            engine.opt_parts = object()
+            engine.base_sam_predictor = object()
+            engine.loaded_sam_decoder_reference = "stale-decoder.pth"
+            engine.loaded_sam_decoder_identity = {"digest": "stale"}
+            engine.verified_base_sam_identity = {"digest": "wrong-base"}
+
+            owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+            owner.project = object()
+            owner.engine = engine
+            owner._current_training_initial_weights = lambda _enabled: [
+                {"slot": "parent.sam_base", "path": weight_path}
+            ]
+            verified = {
+                "slot": "parent.sam_base",
+                "path": str(weight_path),
+                "status": "verified",
+                "observed": observed,
+                "payload": payload,
+            }
+
+            with patch(
+                "AntSleap.ui.main_window_training.read_verified_initial_weight",
+                return_value=verified,
+            ):
+                evidence = owner._configure_parent_training_verified_sam(True)
+
+            self.assertIsNone(engine.parts_model)
+            self.assertIsNone(engine.opt_parts)
+            self.assertIsNone(engine.base_sam_predictor)
+            self.assertEqual(engine.loaded_sam_decoder_reference, "")
+            self.assertEqual(engine._verified_base_sam_bytes, payload)
+            self.assertEqual(engine.verified_base_sam_identity["digest"], observed["digest"])
+            self.assertEqual(evidence["runtime_identity"], engine.verified_base_sam_identity)
+
+    def test_locator_only_parent_training_does_not_read_base_sam(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        with patch(
+            "AntSleap.ui.main_window_training.read_verified_initial_weight"
+        ) as reader:
+            self.assertEqual(
+                owner._configure_parent_training_verified_sam(False),
+                {},
+            )
+        reader.assert_not_called()
+
+    def test_parent_training_binds_verified_decoder_and_locator_after_base(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        payloads = {
+            "parent.sam_base": b"base-sam",
+            "parent.sam_decoder": b"sam-decoder",
+            "parent.locator": b"locator",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = {
+                slot: Path(tmp) / f"{slot.replace('.', '-')}.pth"
+                for slot in payloads
+            }
+            for slot, path in paths.items():
+                path.write_bytes(payloads[slot])
+
+            entries = [
+                {"slot": "parent.sam_base", "path": paths["parent.sam_base"]},
+                {
+                    "slot": "parent.sam_decoder",
+                    "path": paths["parent.sam_decoder"],
+                    "selection": "decoder-run",
+                },
+                {
+                    "slot": "parent.locator",
+                    "path": paths["parent.locator"],
+                    "selection": "locator-run",
+                },
+            ]
+
+            class FakeEngine:
+                def __init__(self):
+                    self.events = []
+                    self.loaded_sam_decoder_identity = {}
+                    self.loaded_locator_identity = {}
+
+                @staticmethod
+                def _identity(checkpoint_bytes, reference):
+                    return {
+                        "source": "memory",
+                        "reference": reference,
+                        "size_bytes": len(checkpoint_bytes),
+                        "hash_algorithm": "sha256",
+                        "digest": hashlib.sha256(checkpoint_bytes).hexdigest(),
+                    }
+
+                def configure_verified_base_sam(
+                    self,
+                    checkpoint_bytes,
+                    *,
+                    reference="",
+                    fingerprint=None,
+                ):
+                    self.events.append(("base", checkpoint_bytes, reference))
+                    return self._identity(checkpoint_bytes, reference)
+
+                def load_sam_decoder(
+                    self,
+                    selection,
+                    *,
+                    checkpoint_path=None,
+                    checkpoint_bytes=None,
+                ):
+                    self.events.append(("decoder", checkpoint_bytes, selection))
+                    self.loaded_sam_decoder_identity = self._identity(
+                        checkpoint_bytes,
+                        str(checkpoint_path),
+                    )
+
+                def load_locator(
+                    self,
+                    selection,
+                    *,
+                    checkpoint_path=None,
+                    checkpoint_bytes=None,
+                    expected_locator_scope=None,
+                ):
+                    self.events.append(
+                        (
+                            "locator",
+                            checkpoint_bytes,
+                            selection,
+                            list(expected_locator_scope or []),
+                        )
+                    )
+                    self.loaded_locator_identity = self._identity(
+                        checkpoint_bytes,
+                        str(checkpoint_path),
+                    )
+
+            owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+            owner.project = object()
+            owner.engine = FakeEngine()
+            owner._current_training_initial_weights = lambda enabled: [
+                dict(item)
+                for item in entries
+                if enabled or item["slot"] == "parent.locator"
+            ]
+
+            def verified_then_swap(_project, entry):
+                slot = entry["slot"]
+                payload = payloads[slot]
+                paths[slot].write_bytes(b"replacement-" + payload)
+                return {
+                    "slot": slot,
+                    "path": str(paths[slot]),
+                    "status": "verified",
+                    "observed": {
+                        "entry_kind": "file",
+                        "size_bytes": len(payload),
+                        "hash_algorithm": "sha256",
+                        "digest": hashlib.sha256(payload).hexdigest(),
+                    },
+                    "payload": payload,
+                }
+
+            with patch(
+                "AntSleap.ui.main_window_training.read_verified_initial_weight",
+                side_effect=verified_then_swap,
+            ):
+                evidence = owner._load_parent_training_verified_models(
+                    True,
+                    ["Head"],
+                )
+
+            self.assertEqual(
+                [event[0] for event in owner.engine.events],
+                ["base", "decoder", "locator"],
+            )
+            self.assertEqual(owner.engine.events[1][1], payloads["parent.sam_decoder"])
+            self.assertEqual(owner.engine.events[2][1], payloads["parent.locator"])
+            self.assertEqual(owner.engine.events[2][3], ["Head"])
+            for slot, key in (
+                ("parent.sam_base", "base_sam"),
+                ("parent.sam_decoder", "sam_decoder"),
+                ("parent.locator", "locator"),
+            ):
+                self.assertEqual(
+                    evidence[key]["fingerprint"]["digest"],
+                    evidence[key]["runtime_identity"]["digest"],
+                )
+                self.assertNotIn("payload", evidence[key])
+                self.assertEqual(
+                    paths[slot].read_bytes(),
+                    b"replacement-" + payloads[slot],
+                )
+
+    def test_locator_only_model_binding_never_loads_sam_decoder(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        payload = b"verified-locator"
+        observed = {
+            "entry_kind": "file",
+            "size_bytes": len(payload),
+            "hash_algorithm": "sha256",
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+
+        class FakeEngine:
+            loaded_locator_identity = {}
+
+            def load_sam_decoder(self, *_args, **_kwargs):
+                raise AssertionError("locator-only training loaded SAM decoder")
+
+            def load_locator(
+                self,
+                _selection,
+                *,
+                checkpoint_path=None,
+                checkpoint_bytes=None,
+                expected_locator_scope=None,
+            ):
+                self.loaded_locator_identity = {
+                    **observed,
+                    "source": "memory",
+                    "reference": str(checkpoint_path),
+                }
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.project = object()
+        owner.engine = FakeEngine()
+        owner._current_training_initial_weights = lambda _enabled: [
+            {
+                "slot": "parent.locator",
+                "path": ROOT / "locator.pth",
+                "selection": "locator-run",
+            }
+        ]
+        verified = {
+            "slot": "parent.locator",
+            "path": str(ROOT / "locator.pth"),
+            "status": "verified",
+            "observed": observed,
+            "payload": payload,
+        }
+        with patch(
+            "AntSleap.ui.main_window_training.read_verified_initial_weight",
+            return_value=verified,
+        ) as reader:
+            evidence = owner._load_parent_training_verified_models(False, ["Head"])
+
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(evidence["base_sam"], {})
+        self.assertEqual(evidence["sam_decoder"], {})
+        self.assertEqual(evidence["locator"]["fingerprint"], observed)
+
+    def test_parent_model_binding_failure_clears_runtimes_and_fails_run(self):
+        from AntSleap.ui.main_window_training import MainWindowTrainingMixin
+
+        class FakeRun:
+            status = "running"
+
+            def __init__(self):
+                self.failures = []
+
+            def fail(self, error, *, stage):
+                self.failures.append((str(error), stage))
+                self.status = "failed"
+
+        class FakeEngine:
+            def __init__(self):
+                self.parts_cleared = 0
+                self.locator_cleared = 0
+
+            def _clear_failed_parts_load(self):
+                self.parts_cleared += 1
+
+            def _clear_failed_locator_load(self):
+                self.locator_cleared += 1
+
+        owner = type("TrainingOwner", (MainWindowTrainingMixin,), {})()
+        owner.engine = FakeEngine()
+        owner.current_lang = "en"
+        owner.btn_train = FakeButton()
+        owner.btn_stop_training = FakeButton()
+        owner._set_training_progress = lambda *_args: None
+        owner._refresh_blink_refine_state = lambda: None
+        run = FakeRun()
+        prepared = type("Prepared", (), {"run": run})()
+        request = {
+            "preflight": {},
+            "train_segmenter": True,
+            "active_profile": {},
+            "parent_backend": {},
+            "effective_loss_config": {},
+            "scope_id": "__all__",
+            "scope_label": "All Images",
+            "scope_image_count": 1,
+            "locator_scope": ["Head"],
+        }
+
+        with patch.object(
+            MainWindowTrainingMixin,
+            "_load_parent_training_verified_models",
+            side_effect=ValueError("initial_weight_not_verified"),
+        ), patch(
+            "AntSleap.ui.main_window_training.QMessageBox.critical"
+        ):
+            owner._start_parent_training_thread(prepared, request)
+
+        self.assertEqual(owner.engine.parts_cleared, 1)
+        self.assertEqual(owner.engine.locator_cleared, 1)
+        self.assertEqual(
+            run.failures,
+            [("initial_weight_not_verified", "initial_weight_load")],
+        )
+        self.assertTrue(owner.parent_training_failed)
+        self.assertTrue(owner.btn_train.enabled)
+        self.assertFalse(owner.btn_stop_training.enabled)
+
     def test_main_window_inherits_stage7_workflow_contracts(self):
         import AntSleap.main as main_module
         from AntSleap.ui.main_window_export import MainWindowExportMixin
@@ -155,6 +554,46 @@ class MainWindowStage7TrainingPredictionTests(unittest.TestCase):
         owner.sam_busy = True
 
         self.assertEqual(owner._active_project_bound_background_task(), "SAM Auto-Annotation")
+
+    def test_sam_base_reload_blocks_project_switch(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        owner = type("BusyOwner", (MainWindowModelManagementMixin,), {})()
+        owner.current_lang = "en"
+        owner.sam_base_reload_pending = True
+
+        self.assertEqual(
+            owner._active_project_bound_background_task(),
+            "SAM Auto-Annotation",
+        )
+
+    def test_refresh_model_list_without_engine_restores_signal_states(self):
+        from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin
+
+        class ComboStub:
+            def __init__(self, blocked):
+                self.blocked = blocked
+
+            def count(self):
+                return 0
+
+            def blockSignals(self, blocked):
+                previous = self.blocked
+                self.blocked = bool(blocked)
+                return previous
+
+            def clear(self):
+                pass
+
+        owner = type("ModelListOwner", (MainWindowModelManagementMixin,), {})()
+        owner.engine = None
+        owner.combo_locator = ComboStub(blocked=False)
+        owner.combo_segmenter = ComboStub(blocked=True)
+
+        owner.refresh_model_list()
+
+        self.assertFalse(owner.combo_locator.blocked)
+        self.assertTrue(owner.combo_segmenter.blocked)
 
     def test_parent_and_blink_preflight_block_project_switch(self):
         from AntSleap.ui.main_window_model_management import MainWindowModelManagementMixin

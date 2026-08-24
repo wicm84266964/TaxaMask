@@ -1,4 +1,5 @@
 import os
+import stat
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from AntSleap.core.blink_expert_manifest import is_safe_blink_expert_part_name
     from AntSleap.core.cascade_routes import (
         ROUTE_BACKEND_VIT_B_BLINK,
         format_expert_label,
@@ -25,7 +27,9 @@ try:
         merge_expert_candidates,
     )
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from AntSleap.core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from AntSleap.core.model_profiles import CHILD_BACKEND_VIT_B
+    from AntSleap.core.training_weight_publisher import TRAINING_BUNDLE_DIRECTORY
     from AntSleap.ui.main_window_dialog_support import (
         _route_backend_from_child_backend,
         _route_backend_from_entry,
@@ -45,6 +49,7 @@ try:
         themed_yes_no_question,
     )
 except ImportError:
+    from core.blink_expert_manifest import is_safe_blink_expert_part_name
     from core.cascade_routes import (
         ROUTE_BACKEND_VIT_B_BLINK,
         format_expert_label,
@@ -52,7 +57,9 @@ except ImportError:
         merge_expert_candidates,
     )
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
+    from core.file_integrity import FULL_FILE_ALGORITHM, compute_fingerprint
     from core.model_profiles import CHILD_BACKEND_VIT_B
+    from core.training_weight_publisher import TRAINING_BUNDLE_DIRECTORY
     from ui.main_window_dialog_support import (
         _route_backend_from_child_backend,
         _route_backend_from_entry,
@@ -228,7 +235,7 @@ class RouteManagementPanel(QWidget):
             if not isinstance(expert, dict):
                 continue
             expert_part = str(expert.get("expert_part") or "").strip()
-            if not expert_part:
+            if not is_safe_blink_expert_part_name(expert_part):
                 continue
             experts_by_part.setdefault(expert_part, []).append(dict(expert))
         return experts_by_part
@@ -241,26 +248,155 @@ class RouteManagementPanel(QWidget):
         weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")
         return os.path.abspath(os.path.join(str(weights_dir or ""), "experts"))
 
+    @staticmethod
+    def _is_link_or_reparse(stat_result):
+        attributes = int(getattr(stat_result, "st_file_attributes", 0) or 0)
+        reparse_flag = int(
+            getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400) or 0x400
+        )
+        return stat.S_ISLNK(stat_result.st_mode) or bool(
+            attributes & reparse_flag
+        )
+
+    def _is_safe_existing_directory_chain(self, directory_path):
+        current = os.path.abspath(str(directory_path or ""))
+        if not current:
+            return False
+        chain = []
+        while True:
+            chain.append(current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        try:
+            for path in reversed(chain):
+                path_stat = os.lstat(path)
+                if (
+                    not stat.S_ISDIR(path_stat.st_mode)
+                    or self._is_link_or_reparse(path_stat)
+                ):
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _is_managed_training_bundle_path(self, target_path):
+        if not isinstance(target_path, str) or not target_path:
+            return False
+        relative = os.path.relpath(
+            os.path.abspath(target_path),
+            self._expert_root_dir(),
+        )
+        if relative in {os.curdir, os.pardir} or relative.startswith(
+            os.pardir + os.sep
+        ):
+            return False
+        parts = [
+            part
+            for part in relative.replace("\\", "/").split("/")
+            if part not in {"", "."}
+        ]
+        return bool(
+            parts
+            and parts[0].casefold() == TRAINING_BUNDLE_DIRECTORY.casefold()
+        )
+
     def _is_safe_expert_file_path(self, file_path):
         if not isinstance(file_path, str) or not file_path:
             return False
         try:
             expert_root = self._expert_root_dir()
             file_abs = os.path.abspath(file_path)
-            return (
-                os.path.commonpath([expert_root, file_abs]) == expert_root
-                and os.path.isfile(file_abs)
-                and file_abs.lower().endswith(".pth")
-            )
+            if (
+                os.path.normcase(os.path.commonpath([expert_root, file_abs]))
+                != os.path.normcase(expert_root)
+                or not self._is_safe_existing_directory_chain(expert_root)
+                or not file_abs.lower().endswith(".pth")
+            ):
+                return False
+            relative = os.path.relpath(file_abs, expert_root)
+            current = expert_root
+            for part in relative.split(os.sep)[:-1]:
+                current = os.path.join(current, part)
+                current_stat = os.lstat(current)
+                if (
+                    not stat.S_ISDIR(current_stat.st_mode)
+                    or self._is_link_or_reparse(current_stat)
+                ):
+                    return False
+            file_stat = os.lstat(file_abs)
+            return stat.S_ISREG(file_stat.st_mode) and not self._is_link_or_reparse(file_stat)
         except Exception:
             return False
+
+    @staticmethod
+    def _entry_identity(stat_result):
+        return {
+            "device": int(getattr(stat_result, "st_dev", 0) or 0),
+            "inode": int(getattr(stat_result, "st_ino", 0) or 0),
+            "mode": int(getattr(stat_result, "st_mode", 0) or 0),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", 0) or 0),
+        }
+
+    def _expert_file_snapshot(self, file_path):
+        if (
+            self._is_managed_training_bundle_path(file_path)
+            or not self._is_safe_expert_file_path(file_path)
+        ):
+            return None
+        expert_root = self._expert_root_dir()
+        file_abs = os.path.abspath(file_path)
+        try:
+            relative = os.path.relpath(file_abs, expert_root)
+            current = expert_root
+            directory_identities = []
+            for part in [None, *relative.split(os.sep)[:-1]]:
+                if part is not None:
+                    current = os.path.join(current, part)
+                current_stat = os.lstat(current)
+                if (
+                    not stat.S_ISDIR(current_stat.st_mode)
+                    or self._is_link_or_reparse(current_stat)
+                ):
+                    return None
+                directory_identities.append(
+                    {
+                        "path": os.path.abspath(current),
+                        "identity": self._entry_identity(current_stat),
+                    }
+                )
+            file_before = os.lstat(file_abs)
+            if (
+                not stat.S_ISREG(file_before.st_mode)
+                or self._is_link_or_reparse(file_before)
+            ):
+                return None
+            fingerprint = compute_fingerprint(
+                file_abs,
+                algorithm=FULL_FILE_ALGORITHM,
+            )
+            file_after = os.lstat(file_abs)
+        except Exception:
+            return None
+        if self._entry_identity(file_before) != self._entry_identity(file_after):
+            return None
+        return {
+            "path": file_abs,
+            "directories": directory_identities,
+            "identity": self._entry_identity(file_after),
+            "fingerprint": fingerprint,
+        }
 
     def _selected_existing_expert_file(self):
         expert = self._selected_expert_entry()
         if not expert:
             return None
         file_path = expert.get("path")
-        if not self._is_safe_expert_file_path(file_path):
+        if (
+            self._is_managed_training_bundle_path(file_path)
+            or not self._is_safe_expert_file_path(file_path)
+        ):
             return None
         expert_id = str(expert.get("expert_id") or "").strip()
         return {"path": os.path.abspath(file_path), "expert_id": expert_id}
@@ -496,6 +632,8 @@ class RouteManagementPanel(QWidget):
             return self._ui("Expert not appointed yet")
         if block_reason == "expert_model_missing":
             return self._tr("Expert file missing")
+        if block_reason:
+            return f"{self._ui('Blocked')}: {block_reason}"
         return self._ui("Enabled") if bool(route_entry.get("enabled", False)) else self._ui("Disabled")
 
     def refresh_route_table(self):
@@ -595,15 +733,71 @@ class RouteManagementPanel(QWidget):
         if not selected_label:
             return
 
+        parent_part = str(route.get("parent") or "").strip()
+        child_part = str(route.get("child") or "").strip()
+        expert_part = str(expert.get("expert_part") or "").strip()
+        if not expert_part:
+            expert_id_parts = [
+                part
+                for part in selected_label.replace("\\", "/").split("/")
+                if part
+            ]
+            if len(expert_id_parts) == 2:
+                expert_part = expert_id_parts[0]
+        if (
+            not is_safe_blink_expert_part_name(child_part)
+            or not is_safe_blink_expert_part_name(expert_part)
+        ):
+            QMessageBox.information(
+                self,
+                self._tr("Appoint Expert"),
+                "blink_expert_part_name_unsafe_or_reserved",
+            )
+            return
+
+        expert_backend = (
+            expert.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK
+        )
+        expert_manifest = expert.get("expert_manifest") or None
+        input_size = expert.get("input_size")
+        backend_params = (
+            expert.get("backend_params")
+            if isinstance(expert.get("backend_params"), dict)
+            else {}
+        )
+        prospective_route = dict(route)
+        prospective_expert = {
+            "expert_id": selected_label,
+            "expert_part": expert_part,
+            "expert_filename": expert.get("expert_filename"),
+            "expert_backend": expert_backend,
+            "expert_manifest": expert_manifest,
+            "input_size": input_size,
+            "backend_params": backend_params,
+            "note": expert.get("note"),
+        }
+        prospective_route["appointed_expert"] = dict(prospective_expert)
+        prospective_route.update(prospective_expert)
+        block_reason = self.owner.engine.cascade_manager.get_route_block_reason(
+            prospective_route
+        )
+        if block_reason:
+            QMessageBox.information(
+                self,
+                self._tr("Appoint Expert"),
+                self._ui("This expert cannot be appointed to the selected route: {0}").format(block_reason),
+            )
+            return
+
         updated = self.owner.project.appoint_cascade_route_expert(
-            route.get("parent"),
-            route.get("child"),
+            parent_part,
+            child_part,
             expert_id=selected_label,
-            expert_backend=expert.get("expert_backend") or route.get("expert_backend") or ROUTE_BACKEND_VIT_B_BLINK,
-            expert_manifest=expert.get("expert_manifest") or route.get("expert_manifest"),
-            input_size=expert.get("input_size") or route.get("input_size"),
-            backend_params=expert.get("backend_params") if isinstance(expert.get("backend_params"), dict) else route.get("backend_params"),
-            note=expert.get("note") or route.get("note"),
+            expert_backend=expert_backend,
+            expert_manifest=expert_manifest,
+            input_size=input_size,
+            backend_params=backend_params,
+            note=expert.get("note"),
         )
         if updated:
             self.refresh_route_table()
@@ -623,11 +817,14 @@ class RouteManagementPanel(QWidget):
         if not route:
             return
         block_reason = self.owner.engine.cascade_manager.get_route_block_reason(route)
-        if not route.get("enabled") and block_reason == "expert_unappointed":
-            QMessageBox.information(self, self._tr("Appoint Expert"), self._ui("This route has no appointed expert yet. Appoint an expert first, then enable the route."))
-            return
-        if not route.get("enabled") and block_reason == "expert_model_missing":
-            QMessageBox.information(self, self._tr("Appoint Expert"), self._ui("The appointed expert file for this route is missing. Reappoint an available expert before enabling the route."))
+        if not route.get("enabled") and block_reason:
+            if block_reason == "expert_unappointed":
+                message = self._ui("This route has no appointed expert yet. Appoint an expert first, then enable the route.")
+            elif block_reason == "expert_model_missing":
+                message = self._ui("The appointed expert file for this route is missing. Reappoint an available expert before enabling the route.")
+            else:
+                message = self._ui("This route cannot be enabled: {0}").format(block_reason)
+            QMessageBox.information(self, self._tr("Appoint Expert"), message)
             return
 
         updated = self.owner.project.set_cascade_route_enabled(
@@ -672,6 +869,9 @@ class RouteManagementPanel(QWidget):
             return
         file_path = file_info["path"]
         expert_id = file_info.get("expert_id") or os.path.basename(file_path)
+        expected_snapshot = self._expert_file_snapshot(file_path)
+        if not isinstance(expected_snapshot, dict):
+            return
         reply = themed_yes_no_question(
             self,
             self._ui("Delete Expert File"),
@@ -683,6 +883,8 @@ class RouteManagementPanel(QWidget):
         if reply != QMessageBox.Yes:
             return
         try:
+            if self._expert_file_snapshot(file_path) != expected_snapshot:
+                raise RuntimeError("expert_file_changed_before_delete")
             os.remove(file_path)
             if expert_id:
                 weights_dir = getattr(getattr(self.owner, "engine", None), "weights_dir", "")

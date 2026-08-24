@@ -1685,7 +1685,10 @@ class MainWindowStage4ProjectLifecycleTests(unittest.TestCase):
             self.assertEqual(fixed_tmp.read_bytes(), b"preexisting-fixed-temp")
             self.assertGreaterEqual(rooted_writer.call_count, 2)
             for call in rooted_writer.call_args_list:
-                self.assertEqual(call.kwargs["trusted_root"], str(fixture["target_dir"]))
+                self.assertEqual(
+                    call.kwargs["trusted_root"],
+                    os.path.normpath(os.path.realpath(fixture["target_dir"])),
+                )
                 self.assertEqual(call.kwargs["max_bytes"], 64 * 1024)
 
     def test_recovery_marker_write_refuses_path_outside_project(self):

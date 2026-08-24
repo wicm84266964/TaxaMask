@@ -36,7 +36,11 @@ if "ultralytics" not in sys.modules:
     sys.modules["ultralytics.models"] = ultralytics_models_stub
     sys.modules["ultralytics.models.sam"] = ultralytics_models_sam_stub
 
-from AntSleap.core.engine import AntEngine
+from AntSleap.core.engine import (
+    LOCATOR_ARCHITECTURE_ID,
+    LOCATOR_CHECKPOINT_SCHEMA_VERSION,
+    AntEngine,
+)
 from AntSleap.core.dataset import TwoStageDataset
 
 
@@ -211,13 +215,26 @@ class LocatorResolutionMetadataTests(unittest.TestCase):
             engine.loaded_locator_requires_legacy_confirmation = False
             engine.loaded_locator_is_legacy_512 = False
 
-            timestamp = engine.save_weights(save_locator=True, save_segmenter=False)
+            timestamp = engine.save_weights(
+                save_locator=True,
+                save_segmenter=False,
+                locator_scope=["Head"],
+            )
             payload = torch.load(Path(tmp_dir) / f"locator_{timestamp}.pth", map_location="cpu")
 
+            self.assertEqual(
+                payload["schema_version"],
+                LOCATOR_CHECKPOINT_SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                payload["meta"]["architecture_id"],
+                LOCATOR_ARCHITECTURE_ID,
+            )
             self.assertEqual(payload["meta"]["locator_size"], [768, 512])
             self.assertEqual(payload["meta"]["num_classes"], 1)
+            self.assertEqual(payload["meta"]["locator_scope"], ["Head"])
 
-    def test_load_locator_uses_saved_resolution_metadata(self):
+    def test_schema_less_locator_keeps_resolution_but_requires_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             weights_path = Path(tmp_dir) / "locator_demo.pth"
             torch.save(
@@ -241,7 +258,7 @@ class LocatorResolutionMetadataTests(unittest.TestCase):
             engine.load_locator("demo")
 
             self.assertEqual(engine.locator_resolution, (640, 384))
-            self.assertFalse(engine.loaded_locator_requires_legacy_confirmation)
+            self.assertTrue(engine.loaded_locator_requires_legacy_confirmation)
             self.assertFalse(engine.loaded_locator_is_legacy_512)
 
     def test_load_locator_requires_confirmation_for_legacy_checkpoint(self):
@@ -264,6 +281,70 @@ class LocatorResolutionMetadataTests(unittest.TestCase):
             self.assertEqual(engine.locator_resolution, (512, 512))
             self.assertTrue(engine.loaded_locator_requires_legacy_confirmation)
             self.assertTrue(engine.loaded_locator_is_legacy_512)
+
+    def test_load_locator_rejects_empty_state_without_marking_it_loaded(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_path = Path(tmp_dir) / "locator_empty.pth"
+            torch.save({"state_dict": {}, "meta": {"locator_size": [512, 512]}}, weights_path)
+
+            engine = AntEngine.__new__(AntEngine)
+            engine.device = "cpu"
+            engine.weights_dir = tmp_dir
+            engine.current_num_classes = 1
+            engine.locator = _FakeLocatorModel()
+            engine.locator_resolution = (512, 512)
+            engine.loaded_locator_timestamp = None
+            engine.loaded_locator_reference = ""
+            engine.loaded_locator_requires_legacy_confirmation = False
+            engine.loaded_locator_is_legacy_512 = False
+
+            with self.assertRaisesRegex(
+                ValueError, "locator_checkpoint_state_empty"
+            ):
+                engine.load_locator("empty")
+
+            self.assertIsNone(engine.loaded_locator_timestamp)
+            self.assertEqual(engine.loaded_locator_reference, "")
+            self.assertIsNone(engine.locator)
+
+    def test_managed_load_requires_complete_locator_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            weights_path = Path(tmp_dir) / "locator_partial.pth"
+            payload = {
+                "schema_version": LOCATOR_CHECKPOINT_SCHEMA_VERSION,
+                "state_dict": {"unrelated": torch.zeros(1)},
+                "meta": {
+                    "architecture_id": LOCATOR_ARCHITECTURE_ID,
+                    "num_classes": 1,
+                    "locator_scope": ["Head"],
+                },
+            }
+            torch.save(payload, weights_path)
+
+            engine = AntEngine.__new__(AntEngine)
+            engine.device = "cpu"
+            engine.weights_dir = tmp_dir
+            engine.current_num_classes = 1
+            engine.locator = _FakeLocatorModel()
+            engine.locator_resolution = (512, 512)
+            engine.loaded_locator_timestamp = None
+            engine.loaded_locator_reference = ""
+            engine.loaded_locator_requires_legacy_confirmation = False
+            engine.loaded_locator_is_legacy_512 = False
+
+            with self.assertRaisesRegex(
+                RuntimeError, "locator_checkpoint_state_mismatch"
+            ):
+                engine.load_locator(
+                    "partial",
+                    checkpoint_path=str(weights_path),
+                    checkpoint_payload=weights_path.read_bytes(),
+                    require_complete=True,
+                    expected_locator_scope=["Head"],
+                )
+
+            self.assertIsNone(engine.loaded_locator_timestamp)
+            self.assertIsNone(engine.locator)
 
     def test_predict_full_pipeline_uses_loaded_locator_resolution(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

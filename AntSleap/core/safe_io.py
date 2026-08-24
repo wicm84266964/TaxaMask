@@ -50,9 +50,42 @@ def _same_file_content_stat(left, right):
     )
 
 
+def _has_multiple_links(result):
+    try:
+        return int(getattr(result, "st_nlink", 0) or 0) > 1
+    except (TypeError, ValueError):
+        return False
+
+
 def _safe_path_plan(path, trusted_root):
-    root = os.path.normpath(os.path.realpath(os.path.abspath(os.fspath(trusted_root))))
-    target = os.path.normpath(os.path.abspath(os.fspath(path)))
+    lexical_root = os.path.normpath(os.path.abspath(os.fspath(trusted_root)))
+    root = os.path.normpath(os.path.realpath(lexical_root))
+    supplied_target = os.path.normpath(os.path.abspath(os.fspath(path)))
+
+    relative_target = None
+    for candidate_root in (lexical_root, root):
+        try:
+            common = os.path.commonpath([candidate_root, supplied_target])
+        except ValueError:
+            continue
+        if (
+            os.path.normcase(common) == os.path.normcase(candidate_root)
+            and os.path.normcase(supplied_target)
+            != os.path.normcase(candidate_root)
+        ):
+            relative_target = os.path.relpath(supplied_target, candidate_root)
+            break
+    if (
+        relative_target is None
+        or relative_target == os.pardir
+        or relative_target.startswith(os.pardir + os.sep)
+    ):
+        raise UnsafeFilesystemPath("path_outside_trusted_root")
+
+    # Resolve aliases of the trusted root itself (for example macOS /var ->
+    # /private/var), but preserve every project-local component for the
+    # descriptor/lstat guards below to inspect without following links.
+    target = os.path.normpath(os.path.join(root, relative_target))
     parent = os.path.dirname(target) or "."
     try:
         common = os.path.commonpath([root, target])
@@ -174,17 +207,17 @@ def _open_safe_parent(path, trusted_root, *, create=False):
                 opened = os.fstat(next_fd)
                 if _is_link_or_reparse(opened) or not stat.S_ISDIR(opened.st_mode):
                     raise UnsafeFilesystemPath("unsafe_parent_entry")
-            except Exception:
+                previous_fd, current_fd, next_fd = current_fd, next_fd, -1
+            except BaseException:
                 if next_fd >= 0:
                     os.close(next_fd)
                 raise
-            if current_fd != root_fd:
-                os.close(current_fd)
-            current_fd = next_fd
+            if previous_fd != root_fd:
+                os.close(previous_fd)
         if current_fd == root_fd:
             root_fd = -1
         return root, target, parent, current_fd
-    except Exception:
+    except BaseException:
         if current_fd >= 0:
             os.close(current_fd)
         raise
@@ -231,14 +264,21 @@ def _require_safe_regular_entry(path):
     return result
 
 
-def read_json_bounded_in_root(path, *, trusted_root, max_bytes):
-    """Read one regular JSON file through a single, size-bounded descriptor."""
+def _read_bytes_bounded_in_root(
+    path,
+    *,
+    trusted_root,
+    max_bytes,
+    too_large_error,
+):
     _root, target, _parent, parent_fd = _open_safe_parent(
         path, trusted_root, create=False
     )
     descriptor = -1
     try:
         before = _require_safe_regular_entry_at(target, parent_fd)
+        if _has_multiple_links(before):
+            raise UnsafeFilesystemPath("unsafe_regular_file_hardlink")
         flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
         flags |= int(getattr(os, "O_NOFOLLOW", 0))
         if os.name != "nt":
@@ -247,7 +287,11 @@ def read_json_bounded_in_root(path, *, trusted_root, max_bytes):
         opened_before = os.fstat(descriptor)
         if _is_link_or_reparse(opened_before) or not stat.S_ISREG(opened_before.st_mode):
             raise UnsafeFilesystemPath("opened_entry_not_regular")
+        if _has_multiple_links(opened_before):
+            raise UnsafeFilesystemPath("unsafe_regular_file_hardlink")
         after_open = _require_safe_regular_entry_at(target, parent_fd)
+        if _has_multiple_links(after_open):
+            raise UnsafeFilesystemPath("unsafe_regular_file_hardlink")
         if not _same_file_stat(before, opened_before) or not _same_file_stat(
             opened_before, after_open
         ):
@@ -268,9 +312,11 @@ def read_json_bounded_in_root(path, *, trusted_root, max_bytes):
             remaining -= len(chunk)
         raw = b"".join(chunks)
         if len(raw) > limit:
-            raise ValueError("json_file_too_large")
+            raise ValueError(too_large_error)
         opened_after = os.fstat(descriptor)
         final_entry = _require_safe_regular_entry_at(target, parent_fd)
+        if _has_multiple_links(opened_after) or _has_multiple_links(final_entry):
+            raise UnsafeFilesystemPath("unsafe_regular_file_hardlink")
         if not _same_file_content_stat(opened_before, opened_after):
             raise UnsafeFilesystemPath("file_content_changed_during_read")
         if not _same_file_content_stat(opened_after, final_entry):
@@ -282,6 +328,29 @@ def read_json_bounded_in_root(path, *, trusted_root, max_bytes):
             os.close(descriptor)
         if parent_fd is not None:
             os.close(parent_fd)
+    return raw
+
+
+def read_bytes_bounded_in_root(path, *, trusted_root, max_bytes):
+    """Read one regular file through one verified, size-bounded descriptor."""
+
+    return _read_bytes_bounded_in_root(
+        path,
+        trusted_root=trusted_root,
+        max_bytes=max_bytes,
+        too_large_error="file_too_large",
+    )
+
+
+def read_json_bounded_in_root(path, *, trusted_root, max_bytes):
+    """Read one regular JSON file through a single, size-bounded descriptor."""
+
+    raw = _read_bytes_bounded_in_root(
+        path,
+        trusted_root=trusted_root,
+        max_bytes=max_bytes,
+        too_large_error="json_file_too_large",
+    )
     return json.loads(raw.decode("utf-8"))
 
 
@@ -478,6 +547,69 @@ def isolate_regular_file_in_root(path, rejected_path, *, trusted_root):
     return rejected
 
 
+class _OwnedDescriptor:
+    """Track one fd across cleanup that may be interrupted by BaseException."""
+
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+
+    def close(self, closer):
+        descriptor = self.descriptor
+        if descriptor is None or descriptor < 0:
+            self.descriptor = None
+            return
+
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            try:
+                closer(descriptor)
+            finally:
+                self.descriptor = None
+            return
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+            self.descriptor = None
+            raise
+
+        try:
+            closer(descriptor)
+        except BaseException:
+            try:
+                try:
+                    current = os.fstat(descriptor)
+                except OSError:
+                    current = None
+                except BaseException:
+                    try:
+                        os.close(descriptor)
+                    except BaseException:
+                        pass
+                    current = None
+                if current is not None:
+                    opened_inode = int(getattr(opened, "st_ino", 0) or 0)
+                    current_inode = int(getattr(current, "st_ino", 0) or 0)
+                    same_open_entry = (
+                        opened_inode > 0
+                        and current_inode > 0
+                        and _same_file_stat(opened, current)
+                        and stat.S_IFMT(opened.st_mode)
+                        == stat.S_IFMT(current.st_mode)
+                    )
+                    if same_open_entry:
+                        try:
+                            os.close(descriptor)
+                        except BaseException:
+                            pass
+            finally:
+                self.descriptor = None
+            raise
+        self.descriptor = None
+
+
 class AdvisoryFileLock:
     """Process-scoped advisory lock; the lock file may remain but never stays locked."""
 
@@ -487,82 +619,28 @@ class AdvisoryFileLock:
         self.timeout = max(0.0, float(timeout))
         self.poll_interval = max(0.001, float(poll_interval))
         self.handle = None
+        self._parent_guard = None
 
-    def acquire(self):
-        if self.handle is not None:
-            raise RuntimeError("advisory_file_lock_already_acquired")
-        _root, target, _parent, parent_fd = _open_safe_parent(
-            self.path, self.trusted_root, create=True
-        )
-        descriptor = -1
-        handle = None
+    @staticmethod
+    def _close_descriptor(descriptor):
+        if descriptor is None or descriptor < 0:
+            return
         try:
-            before = None
-            if _entry_exists(target, parent_fd):
-                before = _require_safe_regular_entry_at(target, parent_fd)
-                if int(getattr(before, "st_nlink", 1) or 1) != 1:
-                    raise UnsafeFilesystemPath("unsafe_lock_hardlink")
-            flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_BINARY", 0))
-            flags |= int(getattr(os, "O_NOFOLLOW", 0))
-            descriptor = _open_entry(target, flags, 0o600, parent_fd=parent_fd)
-            handle = os.fdopen(descriptor, "r+b", closefd=True)
-            descriptor = -1
-            opened = os.fstat(handle.fileno())
-            if _is_link_or_reparse(opened) or not stat.S_ISREG(opened.st_mode):
-                raise UnsafeFilesystemPath("lock_entry_not_regular")
-            if int(getattr(opened, "st_nlink", 1) or 1) != 1:
-                raise UnsafeFilesystemPath("unsafe_lock_hardlink")
-            after = _require_safe_regular_entry_at(target, parent_fd)
-            if before is not None and not _same_file_stat(before, opened):
-                raise UnsafeFilesystemPath("lock_identity_changed_during_open")
-            if not _same_file_stat(opened, after):
-                raise UnsafeFilesystemPath("lock_identity_changed_during_open")
-            if parent_fd is None:
-                _require_safe_parent(target, self.trusted_root, create=False)
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-                os.fsync(handle.fileno())
+            os.close(descriptor)
+        except OSError:
+            pass
 
-            deadline = time.monotonic() + self.timeout
-            while True:
-                try:
-                    handle.seek(0)
-                    if os.name == "nt":
-                        import msvcrt
+    @staticmethod
+    def _close_handle(handle):
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except OSError:
+            pass
 
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-
-                        fcntl.flock(
-                            handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
-                        )
-                    break
-                except (OSError, IOError):
-                    if time.monotonic() >= deadline:
-                        handle.close()
-                        handle = None
-                        return False
-                    time.sleep(self.poll_interval)
-        except Exception:
-            if handle is not None:
-                handle.close()
-            elif descriptor >= 0:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            raise
-        finally:
-            if parent_fd is not None:
-                os.close(parent_fd)
-        self.handle = handle
-        return True
-
-    def release(self):
-        handle, self.handle = self.handle, None
+    @staticmethod
+    def _unlock_and_close(handle):
         if handle is None:
             return
         try:
@@ -575,10 +653,259 @@ class AdvisoryFileLock:
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except (OSError, IOError):
+        except (OSError, IOError, ValueError):
             pass
         finally:
-            handle.close()
+            AdvisoryFileLock._close_handle(handle)
+
+    def _unlock_parent_and_close(self, owner):
+        if owner is None:
+            return
+        descriptor = owner.descriptor
+        try:
+            if descriptor is not None and descriptor >= 0 and os.name != "nt":
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except (OSError, IOError, ValueError):
+            pass
+        finally:
+            owner.close(self._close_descriptor)
+
+    def _open_lock_candidate(self):
+        parent_fd = None
+        parent_owner = None
+        descriptor = -1
+        handle = None
+        try:
+            _root, target, _parent, parent_fd = _open_safe_parent(
+                self.path,
+                self.trusted_root,
+                create=True,
+            )
+            if parent_fd is not None:
+                parent_owner, parent_fd = _OwnedDescriptor(parent_fd), None
+            guarded_parent_fd = (
+                parent_owner.descriptor if parent_owner is not None else None
+            )
+            before = None
+            if _entry_exists(target, guarded_parent_fd):
+                before = _require_safe_regular_entry_at(target, guarded_parent_fd)
+                if int(getattr(before, "st_nlink", 1) or 1) != 1:
+                    raise UnsafeFilesystemPath("unsafe_lock_hardlink")
+            flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            descriptor = _open_entry(
+                target,
+                flags,
+                0o600,
+                parent_fd=guarded_parent_fd,
+            )
+            handle = os.fdopen(descriptor, "r+b", closefd=True)
+            descriptor = -1
+            opened = os.fstat(handle.fileno())
+            if _is_link_or_reparse(opened) or not stat.S_ISREG(opened.st_mode):
+                raise UnsafeFilesystemPath("lock_entry_not_regular")
+            if int(getattr(opened, "st_nlink", 1) or 1) != 1:
+                raise UnsafeFilesystemPath("unsafe_lock_hardlink")
+            after = _require_safe_regular_entry_at(target, guarded_parent_fd)
+            if before is not None and not _same_file_stat(before, opened):
+                raise UnsafeFilesystemPath("lock_identity_changed_during_open")
+            if not _same_file_stat(opened, after):
+                raise UnsafeFilesystemPath("lock_identity_changed_during_open")
+            if guarded_parent_fd is None:
+                _require_safe_parent(target, self.trusted_root, create=False)
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return handle, opened, parent_owner
+        except BaseException:
+            try:
+                if handle is not None:
+                    self._close_handle(handle)
+                else:
+                    self._close_descriptor(descriptor)
+            finally:
+                if parent_owner is not None:
+                    parent_owner.close(self._close_descriptor)
+                elif parent_fd is not None and parent_fd >= 0:
+                    _OwnedDescriptor(parent_fd).close(self._close_descriptor)
+            raise
+
+    def _acquire_parent_lock(self, owner, deadline):
+        if owner is None or owner.descriptor is None or os.name == "nt":
+            return True
+        import fcntl
+
+        while True:
+            try:
+                fcntl.flock(
+                    owner.descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                return True
+            except (OSError, IOError):
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.poll_interval)
+
+    def _acquire_os_lock(self, handle, deadline):
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(
+                        handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                return True
+            except (OSError, IOError):
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.poll_interval)
+
+    def _locked_candidate_is_current(self, handle, opened, parent_owner=None):
+        parent_fd = None
+        validation_owner = None
+        try:
+            if parent_owner is None:
+                _root, target, _parent, parent_fd = _open_safe_parent(
+                    self.path,
+                    self.trusted_root,
+                    create=False,
+                )
+                if parent_fd is not None:
+                    validation_owner, parent_fd = (
+                        _OwnedDescriptor(parent_fd),
+                        None,
+                    )
+                guarded_parent_fd = (
+                    validation_owner.descriptor
+                    if validation_owner is not None
+                    else None
+                )
+            else:
+                _root, target, _parent, _parts = _safe_path_plan(
+                    self.path,
+                    self.trusted_root,
+                )
+                guarded_parent_fd = parent_owner.descriptor
+            locked = os.fstat(handle.fileno())
+            current = _require_safe_regular_entry_at(target, guarded_parent_fd)
+            locked_links = int(getattr(locked, "st_nlink", 1) or 0)
+            current_links = int(getattr(current, "st_nlink", 1) or 0)
+            if locked_links > 1 or current_links != 1:
+                raise UnsafeFilesystemPath("unsafe_lock_hardlink")
+            result = (
+                locked_links == 1
+                and _same_file_stat(opened, locked)
+                and _same_file_stat(locked, current)
+            )
+            if validation_owner is not None:
+                validation_owner.close(self._close_descriptor)
+            return result
+        except BaseException:
+            if validation_owner is not None:
+                validation_owner.close(self._close_descriptor)
+            elif parent_fd is not None and parent_fd >= 0:
+                _OwnedDescriptor(parent_fd).close(self._close_descriptor)
+            raise
+
+    def acquire(self):
+        if self.handle is not None or self._parent_guard is not None:
+            raise RuntimeError("advisory_file_lock_already_acquired")
+        deadline = time.monotonic() + self.timeout
+        owned_handle = None
+        owned_parent = None
+        try:
+            while True:
+                while True:
+                    try:
+                        owned_handle, opened, owned_parent = (
+                            self._open_lock_candidate()
+                        )
+                        break
+                    except FileNotFoundError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(self.poll_interval)
+
+                if not self._acquire_parent_lock(owned_parent, deadline):
+                    return False
+
+                if not self._acquire_os_lock(owned_handle, deadline):
+                    return False
+
+                try:
+                    current = self._locked_candidate_is_current(
+                        owned_handle,
+                        opened,
+                        owned_parent,
+                    )
+                except FileNotFoundError:
+                    current = False
+                if current:
+                    try:
+                        self._parent_guard = owned_parent
+                        self.handle = owned_handle
+                        owned_handle, owned_parent = None, None
+                        return self.handle is not None
+                    except BaseException:
+                        transferred = object.__getattribute__(self, "handle")
+                        object.__setattr__(self, "handle", None)
+                        if owned_handle is None:
+                            owned_handle = transferred
+                        transferred_parent = object.__getattribute__(
+                            self,
+                            "_parent_guard",
+                        )
+                        object.__setattr__(self, "_parent_guard", None)
+                        if owned_parent is None:
+                            owned_parent = transferred_parent
+                        raise
+
+                try:
+                    self._unlock_and_close(owned_handle)
+                finally:
+                    owned_handle = None
+                    try:
+                        self._unlock_parent_and_close(owned_parent)
+                    finally:
+                        owned_parent = None
+                if time.monotonic() >= deadline:
+                    raise UnsafeFilesystemPath(
+                        "lock_identity_changed_after_acquire"
+                    )
+                time.sleep(self.poll_interval)
+        finally:
+            try:
+                if owned_handle is not None:
+                    if object.__getattribute__(self, "handle") is owned_handle:
+                        object.__setattr__(self, "handle", None)
+                    self._unlock_and_close(owned_handle)
+            finally:
+                if owned_parent is not None:
+                    if object.__getattribute__(self, "_parent_guard") is owned_parent:
+                        object.__setattr__(self, "_parent_guard", None)
+                    self._unlock_parent_and_close(owned_parent)
+
+    def release(self):
+        handle = object.__getattribute__(self, "handle")
+        parent_guard = object.__getattribute__(self, "_parent_guard")
+        object.__setattr__(self, "handle", None)
+        object.__setattr__(self, "_parent_guard", None)
+        try:
+            self._unlock_and_close(handle)
+        finally:
+            self._unlock_parent_and_close(parent_guard)
 
     def __enter__(self):
         if not self.acquire():

@@ -605,6 +605,7 @@ class TifWorkbenchWidget(QWidget):
         self._style_button(self.btn_cancel_part_roi, "danger", full_width=True)
         self._style_button(self.btn_delete_part_contour, "danger", full_width=True)
         self._style_button(self.btn_delete_part_volume, "danger", full_width=True)
+        self._style_button(self.btn_delete_imported_volume, "danger", full_width=True)
 
     def _populate_label_role_combo(self):
         current = self.label_role_combo.currentData() if self.label_role_combo.count() else "manual_truth"
@@ -1012,6 +1013,7 @@ class TifWorkbenchWidget(QWidget):
         self.local_axis_trainable_check.setText(tt("Record this export as trainable local-axis data", self.lang))
         self.btn_export_local_axis_training_manifest.setText(tt("Export confirmed Local Axis training manifest", self.lang))
         self.btn_delete_part_volume.setText(tt("Delete part volume", self.lang))
+        self.btn_delete_imported_volume.setText(tt("Delete imported volume", self.lang))
         self.btn_undo.setText(tt("Undo", self.lang))
         self.btn_redo.setText(tt("Redo", self.lang))
         self.btn_save_edit.setText(tt("Save current labels", self.lang))
@@ -2814,6 +2816,7 @@ class TifWorkbenchWidget(QWidget):
             self.btn_import_tif,
             self.btn_import_tif_slices,
             self.btn_import_amira,
+            self.btn_delete_imported_volume,
         )
         for widget in write_controls:
             if widget is not None:
@@ -3571,6 +3574,81 @@ class TifWorkbenchWidget(QWidget):
         self.log(f"{message} part_id={part_id}")
         return True
 
+    def delete_current_imported_volume(self):
+        if not self.coordinator.guard_backend_write_lock():
+            return
+        specimen_id = str(self.current_specimen_id or "").strip()
+        if not specimen_id:
+            QMessageBox.information(
+                self,
+                tt("Delete imported volume", self.lang),
+                tt("Select an imported volume before deleting it.", self.lang),
+            )
+            return
+        self.delete_imported_volume(specimen_id)
+
+    def delete_imported_volume(self, specimen_id):
+        if not self.coordinator.guard_backend_write_lock():
+            return False
+        specimen_id = str(specimen_id or "").strip()
+        if not specimen_id:
+            return False
+        specimen = self.project.get_specimen(specimen_id, default=None)
+        if specimen is None:
+            return False
+        display_name = specimen.get("display_name") or specimen.get("specimen_id") or specimen_id
+        response = QMessageBox.question(
+            self,
+            tt("Delete imported volume?", self.lang),
+            tt(
+                "Delete imported volume {0}? This removes the project copy, labels, and cropped parts. The original source TIF on disk is kept.",
+                self.lang,
+            ).format(display_name),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return False
+        try:
+            deleting_current = specimen_id == self.current_specimen_id
+            if deleting_current:
+                if not self.volume_render_controller._cancel_and_wait_volume_preview_build():
+                    QMessageBox.information(
+                        self,
+                        tt("Volume render", self.lang),
+                        tt("The 3D preview is still stopping. Wait a moment, then delete the volume again.", self.lang),
+                    )
+                    return False
+                self.release_loaded_volume_arrays()
+                self.part_mask_workflow_controller.state.preview_mask = None
+                self.volume_render_controller._clear_volume_preview_cache()
+            else:
+                self.volume_render_controller._cancel_volume_preview_build()
+            result = self.project.discard_specimen_scaffold(specimen_id, save=True)
+        except Exception as exc:
+            QMessageBox.warning(self, tt("Delete imported volume", self.lang), str(exc))
+            return False
+        if specimen_id == self.current_specimen_id:
+            self.part_mask_workflow_controller.state.preview_mask = None
+            self.current_specimen_id = ""
+            self.current_part = None
+            self.current_part_id = ""
+            self.current_reslice_id = ""
+            self.current_volume_scope = "full"
+            self.image_volume = None
+            self.label_volume = None
+            self.edit_volume = None
+            self.volume_render_controller._clear_volume_preview_cache()
+        self.refresh_project()
+        message = tt("Deleted imported volume {0}.", self.lang).format(display_name)
+        if not result.get("removed_storage"):
+            message = f"{message} Storage was already missing."
+        if result.get("storage_cleanup_error"):
+            message = f"{message} Pending-delete storage cleanup needs attention: {result.get('storage_cleanup_error')}"
+        self.training_status_label.setText(message)
+        self.log(f"{message} specimen_id={specimen_id}")
+        return True
+
     def _clip_bbox_to_shape(self, bbox, shape):
         clean = []
         for axis, pair in enumerate(bbox):
@@ -3896,20 +3974,42 @@ class TifWorkbenchWidget(QWidget):
             }
         return {"scope": "full", "specimen_id": str(payload or ""), "part_id": "", "reslice_id": ""}
 
+    def _specimen_tree_context_menu_actions(self, payload):
+        payload = dict(payload or {})
+        specimen_id = str(payload.get("specimen_id") or "")
+        part_id = str(payload.get("part_id") or "")
+        scope = str(payload.get("scope") or "")
+        if not specimen_id:
+            return []
+        actions = []
+        if scope in {"part", "part_reslices", "part_reslice"} and part_id:
+            actions.append(("delete_part", tt("Delete part volume", self.lang), specimen_id, part_id))
+        actions.append(("delete_imported", tt("Delete imported volume", self.lang), specimen_id, ""))
+        return actions
+
     def _on_specimen_tree_context_menu(self, position):
         item = self.specimen_list.itemAt(position)
         payload = self._tree_item_payload(item)
-        if payload.get("scope") not in {"part", "part_reslices", "part_reslice"}:
-            return
-        specimen_id = str(payload.get("specimen_id") or "")
-        part_id = str(payload.get("part_id") or "")
-        if not specimen_id or not part_id:
+        actions = self._specimen_tree_context_menu_actions(payload)
+        if not actions:
             return
         menu = QMenu(self)
-        delete_action = menu.addAction(tt("Delete part volume", self.lang))
-        action = menu.exec(self.specimen_list.viewport().mapToGlobal(position))
-        if action is delete_action:
+        menu.setObjectName("tifSpecimenTreeContextMenu")
+        action_map = {}
+        for key, label, specimen_id, part_id in actions:
+            qt_action = menu.addAction(label)
+            object_name = "tifDeletePartVolumeAction" if key == "delete_part" else "tifDeleteImportedVolumeAction"
+            qt_action.setObjectName(object_name)
+            action_map[qt_action] = (key, specimen_id, part_id)
+        chosen = menu.exec(self.specimen_list.viewport().mapToGlobal(position))
+        selected = action_map.get(chosen)
+        if not selected:
+            return
+        key, specimen_id, part_id = selected
+        if key == "delete_part":
             self.delete_part_volume(specimen_id, part_id)
+            return
+        self.delete_imported_volume(specimen_id)
 
     def _select_volume_tree_item(self, specimen_id="", scope="full", part_id="", reslice_id=""):
         target_specimen = str(specimen_id or "").strip()
@@ -4590,6 +4690,7 @@ class TifWorkbenchWidget(QWidget):
                 )
             )
         self.btn_delete_part_volume.setEnabled(is_editable_part_volume and self.current_part is not None)
+        self.btn_delete_imported_volume.setEnabled(bool(self.current_specimen_id))
         write_locked = self.coordinator.backend_write_lock_active()
         self._set_backend_write_locked_controls(write_locked)
         if write_locked and not self.coordinator.backend_write_lock_active(ignored_task_types=self.local_axis_controller.ignored_draft_lock_task_types()):

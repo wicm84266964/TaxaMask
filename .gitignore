@@ -25,6 +25,8 @@ anaconda3/
 .lab-agent/runtime/
 .lab-agent/cache/
 AGENTS.md
+.grok/agent-memory
+.grok/agent-memory-local
 !ANTCODE.md
 .tmp_validation/
 tmp_*/

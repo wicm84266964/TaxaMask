@@ -13,6 +13,7 @@ try:
         _runtime_log_timestamp,
         _runtime_log_value,
         _setup_runtime_logging,
+        install_qt_noise_filters,
         runtime_log_event,
         runtime_log_exception,
     )
@@ -28,6 +29,7 @@ except ImportError:
         _runtime_log_timestamp,
         _runtime_log_value,
         _setup_runtime_logging,
+        install_qt_noise_filters,
         runtime_log_event,
         runtime_log_exception,
     )
@@ -757,6 +759,7 @@ if __name__ == "__main__":
         QMessageBox.critical(None, "Error", f"{v}")
         sys.__excepthook__(t, v, tb)
     sys.excepthook = excepthook
+    install_qt_noise_filters()
     app = QApplication(sys.argv)
     for icon_path in (APP_ICON_PATH, APP_ICON_FALLBACK_PATH):
         if os.path.exists(icon_path):

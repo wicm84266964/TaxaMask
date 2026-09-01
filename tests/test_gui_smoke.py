@@ -2427,7 +2427,13 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             self.assertLessEqual(len(progress_path_label.text()), 92)
             self.assertEqual(progress_path_label.toolTip(), str(self.project_dir / long_name))
             self.assertGreaterEqual(progress.minimumWidth(), 560)
-            self.assertLessEqual(progress.maximumWidth(), 560)
+            self.assertGreater(progress.maximumWidth(), progress.minimumWidth())
+            notice = window.vlm_preannotation_progress_notice_label
+            self.assertIsNotNone(notice)
+            self.assertGreaterEqual(
+                notice.minimumHeight(),
+                notice.fontMetrics().lineSpacing() * 2,
+            )
 
             window._mark_current_vlm_image_done("done")
 
@@ -2437,6 +2443,20 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
                 window.vlm_preannotation_progress_dialog.close()
                 window.vlm_preannotation_progress_dialog.deleteLater()
                 window.vlm_preannotation_progress_dialog = None
+            window.deleteLater()
+
+    def test_prepare_progress_dialog_does_not_pin_exact_windows_geometry(self):
+        window = self._make_window()
+        dialog = None
+        try:
+            dialog = main_module.QDialog(window)
+            window._prepare_progress_dialog(dialog, width=560)
+            self.assertGreaterEqual(dialog.minimumWidth(), 560)
+            self.assertGreater(dialog.maximumWidth(), 560)
+            self.assertEqual(dialog.minimumHeight(), 0)
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
             window.deleteLater()
 
     def test_vlm_result_refreshes_current_canvas_with_project_relative_path(self):

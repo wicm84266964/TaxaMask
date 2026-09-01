@@ -2,9 +2,17 @@ import hashlib
 
 try:
     from AntSleap.ui.main_window_stage7_dependencies import *
+    from AntSleap.core.engine import (
+        inspect_locator_checkpoint_file,
+        locator_checkpoint_is_incompatible,
+    )
     from AntSleap.core.safe_io import read_bytes_bounded_in_root
 except ImportError:
     from ui.main_window_stage7_dependencies import *
+    from core.engine import (
+        inspect_locator_checkpoint_file,
+        locator_checkpoint_is_incompatible,
+    )
     from core.safe_io import read_bytes_bounded_in_root
 
 
@@ -190,20 +198,39 @@ class MainWindowModelManagementMixin:
         loc_files = glob.glob(os.path.join(self.engine.weights_dir, "locator_*.pth"))
         # Format: "20260105_1105"
         loc_timestamps = sorted([os.path.basename(f).replace("locator_", "").replace(".pth", "") for f in loc_files], reverse=True)
+        expected_scope = self._locator_expected_scope()
+        locator_info = {}
 
         if loc_timestamps:
             for ts in loc_timestamps:
-                self.combo_locator.addItem(self._build_locator_combo_label(ts, parent_model_notes), ts)
+                path = self._locator_model_path(ts)
+                info = inspect_locator_checkpoint_file(path)
+                locator_info[ts] = info
+                self.combo_locator.addItem(
+                    self._build_locator_combo_label(
+                        ts,
+                        parent_model_notes,
+                        checkpoint_info=info,
+                        expected_scope=expected_scope,
+                    ),
+                    ts,
+                )
         for item in managed["locator"]:
+            relative = item["relative_path"]
+            path = self._locator_model_path(relative)
+            info = inspect_locator_checkpoint_file(path)
+            locator_info[relative] = info
             self.combo_locator.addItem(
-                f"{item['run_id']} [verified]", item["relative_path"]
+                f"{item['run_id']} [verified]", relative
             )
         if self.combo_locator.count():
-            locator_choice = current_locator
-            if preferred_locator and self.combo_locator.findData(preferred_locator) >= 0:
-                locator_choice = preferred_locator
-            locator_index = self.combo_locator.findData(locator_choice)
-            self.combo_locator.setCurrentIndex(max(0, locator_index))
+            self._select_compatible_locator_default(
+                current_locator=current_locator,
+                preferred_locator=preferred_locator,
+                loc_timestamps=loc_timestamps,
+                locator_info=locator_info,
+                expected_scope=expected_scope,
+            )
         else:
             self.combo_locator.addItem(tr("No Locators Found", self.current_lang), "__no_locator__")
 
@@ -528,6 +555,148 @@ class MainWindowModelManagementMixin:
             raise ValueError("segmenter_engine_base_identity_mismatch")
         return dict(configured_identity)
 
+    def _locator_expected_scope(self):
+        get_scope = getattr(self.project, "get_locator_scope", None)
+        if not callable(get_scope):
+            return []
+        try:
+            return list(get_scope() or [])
+        except Exception:
+            return []
+
+    def _locator_info_is_incompatible(self, selection, locator_info, expected_scope):
+        if not selection or selection == "__no_locator__":
+            return False
+        info = locator_info.get(selection)
+        if info is None:
+            info = inspect_locator_checkpoint_file(self._locator_model_path(selection))
+            locator_info[selection] = info
+        return locator_checkpoint_is_incompatible(info, expected_scope)
+
+    def _select_compatible_locator_default(
+        self,
+        *,
+        current_locator,
+        preferred_locator,
+        loc_timestamps,
+        locator_info,
+        expected_scope,
+    ):
+        def usable(selection):
+            if not selection or self.combo_locator.findData(selection) < 0:
+                return False
+            return not self._locator_info_is_incompatible(
+                selection, locator_info, expected_scope
+            )
+
+        locator_choice = None
+        if usable(preferred_locator):
+            locator_choice = preferred_locator
+        elif usable(current_locator):
+            locator_choice = current_locator
+        else:
+            for timestamp in loc_timestamps:
+                if usable(timestamp):
+                    locator_choice = timestamp
+                    break
+            if locator_choice is None:
+                for index in range(self.combo_locator.count()):
+                    data = self.combo_locator.itemData(index)
+                    if usable(data):
+                        locator_choice = data
+                        break
+
+        skipped_latest = loc_timestamps[0] if loc_timestamps else None
+        skipped_incompatible = bool(
+            skipped_latest
+            and locator_choice != skipped_latest
+            and self._locator_info_is_incompatible(
+                skipped_latest, locator_info, expected_scope
+            )
+        )
+
+        if locator_choice:
+            self.combo_locator.setCurrentIndex(
+                self.combo_locator.findData(locator_choice)
+            )
+        else:
+            untrained_index = self.combo_locator.findData("__no_locator__")
+            if untrained_index < 0:
+                self.combo_locator.insertItem(
+                    0,
+                    tr("Untrained locator (no matching weights)", self.current_lang),
+                    "__no_locator__",
+                )
+                untrained_index = 0
+            self.combo_locator.setCurrentIndex(untrained_index)
+
+        if skipped_incompatible:
+            self._log_skipped_incompatible_locator(
+                skipped_latest,
+                locator_info.get(skipped_latest) or {},
+                expected_scope,
+                selected=locator_choice,
+            )
+
+    def _log_skipped_incompatible_locator(
+        self, timestamp, info, expected_scope, selected
+    ):
+        expected = [
+            part.strip()
+            for part in expected_scope
+            if isinstance(part, str) and part.strip()
+        ]
+        expected_text = ", ".join(expected) or "(empty)"
+        observed = info.get("num_classes")
+        if observed is None:
+            observed_text = ", ".join(info.get("locator_scope") or []) or "unknown"
+        else:
+            try:
+                observed_text = str(int(observed))
+            except (TypeError, ValueError):
+                observed_text = str(observed)
+        if selected and selected != "__no_locator__":
+            self.log(
+                tr(
+                    "Skipped locator {0}: it was trained for {1} part(s), but this project locator scope is {2} ({3} parts). Selected matching locator {4} instead.",
+                    self.current_lang,
+                ).format(
+                    timestamp,
+                    observed_text,
+                    expected_text,
+                    len(expected),
+                    selected,
+                )
+            )
+            return
+        self.log(
+            tr(
+                "Skipped locator {0}: it was trained for {1} part(s), but this project locator scope is {2} ({3} parts). No matching locator was found, so this project starts with an untrained locator. Train a matching model, or manually select a locator trained for these parts.",
+                self.current_lang,
+            ).format(timestamp, observed_text, expected_text, len(expected))
+        )
+
+    def _humanize_locator_load_failure(self, reason):
+        text = str(reason or "")
+        expected_scope = self._locator_expected_scope()
+        expected_text = ", ".join(expected_scope) or "(empty)"
+        expected_n = len(expected_scope)
+        if "locator_checkpoint_num_classes_mismatch" in text:
+            observed = ""
+            for part in text.split(":"):
+                if part.startswith("observed="):
+                    observed = part.split("=", 1)[-1]
+            return tr(
+                "This locator was trained for {0} part(s), but the current project locator scope has {1} part(s) ({2}). Choose a matching locator or train a new one.",
+                self.current_lang,
+            ).format(observed or "?", expected_n, expected_text)
+        if "locator_checkpoint_scope_mismatch" in text:
+            return tr(
+                "This locator's trained part order does not match the current project locator scope ({0}). Choose a matching locator or train a new one.",
+                self.current_lang,
+            ).format(expected_text)
+        return text
+
     def _selected_locator_timestamp(self):
         item_data = self.combo_locator.currentData() if self.combo_locator.count() else None
         if item_data in (None, "", "__no_locator__"):
@@ -551,7 +720,13 @@ class MainWindowModelManagementMixin:
             return f"sam_decoder_lora_{ts}.pth"
         return ""
 
-    def _build_locator_combo_label(self, timestamp, parent_model_notes=None):
+    def _build_locator_combo_label(
+        self,
+        timestamp,
+        parent_model_notes=None,
+        checkpoint_info=None,
+        expected_scope=None,
+    ):
         ts = str(timestamp or "").strip()
         if not ts:
             return ts
@@ -560,53 +735,45 @@ class MainWindowModelManagementMixin:
         note = notes.get(filename, "")
 
         path = self._locator_model_path(ts)
-        if not path or not os.path.exists(path):
-            return format_parent_model_display_name(filename or ts, note)
+        if checkpoint_info is None:
+            if not path or not os.path.exists(path):
+                return format_parent_model_display_name(filename or ts, note)
+            checkpoint_info = inspect_locator_checkpoint_file(path)
+        if not checkpoint_info or not checkpoint_info.get("readable"):
+            return format_parent_model_display_name(filename, note)
 
-        state_label = ""
-        try:
-            saved_state = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception:
-            pass
-        else:
-            checkpoint_meta = {}
-            if isinstance(saved_state, dict) and isinstance(saved_state.get("meta"), dict):
-                checkpoint_meta = saved_state.get("meta") or {}
+        if expected_scope is None:
+            expected_scope = self._locator_expected_scope()
 
-            saved_resolution = checkpoint_meta.get("locator_size")
-            legacy_resolution = checkpoint_meta.get("locator_resolution")
-            if saved_resolution is None and legacy_resolution is not None:
+        details = []
+        if locator_checkpoint_is_incompatible(checkpoint_info, expected_scope):
+            observed = checkpoint_info.get("num_classes")
+            if observed is not None:
                 try:
-                    legacy_side = max(1, int(legacy_resolution))
-                except Exception:
-                    legacy_side = 512
-                saved_resolution = [legacy_side, legacy_side]
-
-            size_pair = None
-            if saved_resolution is not None:
-                try:
-                    size_pair = (max(1, int(saved_resolution[0])), max(1, int(saved_resolution[1])))
-                except Exception:
-                    size_pair = None
-
-            checkpoint_schema = str(saved_state.get("schema_version") or "") if isinstance(saved_state, dict) else ""
-            saved_scope = checkpoint_meta.get("locator_scope")
-            scope_is_verifiable = (
-                checkpoint_schema == "taxamask_locator_checkpoint_v2"
-                and isinstance(saved_scope, (list, tuple))
-                and bool(saved_scope)
-                and all(isinstance(part, str) and part.strip() for part in saved_scope)
-                and len({part.strip() for part in saved_scope}) == len(saved_scope)
-            )
-            if scope_is_verifiable and size_pair is not None:
-                state_label = f"exact {format_size_pair(size_pair)}"
-            elif scope_is_verifiable:
-                state_label = "exact scope; assumed 512x512"
-            elif size_pair is not None:
-                state_label = f"legacy scope; resolution {format_size_pair(size_pair)}"
+                    observed_n = int(observed)
+                except (TypeError, ValueError):
+                    observed_n = None
+                if observed_n == 1:
+                    details.append("mismatch 1 class")
+                elif observed_n is not None:
+                    details.append(f"mismatch {observed_n} classes")
+                else:
+                    details.append("mismatch scope")
             else:
-                state_label = "legacy scope; assumed 512x512"
-        return format_parent_model_display_name(filename, note, details=state_label)
+                details.append("mismatch scope")
+        size_pair = checkpoint_info.get("locator_size")
+        scope_is_verifiable = bool(checkpoint_info.get("scope_is_verifiable"))
+        if scope_is_verifiable and size_pair is not None:
+            details.append(f"exact {format_size_pair(size_pair)}")
+        elif scope_is_verifiable:
+            details.append("exact scope; assumed 512x512")
+        elif size_pair is not None:
+            details.append(f"legacy scope; resolution {format_size_pair(size_pair)}")
+        else:
+            details.append("legacy scope; assumed 512x512")
+        return format_parent_model_display_name(
+            filename, note, details="; ".join(details)
+        )
 
     def _build_segmenter_combo_label(self, timestamp, parent_model_notes=None):
         ts = str(timestamp or "").strip()
@@ -857,6 +1024,33 @@ class MainWindowModelManagementMixin:
             }
             if checkpoint_payload is not None:
                 load_kwargs["checkpoint_payload"] = checkpoint_payload
+            inspect_path = checkpoint_path or self._locator_model_path(ts)
+            checkpoint_info = inspect_locator_checkpoint_file(inspect_path)
+            expected_scope = list(load_kwargs.get("expected_locator_scope") or [])
+            if locator_checkpoint_is_incompatible(checkpoint_info, expected_scope):
+                observed = checkpoint_info.get("num_classes")
+                expected_names = [
+                    part.strip()
+                    for part in expected_scope
+                    if isinstance(part, str) and part.strip()
+                ]
+                expected_n = len(expected_names)
+                saved_scope = list(checkpoint_info.get("locator_scope") or [])
+                observed_n = None
+                if observed is not None:
+                    try:
+                        observed_n = int(observed)
+                    except (TypeError, ValueError):
+                        observed_n = None
+                if observed_n is not None and observed_n != expected_n:
+                    raise ValueError(
+                        "locator_checkpoint_num_classes_mismatch:"
+                        f"expected={expected_n}:observed={observed_n}"
+                    )
+                raise ValueError(
+                    "locator_checkpoint_scope_mismatch:"
+                    f"expected={expected_names!r}:observed={saved_scope!r}"
+                )
             self.engine.load_locator(ts, **load_kwargs)
             if getattr(self.engine, "locator", None) is None:
                 raise RuntimeError("locator_checkpoint_load_left_runtime_unloaded")
@@ -899,7 +1093,9 @@ class MainWindowModelManagementMixin:
     def _report_locator_load_failure(self, selection, exc, *, log_exception=True):
         self._clear_locator_runtime_after_failure()
         selection_text = str(selection or "base")
-        reason = str(exc or "locator_checkpoint_load_failed")
+        reason = self._humanize_locator_load_failure(
+            str(exc or "locator_checkpoint_load_failed")
+        )
         self.locator_load_failure = {
             "selection": selection_text,
             "reason": reason,

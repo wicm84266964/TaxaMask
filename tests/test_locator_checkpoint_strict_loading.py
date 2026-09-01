@@ -13,6 +13,8 @@ from AntSleap.core.engine import (
     LOCATOR_ARCHITECTURE_ID,
     LOCATOR_CHECKPOINT_SCHEMA_VERSION,
     AntEngine,
+    inspect_locator_checkpoint_payload,
+    locator_checkpoint_is_incompatible,
 )
 from AntSleap.models.networks import TraitRegressor
 
@@ -272,6 +274,43 @@ class LocatorCheckpointStrictLoadingTests(unittest.TestCase):
             )
 
         self._assert_failed_state_cleared(engine)
+
+    def test_inspect_reads_num_classes_from_metadata_and_output_head(self):
+        payload = self._payload(num_classes=1, locator_scope=["Head"])
+        info = inspect_locator_checkpoint_payload(payload)
+        self.assertTrue(info["readable"])
+        self.assertEqual(info["num_classes"], 1)
+        self.assertEqual(info["locator_scope"], ["Head"])
+        self.assertTrue(info["scope_is_verifiable"])
+
+        legacy_head = self._payload(num_classes=3, metadata=False)["state_dict"]
+        legacy_info = inspect_locator_checkpoint_payload(legacy_head)
+        self.assertTrue(legacy_info["readable"])
+        self.assertEqual(legacy_info["num_classes"], 3)
+        self.assertEqual(legacy_info["locator_scope"], [])
+        self.assertFalse(legacy_info["scope_is_verifiable"])
+
+    def test_one_class_checkpoint_is_incompatible_with_three_part_ant_scope(self):
+        info = inspect_locator_checkpoint_payload(
+            self._payload(num_classes=1, locator_scope=["Head"])
+        )
+        self.assertTrue(
+            locator_checkpoint_is_incompatible(
+                info,
+                ["Head", "Mesosoma", "Gaster"],
+            )
+        )
+        self.assertFalse(
+            locator_checkpoint_is_incompatible(info, ["Head"])
+        )
+
+    def test_unreadable_checkpoint_is_not_treated_as_incompatible(self):
+        self.assertFalse(
+            locator_checkpoint_is_incompatible(
+                {"readable": False},
+                ["Head", "Mesosoma", "Gaster"],
+            )
+        )
 
 
 if __name__ == "__main__":

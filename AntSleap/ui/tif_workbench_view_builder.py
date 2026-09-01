@@ -409,6 +409,9 @@ class TifWorkbenchViewBuilder:
         self.btn_import_amira = QPushButton("Import AMIRA directory")
         self.btn_import_amira.setObjectName("tifImportAmiraButton")
         self.btn_import_amira.clicked.connect(self.import_amira_directory_dialog)
+        self.btn_delete_imported_volume = QPushButton("Delete imported volume")
+        self.btn_delete_imported_volume.setObjectName("tifDeleteImportedVolumeButton")
+        self.btn_delete_imported_volume.clicked.connect(self.delete_current_imported_volume)
         self.part_bbox_edit = QLineEdit()
         self.part_bbox_edit.setObjectName("tifPartBboxEdit")
         self.part_bbox_edit.setPlaceholderText("z0,z1,y0,y1,x0,x1")
@@ -800,6 +803,7 @@ class TifWorkbenchViewBuilder:
         import_button_grid.addWidget(self.btn_import_tif, 0, 0)
         import_button_grid.addWidget(self.btn_import_tif_slices, 1, 0)
         import_button_grid.addWidget(self.btn_import_amira, 2, 0)
+        import_button_grid.addWidget(self.btn_delete_imported_volume, 3, 0)
         import_layout.addLayout(import_button_grid)
         self.import_section = import_section
         self.display_task_layout.addWidget(import_section)

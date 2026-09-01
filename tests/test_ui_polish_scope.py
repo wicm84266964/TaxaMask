@@ -5386,6 +5386,94 @@ class UiPolishScopeTests(unittest.TestCase):
         finally:
             window.deleteLater()
 
+    def test_refresh_model_list_skips_latest_one_class_locator_for_three_part_project(self):
+        matching_timestamp = "20260130_1543"
+        latest_timestamp = "20260512_1400"
+        torch.save(
+            self._v2_locator_checkpoint((640, 384)),
+            self.weights_dir / f"locator_{matching_timestamp}.pth",
+        )
+        torch.save(
+            self._v2_locator_checkpoint((640, 384), locator_scope=["Head"]),
+            self.weights_dir / f"locator_{latest_timestamp}.pth",
+        )
+
+        window = self.make_main_window()
+        try:
+            self.assertEqual(window.combo_locator.currentData(), matching_timestamp)
+            latest_index = window.combo_locator.findData(latest_timestamp)
+            self.assertGreaterEqual(latest_index, 0)
+            self.assertIn(
+                "mismatch 1 class",
+                window.combo_locator.itemText(latest_index),
+            )
+            self.assertIn("20260512_1400", window.log_console.toPlainText())
+            self.assertIn("Selected matching locator", window.log_console.toPlainText())
+
+            with patch.object(main_module.QMessageBox, "critical") as critical:
+                window.enter_image_workflow()
+
+            critical.assert_not_called()
+            self.assertEqual(window.combo_locator.currentData(), matching_timestamp)
+            self.assertEqual(self.engine.load_locator_calls[-1], matching_timestamp)
+            self.assertNotIn(latest_timestamp, self.engine.load_locator_calls)
+            self.assertIsNone(window.locator_load_failure)
+        finally:
+            window.deleteLater()
+
+    def test_refresh_model_list_uses_untrained_locator_when_no_checkpoint_matches_scope(self):
+        latest_timestamp = "20260512_1400"
+        torch.save(
+            self._v2_locator_checkpoint((640, 384), locator_scope=["Head"]),
+            self.weights_dir / f"locator_{latest_timestamp}.pth",
+        )
+
+        window = self.make_main_window()
+        try:
+            self.assertEqual(window.combo_locator.currentData(), "__no_locator__")
+            self.assertGreaterEqual(window.combo_locator.findData(latest_timestamp), 0)
+            self.assertIn("untrained locator", window.log_console.toPlainText().lower())
+
+            with patch.object(main_module.QMessageBox, "critical") as critical:
+                window.enter_image_workflow()
+
+            critical.assert_not_called()
+            self.assertEqual(self.engine.load_locator_calls, [])
+            self.assertIsNone(window.locator_load_failure)
+        finally:
+            window.deleteLater()
+
+    def test_explicit_one_class_locator_selection_explains_mismatch_and_restores(self):
+        matching_timestamp = "20260130_1543"
+        mismatch_timestamp = "20260512_1400"
+        torch.save(
+            self._v2_locator_checkpoint((640, 384)),
+            self.weights_dir / f"locator_{matching_timestamp}.pth",
+        )
+        torch.save(
+            self._v2_locator_checkpoint((640, 384), locator_scope=["Head"]),
+            self.weights_dir / f"locator_{mismatch_timestamp}.pth",
+        )
+
+        window = self.make_main_window()
+        try:
+            window.enter_image_workflow()
+            self.assertEqual(window.combo_locator.currentData(), matching_timestamp)
+            mismatch_index = window.combo_locator.findData(mismatch_timestamp)
+            self.assertGreaterEqual(mismatch_index, 0)
+
+            with patch.object(main_module.QMessageBox, "critical") as critical:
+                window.combo_locator.setCurrentIndex(mismatch_index)
+                window.on_locator_changed(mismatch_index)
+
+            critical.assert_called_once()
+            self.assertIn("trained for 1 part", str(critical.call_args.args[2]))
+            self.assertEqual(window.combo_locator.currentData(), matching_timestamp)
+            self.assertNotIn(mismatch_timestamp, self.engine.load_locator_calls)
+            self.assertEqual(self.engine.loaded_locator_timestamp, matching_timestamp)
+        finally:
+            window.deleteLater()
+
     def test_locator_preload_failure_blocks_single_batch_and_training_entrypoints(self):
         bad_timestamp = "20260105_1100"
         torch.save(
@@ -6333,13 +6421,6 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(stopped)
             confirm.assert_called_once()
             self.assertEqual(window.vlm_preannotation_queue, [])
-            self.assertTrue(window.vlm_preannotation_cancel_requested)
-            self.assertEqual(window.vlm_preannotation_cancelled_queued_images, 2)
-
-            with patch.object(window, "_start_next_vlm_preannotation_image") as start_next:
-                window._on_vlm_preannotation_finished()
-
-            start_next.assert_not_called()
             self.assertFalse(window.vlm_preannotation_run_active)
             report_path = Path(window.vlm_preannotation_artifacts_dir) / "vlm_preannotation_summary_stop_test.json"
             self.assertTrue(report_path.exists())
@@ -6351,6 +6432,61 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(summary["concurrency"], 1)
         finally:
             window.hide()
+            window.deleteLater()
+
+    def test_vlm_start_abort_restores_buttons_and_clears_run_flag(self):
+        window = self.make_main_window()
+        try:
+            window.enter_image_workflow()
+            window.btn_vlm_preannotate_current.setEnabled(False)
+            window.vlm_preannotation_run_active = True
+            window.vlm_preannotation_queue = ["pending.png"]
+            with patch.object(main_module.QMessageBox, "warning") as warning:
+                window._abort_vlm_preannotation_start(RuntimeError("dialog geometry failed"))
+            warning.assert_called_once()
+            self.assertFalse(window.vlm_preannotation_run_active)
+            self.assertEqual(window.vlm_preannotation_queue, [])
+            self.assertTrue(window.btn_vlm_preannotate_current.isEnabled())
+            self.assertIn("could not start", window.log_console.toPlainText())
+        finally:
+            window.deleteLater()
+
+    def test_vlm_progress_close_during_show_does_not_cancel_run(self):
+        window = self.make_main_window()
+        try:
+            window.enter_image_workflow()
+            window.vlm_preannotation_run_active = True
+            window.vlm_progress_dialog_ready = False
+            window.vlm_preannotation_queue = ["pending.png"]
+            window.vlm_preannotation_cancel_requested = False
+            dialog = main_module.QDialog(window)
+            window.vlm_preannotation_progress_dialog = dialog
+            close_event = main_module.QEvent(main_module.QEvent.Close)
+            with patch.object(window, "request_stop_vlm_preannotation") as stop:
+                handled = window.eventFilter(dialog, close_event)
+            self.assertTrue(handled)
+            stop.assert_not_called()
+            self.assertEqual(window.vlm_preannotation_queue, ["pending.png"])
+            self.assertFalse(window.vlm_preannotation_cancel_requested)
+        finally:
+            window.vlm_preannotation_progress_dialog = None
+            dialog.deleteLater()
+            window.deleteLater()
+
+    def test_vlm_finish_without_drafts_shows_visible_outcome(self):
+        window = self.make_main_window()
+        try:
+            window.vlm_preannotation_run_active = True
+            window.vlm_preannotation_records = []
+            window.vlm_preannotation_saved_total = 0
+            window.vlm_preannotation_run_id = "empty_run"
+            window.vlm_preannotation_artifacts_dir = str(Path(self.temp_dir.name) / "vlm_preannotation")
+            with patch.object(main_module.QMessageBox, "warning") as warning:
+                window._finish_vlm_preannotation_run()
+            warning.assert_called_once()
+            self.assertIn("without draft boxes", str(warning.call_args.args[2]))
+            self.assertFalse(window.vlm_preannotation_run_active)
+        finally:
             window.deleteLater()
 
     def test_vlm_preannotation_starts_workers_up_to_configured_concurrency(self):

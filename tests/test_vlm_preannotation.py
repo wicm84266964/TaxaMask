@@ -11,8 +11,10 @@ from PIL import Image
 
 from AntSleap.core.project import ProjectManager
 from AntSleap.core.vlm_preannotation import (
+    _json_schema,
     adaptive_vlm_grid_size,
     build_vlm_preannotation_prompt,
+    call_vlm_preannotation_api,
     default_vlm_prompt_profile,
     parse_vlm_response,
     resolve_part_name,
@@ -951,6 +953,71 @@ class VlmPreannotationTests(unittest.TestCase):
         self.assertEqual(manager.project_data["labels"][first_image]["descriptions"]["Eye"], "Auto-Annotated")
         self.assertEqual(manager.project_data["labels"][first_image]["auto_box_meta"]["Head"]["review_status"], "confirmed")
         self.assertEqual(manager.project_data["labels"][second_image]["auto_box_meta"]["Mesosoma"]["review_status"], "confirmed")
+
+    def test_json_schema_meets_openai_strict_additionalproperties_rule(self):
+        schema = _json_schema()
+        items = schema["properties"]["detections"]["items"]
+        self.assertIs(schema["additionalProperties"], False)
+        self.assertIs(items["additionalProperties"], False)
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(set(items["required"]), set(items["properties"]))
+
+    def test_chat_completions_retries_without_schema_after_additionalproperties_400(self):
+        image = Image.new("RGB", (32, 32), color=(20, 20, 20))
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "schema_version": "taxamask-vlm-first-mile-v1",
+                                "detections": [
+                                    {
+                                        "part": "Head",
+                                        "bbox_grid_xyxy": [1, 1, 4, 3],
+                                        "confidence": 0.9,
+                                        "reason": "ok",
+                                    }
+                                ],
+                            }
+                        )
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        first = unittest.mock.Mock(status_code=400)
+        first.text = (
+            '{"error":{"message":"Invalid schema for response_format '
+            "'taxamask_vlm_first_mile': In context=(), 'additionalProperties' "
+            'is required to be supplied and to be false.","type":"invalid_request_error"}}'
+        )
+        second = unittest.mock.Mock(status_code=200, text=json.dumps(payload))
+        second.json.return_value = payload
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "ant.png"
+            image.save(image_path)
+            with patch(
+                "AntSleap.core.vlm_preannotation.requests.post",
+                side_effect=[first, second],
+            ) as post:
+                text, reason = call_vlm_preannotation_api(
+                    {
+                        "api_key": "k",
+                        "base_url": "https://example.test/v1",
+                        "model": "gpt-test",
+                        "api_protocol": "chat_completions",
+                    },
+                    str(image_path),
+                    "prompt",
+                )
+        self.assertIn("detections", text)
+        self.assertEqual(reason, "stop")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(
+            post.call_args_list[1].kwargs["json"].get("response_format"),
+            {"type": "json_object"},
+        )
 
 
 if __name__ == "__main__":

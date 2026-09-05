@@ -47,6 +47,8 @@ screener_configs/api_runtime_settings.json
 *token*
 *api_key*
 *apikey*
+!vendor/ant-code/src/credentials/
+!vendor/ant-code/src/credentials/**
 
 # Local project files and databases
 *.db

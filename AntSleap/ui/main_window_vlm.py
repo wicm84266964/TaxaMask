@@ -821,12 +821,17 @@ class MainWindowVlmMixin:
                     path_widget.hide()
             if bar_widget is not None:
                 bar_widget.setValue(percent)
+            notice_widget = getattr(self, "vlm_preannotation_progress_notice_label", None)
+            if notice_widget is not None:
+                self._fit_wrapped_dialog_label(notice_widget, 560 - 36, min_lines=2)
 
     def _fit_wrapped_dialog_label(self, label, content_width, min_lines=1):
         if label is None:
             return
         label.setWordWrap(True)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        if hasattr(label, "ensurePolished"):
+            label.ensurePolished()
         width = max(1, int(content_width))
         needed = int(label.heightForWidth(width) or 0)
         if needed <= 0:
@@ -890,6 +895,10 @@ class MainWindowVlmMixin:
         self.vlm_preannotation_stop_button = stop_button
         progress.show()
         progress.adjustSize()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        self._fit_wrapped_dialog_label(notice_label, content_width, min_lines=2)
         self._center_progress_dialog(progress)
 
     def _advance_vlm_progress(self, step_name, image_path=None):

@@ -52,6 +52,17 @@ class MainWindowVlmMixin:
             "image_detail": current_data("combo_mllm_image_detail"),
         }
 
+    def _absolute_vlm_image_path(self, image_path):
+        to_absolute = getattr(self.project, "_to_absolute", None) or getattr(self.project, "to_absolute", None)
+        try:
+            absolute = to_absolute(image_path) if callable(to_absolute) else os.path.abspath(str(image_path or ""))
+        except Exception:
+            absolute = os.path.abspath(str(image_path or ""))
+        absolute = str(absolute or "").strip()
+        if absolute and os.path.isfile(absolute):
+            return os.path.abspath(absolute)
+        return ""
+
     def _vlm_preannotation_artifacts_dir(self):
         project_path = getattr(self.project, "current_project_path", "") or ""
         if project_path:
@@ -240,6 +251,19 @@ class MainWindowVlmMixin:
         if not image_paths:
             QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), tr("Please select an image first.", self.current_lang))
             return
+        resolved_paths = []
+        for path in image_paths:
+            absolute = self._absolute_vlm_image_path(path)
+            if absolute:
+                resolved_paths.append(absolute)
+        if not resolved_paths:
+            QMessageBox.warning(
+                self,
+                tr("VLM Pre-Annotate", self.current_lang),
+                tr("Could not find the selected image file on disk.", self.current_lang),
+            )
+            return
+        image_paths = resolved_paths
         vlm_concurrency = self._current_vlm_concurrency()
         concurrency_note = "\n\n" + tr(
             "VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.",
@@ -292,47 +316,80 @@ class MainWindowVlmMixin:
                 self.open_pdf_multimodal_api_settings()
             return
 
-        self.vlm_preannotation_api_config = dict(api_config)
+        self._set_vlm_preannotation_buttons_enabled(False)
+        try:
+            self.vlm_preannotation_api_config = dict(api_config)
+            self.vlm_preannotation_saved_total = 0
+            self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
+            self.vlm_preannotation_project_context = self._capture_project_task_context()
+            self.vlm_preannotation_records = []
+            self.vlm_preannotation_queue = list(image_paths)
+            self.vlm_preannotation_threads = []
+            self.vlm_preannotation_run_active = True
+            self.vlm_progress_dialog_ready = False
+            self.vlm_preannotation_cancel_requested = False
+            self.vlm_preannotation_cancelled_queued_images = 0
+            self.vlm_preannotation_concurrency = vlm_concurrency
+            self.vlm_preannotation_total_steps = max(1, len(image_paths) * 6)
+            self.vlm_preannotation_completed_steps = 0
+            self.vlm_preannotation_total_images = len(image_paths)
+            self.vlm_preannotation_completed_images = 0
+            self.vlm_preannotation_current_image = ""
+            self.vlm_preannotation_active_images = {}
+            self.vlm_preannotation_image_step_counts = {}
+            self.vlm_preannotation_completed_image_keys = set()
+            self.vlm_preannotation_target_parts = list(target_parts)
+            self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
+            self.vlm_preannotation_api_config = dict(api_config)
+            self.vlm_preannotation_prompt_profile = self._current_vlm_prompt_profile()
+            runtime_log_event(
+                "vlm_batch_begin",
+                project=getattr(self.project, "current_project_path", ""),
+                image_count=len(image_paths),
+                target_count=len(target_parts),
+                concurrency=vlm_concurrency,
+                scope=processing_scope,
+                run_id=self.vlm_preannotation_run_id,
+                artifacts_dir=self.vlm_preannotation_artifacts_dir,
+            )
+            self._create_vlm_progress_dialog()
+            self._set_vlm_progress_ui(0, "start")
+            self.log(tr("VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.", self.current_lang).format(self.vlm_preannotation_concurrency))
+            self._start_vlm_preannotation_workers()
+            self.vlm_progress_dialog_ready = True
+        except Exception as exc:
+            runtime_log_exception("vlm_preannotation_start_failed", *sys.exc_info())
+            self._abort_vlm_preannotation_start(exc)
+
+    def _set_vlm_preannotation_buttons_enabled(self, enabled):
         for button_name in ("btn_vlm_preannotate_current", "btn_vlm_preannotate_batch", "btn_vlm_preannotate"):
             button = getattr(self, button_name, None)
             if button is not None:
-                button.setEnabled(False)
-        self.vlm_preannotation_saved_total = 0
-        self.vlm_preannotation_run_id = time.strftime("%Y%m%d_%H%M%S")
-        self.vlm_preannotation_project_context = self._capture_project_task_context()
-        self.vlm_preannotation_records = []
-        self.vlm_preannotation_queue = list(image_paths)
+                button.setEnabled(bool(enabled))
+
+    def _abort_vlm_preannotation_start(self, exc):
+        self.vlm_preannotation_run_active = False
+        self.vlm_progress_dialog_ready = False
+        self.vlm_preannotation_queue = []
         self.vlm_preannotation_threads = []
-        self.vlm_preannotation_run_active = True
-        self.vlm_preannotation_cancel_requested = False
-        self.vlm_preannotation_cancelled_queued_images = 0
-        self.vlm_preannotation_concurrency = vlm_concurrency
-        self.vlm_preannotation_total_steps = max(1, len(image_paths) * 6)
-        self.vlm_preannotation_completed_steps = 0
-        self.vlm_preannotation_total_images = len(image_paths)
-        self.vlm_preannotation_completed_images = 0
-        self.vlm_preannotation_current_image = ""
-        self.vlm_preannotation_active_images = {}
-        self.vlm_preannotation_image_step_counts = {}
-        self.vlm_preannotation_completed_image_keys = set()
-        self.vlm_preannotation_target_parts = list(target_parts)
-        self.vlm_preannotation_artifacts_dir = self._vlm_preannotation_artifacts_dir()
-        self.vlm_preannotation_api_config = dict(api_config)
-        self.vlm_preannotation_prompt_profile = self._current_vlm_prompt_profile()
-        runtime_log_event(
-            "vlm_batch_begin",
-            project=getattr(self.project, "current_project_path", ""),
-            image_count=len(image_paths),
-            target_count=len(target_parts),
-            concurrency=vlm_concurrency,
-            scope=processing_scope,
-            run_id=self.vlm_preannotation_run_id,
-            artifacts_dir=self.vlm_preannotation_artifacts_dir,
-        )
-        self._create_vlm_progress_dialog()
-        self._set_vlm_progress_ui(0, "start")
-        self.log(tr("VLM API concurrency: {0}. Increase this only if your provider allows parallel requests.", self.current_lang).format(self.vlm_preannotation_concurrency))
-        self._start_vlm_preannotation_workers()
+        self.vlm_preannotation_thread = None
+        self._set_vlm_preannotation_buttons_enabled(True)
+        progress = getattr(self, "vlm_preannotation_progress_dialog", None)
+        if progress is not None:
+            try:
+                progress.close()
+            except Exception:
+                pass
+            self.vlm_preannotation_progress_dialog = None
+        message = tr(
+            "VLM preannotation could not start: {0}",
+            self.current_lang,
+        ).format(exc)
+        try:
+            self.log(message)
+        except Exception:
+            pass
+        QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), message)
 
     def request_stop_vlm_preannotation(self, confirm=True):
         if not getattr(self, "vlm_preannotation_run_active", False):
@@ -375,6 +432,8 @@ class MainWindowVlmMixin:
             ),
             "cancelled",
         )
+        if not self._active_vlm_preannotation_threads():
+            self._finish_vlm_preannotation_run()
         return True
 
     def _active_vlm_preannotation_threads(self):
@@ -393,6 +452,8 @@ class MainWindowVlmMixin:
         if not getattr(self, "vlm_preannotation_run_active", False):
             return
         if getattr(self, "vlm_preannotation_cancel_requested", False):
+            if not self._active_vlm_preannotation_threads():
+                self._finish_vlm_preannotation_run()
             return
         active = self._active_vlm_preannotation_threads()
         limit = max(1, min(8, int(getattr(self, "vlm_preannotation_concurrency", 1) or 1)))
@@ -539,8 +600,10 @@ class MainWindowVlmMixin:
         if hasattr(self, "canvas"):
             has_loaded_pixmap = bool(self.canvas.original_pixmap and not self.canvas.original_pixmap.isNull())
             if not has_loaded_pixmap:
-                self.canvas.load_image(current_path)
-                self.on_enhancement_changed()
+                load_path = self._absolute_vlm_image_path(current_path) or current_path
+                if load_path and os.path.isfile(str(load_path)):
+                    self.canvas.load_image(str(load_path))
+                    self.on_enhancement_changed()
             self.canvas.set_polygons(self.project.get_labels(current_path))
             self._refresh_current_canvas_boxes()
             self.canvas.update()
@@ -745,17 +808,38 @@ class MainWindowVlmMixin:
             bar_widget = getattr(self, "vlm_preannotation_progress_bar", None)
             if label_widget is not None:
                 label_widget.setText(label)
+                self._fit_wrapped_dialog_label(label_widget, 560 - 36)
             if path_widget is not None:
                 if current_image:
                     path_widget.setText(self._short_progress_path(current_image, limit=92))
                     path_widget.setToolTip(current_image)
                     path_widget.show()
+                    self._fit_wrapped_dialog_label(path_widget, 560 - 36)
                 else:
                     path_widget.setText("")
                     path_widget.setToolTip("")
                     path_widget.hide()
             if bar_widget is not None:
                 bar_widget.setValue(percent)
+            notice_widget = getattr(self, "vlm_preannotation_progress_notice_label", None)
+            if notice_widget is not None:
+                self._fit_wrapped_dialog_label(notice_widget, 560 - 36, min_lines=2)
+
+    def _fit_wrapped_dialog_label(self, label, content_width, min_lines=1):
+        if label is None:
+            return
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        if hasattr(label, "ensurePolished"):
+            label.ensurePolished()
+        width = max(1, int(content_width))
+        needed = int(label.heightForWidth(width) or 0)
+        if needed <= 0:
+            metrics = label.fontMetrics()
+            needed = metrics.boundingRect(0, 0, width, 4000, Qt.TextWordWrap, label.text() or "").height()
+        line = max(1, label.fontMetrics().lineSpacing())
+        min_lines = max(1, int(min_lines or 1))
+        label.setMinimumHeight(max(needed, line * min_lines) + 4)
 
     def _create_vlm_progress_dialog(self):
         progress = QDialog(self)
@@ -765,10 +849,10 @@ class MainWindowVlmMixin:
         layout = QVBoxLayout(progress)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
+        content_width = 560 - 36
         title_label = QLabel(tr("VLM Pre-Annotation Progress", self.current_lang))
         title_label.setWordWrap(True)
-        title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        title_label.setMinimumHeight(title_label.fontMetrics().lineSpacing() + 6)
+        self._fit_wrapped_dialog_label(title_label, content_width)
         notice_label = QLabel(
             tr(
                 "Active API request(s) may already have been sent, but no more queued images will be processed. This helps avoid unintended large API bills.",
@@ -776,12 +860,11 @@ class MainWindowVlmMixin:
             )
         )
         notice_label.setWordWrap(True)
-        notice_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        notice_label.setMinimumHeight(notice_label.fontMetrics().lineSpacing() * 2 + 8)
         notice_label.setStyleSheet("color: #9CA3AF;")
+        self._fit_wrapped_dialog_label(notice_label, content_width, min_lines=2)
         label = QLabel("")
         label.setWordWrap(True)
-        label.setMinimumHeight(36)
+        self._fit_wrapped_dialog_label(label, content_width)
         path_label = QLabel("")
         path_label.setWordWrap(True)
         path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -811,6 +894,12 @@ class MainWindowVlmMixin:
         self.vlm_preannotation_progress_bar = bar
         self.vlm_preannotation_stop_button = stop_button
         progress.show()
+        progress.adjustSize()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        self._fit_wrapped_dialog_label(notice_label, content_width, min_lines=2)
+        self._center_progress_dialog(progress)
 
     def _advance_vlm_progress(self, step_name, image_path=None):
         total = max(1, int(getattr(self, "vlm_preannotation_total_steps", 1) or 1))
@@ -852,6 +941,50 @@ class MainWindowVlmMixin:
             self._advance_vlm_progress(step_name, image_path=image_path)
 
     def _finish_vlm_preannotation_run(self):
+        if getattr(self, "_vlm_finish_in_progress", False):
+            return
+        self._vlm_finish_in_progress = True
+        try:
+            self._finish_vlm_preannotation_run_body()
+        finally:
+            self._vlm_finish_in_progress = False
+
+    def _present_vlm_run_outcome(self, summary, report_path=""):
+        summary = summary if isinstance(summary, dict) else {}
+        saved = int(summary.get("saved_box_count", 0) or 0)
+        if saved > 0 and str(summary.get("status") or "") == "finished":
+            return
+        records = list(summary.get("records") or [])
+        errors = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") == "failed":
+                error = str(item.get("error") or "").strip()
+                if error and error not in errors:
+                    errors.append(error)
+        if str(summary.get("status") or "") == "cancelled" and saved == 0:
+            message = tr(
+                "VLM preannotation stopped before any draft boxes were saved.",
+                self.current_lang,
+            )
+        elif errors:
+            message = tr(
+                "VLM preannotation did not save any draft boxes.\n\n{0}",
+                self.current_lang,
+            ).format("\n".join(errors[:5]))
+        elif saved == 0:
+            message = tr(
+                "VLM preannotation finished without draft boxes. The model returned no usable boxes, or existing labels were kept. Details are in the log panel.",
+                self.current_lang,
+            )
+        else:
+            return
+        if report_path:
+            message = f"{message}\n\n{report_path}"
+        QMessageBox.warning(self, tr("VLM Pre-Annotate", self.current_lang), message)
+
+    def _finish_vlm_preannotation_run_body(self):
         records = list(getattr(self, "vlm_preannotation_records", []) or [])
         artifacts_dir = getattr(self, "vlm_preannotation_artifacts_dir", self._vlm_preannotation_artifacts_dir())
         run_id = getattr(self, "vlm_preannotation_run_id", time.strftime("%Y%m%d_%H%M%S"))
@@ -917,10 +1050,8 @@ class MainWindowVlmMixin:
                 )
             )
         self.vlm_preannotation_run_active = False
-        for button_name in ("btn_vlm_preannotate_current", "btn_vlm_preannotate_batch", "btn_vlm_preannotate"):
-            button = getattr(self, button_name, None)
-            if button is not None:
-                button.setEnabled(True)
+        self.vlm_progress_dialog_ready = False
+        self._set_vlm_preannotation_buttons_enabled(True)
         progress = getattr(self, "vlm_preannotation_progress_dialog", None)
         if progress is not None:
             label_widget = getattr(self, "vlm_preannotation_progress_label", None)
@@ -956,6 +1087,7 @@ class MainWindowVlmMixin:
         self.vlm_preannotation_active_images = {}
         self.vlm_preannotation_image_step_counts = {}
         self.vlm_preannotation_completed_image_keys = set()
+        self._present_vlm_run_outcome(summary, report_path)
 
     def accept_current_image_ai_drafts(self):
         if not self.current_image:

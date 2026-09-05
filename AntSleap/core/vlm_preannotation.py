@@ -479,6 +479,17 @@ def _resolve_api_protocol(config: dict[str, Any]) -> str:
 
 
 def _json_schema() -> dict[str, Any]:
+    detection_properties = {
+        "part": {"type": "string"},
+        "bbox_grid_xyxy": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 4,
+            "maxItems": 4,
+        },
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    }
     return {
         "type": "object",
         "properties": {
@@ -487,21 +498,49 @@ def _json_schema() -> dict[str, Any]:
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {
-                        "part": {"type": "string"},
-                        "bbox_grid_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
-                        "bbox_xyxy": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
-                        "confidence": {"type": "number"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["part", "bbox_grid_xyxy", "confidence"],
-                    "additionalProperties": True,
+                    "properties": detection_properties,
+                    "required": list(detection_properties),
+                    "additionalProperties": False,
                 },
             },
         },
-        "required": ["detections"],
-        "additionalProperties": True,
+        "required": ["schema_version", "detections"],
+        "additionalProperties": False,
     }
+
+
+def _provider_error_preview(raw_text: str, limit: int = 240) -> str:
+    text = str(raw_text or "").replace("\r", " ").replace("\n", " ").strip()
+    try:
+        payload = json.loads(raw_text)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            text = str(error.get("message") or "")
+        elif payload.get("message"):
+            text = str(payload.get("message") or "")
+    text = " ".join(str(text or "").split())
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text
+
+
+def _provider_rejects_structured_output(status_code: int, raw_text: str) -> bool:
+    if int(status_code) != 400:
+        return False
+    text = str(raw_text or "").lower()
+    return any(
+        token in text
+        for token in (
+            "additionalproperties",
+            "json_schema",
+            "response_format",
+            "invalid schema",
+            "taxamask_vlm_first_mile",
+        )
+    )
 
 
 def call_vlm_preannotation_api(
@@ -522,8 +561,27 @@ def call_vlm_preannotation_api(
         "不把不确定的结构当作确定结果。"
     )
     protocol = _resolve_api_protocol(config)
+    image_data_url = _encode_image_as_data_url(image_input_path)
+    schema = _json_schema()
+
+    def post_json(url: str, payload: dict[str, Any]):
+        return requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=config["timeout"],
+        )
+
+    def raise_http_error(kind: str, response) -> None:
+        preview = _provider_error_preview(getattr(response, "text", ""))
+        detail = f": {preview}" if preview else ""
+        raise VlmApiError(
+            f"HTTP {response.status_code} - {kind}{detail}",
+            getattr(response, "text", ""),
+        )
+
     if protocol == "responses":
-        payload = {
+        responses_base = {
             "model": config["model"],
             "input": [
                 {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
@@ -531,29 +589,38 @@ def call_vlm_preannotation_api(
                     "role": "user",
                     "content": [
                         {"type": "input_text", "text": prompt},
-                        {"type": "input_image", "image_url": _encode_image_as_data_url(image_input_path)},
+                        {"type": "input_image", "image_url": image_data_url},
                     ],
                 },
             ],
             "max_output_tokens": config["max_tokens"],
             "temperature": 0.0,
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "taxamask_vlm_first_mile",
-                    "strict": True,
-                    "schema": _json_schema(),
-                }
-            },
         }
-        response = requests.post(
-            f"{config['base_url']}/responses",
-            headers=headers,
-            json=payload,
-            timeout=config["timeout"],
-        )
-        if response.status_code >= 400:
-            raise VlmApiError(f"HTTP {response.status_code} - responses_error", response.text)
+        responses_attempts = [
+            {
+                **responses_base,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "taxamask_vlm_first_mile",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+            },
+            responses_base,
+        ]
+        response = None
+        for payload in responses_attempts:
+            response = post_json(f"{config['base_url']}/responses", payload)
+            if response.status_code < 400:
+                break
+            if "text" not in payload or not _provider_rejects_structured_output(
+                response.status_code, response.text
+            ):
+                raise_http_error("responses_error", response)
+        if response is None or response.status_code >= 400:
+            raise_http_error("responses_error", response)
         try:
             body = response.json()
         except ValueError as exc:
@@ -572,7 +639,7 @@ def call_vlm_preannotation_api(
             raise VlmApiError("empty_vlm_output", response.text)
         return text, finish_reason
 
-    payload = {
+    chat_base = {
         "model": config["model"],
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -583,7 +650,7 @@ def call_vlm_preannotation_api(
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": _encode_image_as_data_url(image_input_path),
+                            "url": image_data_url,
                             "detail": config["image_detail"],
                         },
                     },
@@ -592,23 +659,33 @@ def call_vlm_preannotation_api(
         ],
         "max_tokens": config["max_tokens"],
         "temperature": 0.0,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "taxamask_vlm_first_mile",
-                "strict": True,
-                "schema": _json_schema(),
+    }
+    chat_attempts = [
+        {
+            **chat_base,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "taxamask_vlm_first_mile",
+                    "strict": True,
+                    "schema": schema,
+                },
             },
         },
-    }
-    response = requests.post(
-        f"{config['base_url']}/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=config["timeout"],
-    )
-    if response.status_code >= 400:
-        raise VlmApiError(f"HTTP {response.status_code} - chat_completions_error", response.text)
+        {**chat_base, "response_format": {"type": "json_object"}},
+        chat_base,
+    ]
+    response = None
+    for payload in chat_attempts:
+        response = post_json(f"{config['base_url']}/chat/completions", payload)
+        if response.status_code < 400:
+            break
+        if "response_format" not in payload or not _provider_rejects_structured_output(
+            response.status_code, response.text
+        ):
+            raise_http_error("chat_completions_error", response)
+    if response is None or response.status_code >= 400:
+        raise_http_error("chat_completions_error", response)
     try:
         body = response.json()
     except ValueError as exc:

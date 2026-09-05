@@ -165,6 +165,53 @@ def prepare_qt_runtime_environment():
     ensure_qtwebengine_quiet_cpu_flags()
 
 
+def qt_message_should_be_ignored(message):
+    text = str(message or "")
+    return (
+        "QWindowsWindow::setGeometry" in text
+        and "Unable to set geometry" in text
+    )
+
+
+def install_qt_noise_filters():
+    """Hide a known-harmless Windows window-manager warning.
+
+    On 1080p displays, Qt may ask for a client size such as 560x249 while
+    Windows returns 560x255 because of title-bar min-track. That prints
+    QWindowsWindow::setGeometry and looks like a crash in the launch console.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+    except Exception:
+        return None
+
+    previous = getattr(install_qt_noise_filters, "_previous", None)
+
+    def handler(mode, context, message):
+        if qt_message_should_be_ignored(message):
+            return
+        if previous is not None:
+            previous(mode, context, message)
+            return
+        try:
+            stream = sys.stderr
+            prefix = ""
+            if mode == QtMsgType.QtFatalMsg:
+                prefix = "FATAL: "
+            elif mode == QtMsgType.QtCriticalMsg:
+                prefix = "CRITICAL: "
+            stream.write(f"{prefix}{message}\n")
+        except Exception:
+            pass
+
+    previous = qInstallMessageHandler(handler)
+    install_qt_noise_filters._previous = previous
+    install_qt_noise_filters._handler = handler
+    return handler
+
+
 def runtime_log_enabled():
     return str(os.environ.get("TAXAMASK_RUNTIME_LOG", "1")).strip().lower() not in {"0", "false", "no", "off"}
 

@@ -5,7 +5,8 @@ cd /d "%~dp0"
 
 set "PROJECT_ROOT=%CD%"
 set "ANT_CODE_ROOT=%PROJECT_ROOT%\vendor\ant-code"
-set "DASHBOARD_ENTRY=%ANT_CODE_ROOT%\src\cli\dashboard.js"
+set "DASHBOARD_ENTRY=%ANT_CODE_ROOT%\src\cli\dashboard-embed.ts"
+if not exist "%DASHBOARD_ENTRY%" set "DASHBOARD_ENTRY=%ANT_CODE_ROOT%\src\cli\index.ts"
 set "NODE_EXE="
 set "PORT=7410"
 
@@ -48,16 +49,16 @@ if not defined NODE_EXE (
     echo Cannot find Node.js.
     echo.
     echo This recovery script does not need PySide6 or the TaxaMask GUI,
-    echo but it does need Node.js 20 or newer to run the bundled Ant-Code dashboard.
+    echo but it does need Node.js 22.18 or newer to run the bundled Ant-Code dashboard.
     echo You can also set TAXAMASK_NODE_EXE to the full path of node.exe.
     echo.
     pause
     exit /b 1
 )
 
-"%NODE_EXE%" -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major>=20?0:1)"
+"%NODE_EXE%" -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit((major>22||(major===22&&minor>=18))?0:1)"
 if errorlevel 1 (
-    echo Node.js 20 or newer is required.
+    echo Node.js 22.18 or newer is required.
     echo Current Node executable:
     echo %NODE_EXE%
     echo.
@@ -68,12 +69,12 @@ if errorlevel 1 (
 
 set "LAB_AGENT_PACKAGE_ROOT=%ANT_CODE_ROOT%"
 set "LAB_AGENT_CONFIG=%PROJECT_ROOT%\AntSleap\config\taxamask_ant_code.config.json"
-set "LAB_AGENT_SKIP_PROJECT_CONFIG=1"
-if defined APPDATA (
-    set "LAB_AGENT_RECOVERY_CONFIG=%APPDATA%\TaxaMask\ant-code-recovery.config.json"
+if defined LOCALAPPDATA (
+    set "NODE_COMPILE_CACHE=%LOCALAPPDATA%\TaxaMask\ant-code-compile-cache"
 ) else (
-    set "LAB_AGENT_RECOVERY_CONFIG=%USERPROFILE%\.config\TaxaMask\ant-code-recovery.config.json"
+    set "NODE_COMPILE_CACHE=%USERPROFILE%\.cache\TaxaMask\ant-code-compile-cache"
 )
+if not exist "%NODE_COMPILE_CACHE%" mkdir "%NODE_COMPILE_CACHE%" >nul 2>&1
 
 echo Starting Ant-Code recovery dashboard for TaxaMask...
 echo Project: %PROJECT_ROOT%
@@ -84,7 +85,11 @@ echo Keep this window open while using the dashboard.
 echo Close this window to stop the local dashboard server.
 echo.
 
-"%NODE_EXE%" "%DASHBOARD_ENTRY%" --project "%PROJECT_ROOT%" --port "%PORT%"
+if /I "%DASHBOARD_ENTRY:~-8%"=="index.ts" (
+    "%NODE_EXE%" --experimental-strip-types --disable-warning=ExperimentalWarning "%DASHBOARD_ENTRY%" dashboard --project "%PROJECT_ROOT%" --port "%PORT%"
+) else (
+    "%NODE_EXE%" --experimental-strip-types --disable-warning=ExperimentalWarning "%DASHBOARD_ENTRY%" --project "%PROJECT_ROOT%" --port "%PORT%"
+)
 
 if errorlevel 1 (
     echo.

@@ -6,7 +6,10 @@ cd "$SCRIPT_DIR" || exit 1
 
 PROJECT_ROOT="$SCRIPT_DIR"
 ANT_CODE_ROOT="${TAXAMASK_ANT_CODE_ROOT:-$PROJECT_ROOT/vendor/ant-code}"
-DASHBOARD_ENTRY="$ANT_CODE_ROOT/src/cli/dashboard.js"
+DASHBOARD_ENTRY="$ANT_CODE_ROOT/src/cli/dashboard-embed.ts"
+if [[ ! -f "$DASHBOARD_ENTRY" ]]; then
+  DASHBOARD_ENTRY="$ANT_CODE_ROOT/src/cli/index.ts"
+fi
 NODE_EXE=""
 PORT="${TAXAMASK_ANTCODE_PORT:-7410}"
 
@@ -92,15 +95,15 @@ if [[ -z "$NODE_EXE" ]]; then
   echo "Cannot find Node.js."
   echo
   echo "This recovery script does not need PySide6 or the TaxaMask GUI,"
-  echo "but it does need Node.js 20 or newer to run the bundled Ant-Code dashboard."
+  echo "but it does need Node.js 22.18 or newer to run the bundled Ant-Code dashboard."
   echo "You can also set TAXAMASK_NODE_EXE to the full path of node."
   echo
   exit 1
 fi
 
-"$NODE_EXE" -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major>=20?0:1)" >/dev/null 2>&1
+"$NODE_EXE" -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit((major>22||(major===22&&minor>=18))?0:1)" >/dev/null 2>&1
 if [[ $? -ne 0 ]]; then
-  echo "Node.js 20 or newer is required."
+  echo "Node.js 22.18 or newer is required."
   echo "Current Node executable:"
   echo "$NODE_EXE"
   echo
@@ -120,12 +123,12 @@ fi
 
 export LAB_AGENT_PACKAGE_ROOT="$ANT_CODE_ROOT"
 export LAB_AGENT_CONFIG="${TAXAMASK_ANT_CODE_CONFIG:-$PROJECT_ROOT/AntSleap/config/taxamask_ant_code.config.json}"
-export LAB_AGENT_SKIP_PROJECT_CONFIG=1
-if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
-  export LAB_AGENT_RECOVERY_CONFIG="${TAXAMASK_ANTCODE_RECOVERY_CONFIG:-$XDG_CONFIG_HOME/taxamask/ant-code-recovery.config.json}"
+if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+  export NODE_COMPILE_CACHE="${XDG_CACHE_HOME}/taxamask/ant-code-compile-cache"
 else
-  export LAB_AGENT_RECOVERY_CONFIG="${TAXAMASK_ANTCODE_RECOVERY_CONFIG:-$HOME/.config/taxamask/ant-code-recovery.config.json}"
+  export NODE_COMPILE_CACHE="${HOME}/.cache/taxamask/ant-code-compile-cache"
 fi
+mkdir -p "$NODE_COMPILE_CACHE"
 
 echo "Starting Ant-Code recovery dashboard for TaxaMask..."
 echo "Project: $PROJECT_ROOT"
@@ -138,7 +141,11 @@ echo
 echo "The dashboard should open in your browser automatically."
 echo
 
-"$NODE_EXE" "$DASHBOARD_ENTRY" --project "$PROJECT_ROOT" --port "$PORT" --no-open 2>&1 | while IFS= read -r line; do
+DASHBOARD_ARGS=("$DASHBOARD_ENTRY")
+if [[ "$DASHBOARD_ENTRY" == *"/index.ts" || "$DASHBOARD_ENTRY" == *"/index.js" ]]; then
+  DASHBOARD_ARGS+=("dashboard")
+fi
+"$NODE_EXE" --experimental-strip-types --disable-warning=ExperimentalWarning "${DASHBOARD_ARGS[@]}" --project "$PROJECT_ROOT" --port "$PORT" --no-open 2>&1 | while IFS= read -r line; do
   echo "$line"
   if [[ "$line" =~ Ant[[:space:]]Code[[:space:]]Dashboard[[:space:]]running[[:space:]]at[[:space:]](http://[^[:space:]]+) ]]; then
     dashboard_url="${BASH_REMATCH[1]}"

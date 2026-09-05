@@ -538,12 +538,24 @@ class MainWindowImageNavigationMixin:
     def _prepare_progress_dialog(self, progress, width=460):
         if progress is None:
             return
-        progress.setMinimumWidth(int(width))
-        progress.setMaximumWidth(int(width))
-        progress.adjustSize()
+        width = max(1, int(width))
+        progress.setMinimumWidth(width)
+        # Do not resize/adjustSize to the sizeHint before the native window
+        # exists. On 1080p Windows, a tight 560x249 client size is rejected
+        # (title-bar min-track makes it 560x255) and prints
+        # QWindowsWindow::setGeometry.
+        self._center_progress_dialog(progress)
+
+    def _center_progress_dialog(self, progress):
+        if progress is None:
+            return
         try:
             center = self.frameGeometry().center()
             rect = progress.frameGeometry()
+            if rect.width() <= 0 or rect.height() <= 0:
+                hint = progress.sizeHint()
+                rect.setWidth(max(int(hint.width() or 0), int(progress.minimumWidth() or 0), 1))
+                rect.setHeight(max(int(hint.height() or 0), 1))
             rect.moveCenter(center)
             progress.move(rect.topLeft())
         except Exception:
@@ -1097,13 +1109,12 @@ class MainWindowImageNavigationMixin:
             and watched is getattr(self, "vlm_preannotation_progress_dialog", None)
             and getattr(self, "vlm_preannotation_run_active", False)
         ):
-            if hasattr(event, "spontaneous") and not event.spontaneous():
-                event.ignore()
-                return True
-            if self.request_stop_vlm_preannotation(confirm=True):
-                event.ignore()
-                return True
+            # Windows can emit Close while the 1080p window manager rejects the
+            # first geometry. Treat that as "keep the dialog", not as the user
+            # cancelling preannotation.
             event.ignore()
+            if getattr(self, "vlm_progress_dialog_ready", False):
+                self.request_stop_vlm_preannotation(confirm=True)
             return True
         if (
             event is not None

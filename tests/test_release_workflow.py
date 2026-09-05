@@ -69,7 +69,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         workflow = _load_workflow(WORKFLOW)
         citation = yaml.safe_load(CITATION.read_text(encoding="utf-8"))
         version = str(citation["version"])
-        release_notes = list((ROOT / "docs" / "releases").glob(f"{version}-*.md"))
+        release_notes = list((ROOT / "docs" / "releases").glob(f"{version}-*_zh.md"))
         self.assertEqual(len(release_notes), 1)
         release_note_lines = release_notes[0].read_text(encoding="utf-8").splitlines()
         heading = release_note_lines[0]
@@ -84,9 +84,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
         validation = _step_run(workflow, "release", "Validate release request")
         creation = _step_run(workflow, "release", "Create immutable tag and GitHub release")
         self.assertIn('if [[ "v$citation_version" != "$VERSION" ]]', validation)
-        self.assertIn('if [[ "$heading" != "# TaxaMask $VERSION"* ]]', validation)
+        self.assertIn('citation_date="$(sed -n', validation)
+        self.assertIn('release_notes=(docs/releases/"${VERSION#v}"-*_zh.md)', validation)
+        self.assertIn('grep -Fxq "发布日期：$citation_date"', validation)
+        self.assertIn('if [[ "$heading" != "# TaxaMask $VERSION："*', validation)
         self.assertIn('release_title="${heading#\\# }"', creation)
         self.assertIn('--title "$release_title"', creation)
+
+    def test_release_note_template_covers_public_research_boundaries(self):
+        template = (ROOT / "docs" / "releases" / "RELEASE_NOTE_TEMPLATE_zh.md").read_text(
+            encoding="utf-8"
+        )
+
+        for required_text in (
+            "# TaxaMask vX.Y.Z：",
+            "发布日期：YYYY-MM-DD",
+            "对研究工作流的直接变化",
+            "数据、模型与科学结论边界",
+            "升级与产物位置",
+            "验证、限制与待完成门禁",
+        ):
+            self.assertIn(required_text, template)
 
 
 if __name__ == "__main__":

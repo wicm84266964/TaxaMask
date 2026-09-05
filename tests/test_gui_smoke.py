@@ -577,19 +577,33 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIsNotNone(window.agent_panel.ant_code_dashboard_entry)
             self.assertIn(
                 os.path.basename(window.agent_panel.ant_code_dashboard_entry),
-                {"dashboard.js", "index.js"},
+                {"dashboard-embed.ts", "index.ts", "index.js"},
             )
             self.assertTrue(window.agent_panel.ant_code_config_path.endswith(os.path.join("AntSleap", "config", "taxamask_ant_code.config.json")))
             command = window.agent_panel._dashboard_command()
             self.assertEqual(command[0], window.agent_panel.node_executable)
-            self.assertEqual(command[1], window.agent_panel.ant_code_dashboard_entry)
-            if window.agent_panel.ant_code_dashboard_entry.endswith("index.js"):
-                self.assertEqual(command[2], "dashboard")
+            self.assertIn("--experimental-strip-types", command)
+            self.assertIn(window.agent_panel.ant_code_dashboard_entry, command)
+            entry_index = command.index(window.agent_panel.ant_code_dashboard_entry)
+            if window.agent_panel._dashboard_entry_uses_index(window.agent_panel.ant_code_dashboard_entry):
+                self.assertEqual(command[entry_index + 1], "dashboard")
             self.assertIn("--project", command)
             self.assertIn(str(PROJECT_ROOT), command)
             env = window.agent_panel._dashboard_environment()
             self.assertEqual(env["LAB_AGENT_PACKAGE_ROOT"], window.agent_panel.ant_code_root)
             self.assertEqual(env["LAB_AGENT_CONFIG"], window.agent_panel.ant_code_config_path)
+            self.assertTrue(env.get("NODE_COMPILE_CACHE"))
+            window.agent_panel.set_theme("light")
+            css = window.agent_panel._web_embed_style_source()
+            script = window.agent_panel._web_bootstrap_source()
+            self.assertIn("color-scheme: light", css)
+            self.assertIn(".settings-field-row select", css)
+            self.assertIn(".settings-field-stack textarea", css)
+            self.assertIn("reasoning-effort-control", css)
+            self.assertIn("settings-default-scope-picker", css)
+            self.assertIn("taxamask-embed-light", script)
+            self.assertIn("colorScheme", script)
+            self.assertNotIn(".taxamask-embed * {", css)
             self.assertIsNotNone(window.agent_panel.findChild(main_module.QWidget, "taxamaskAgentStack"))
             self.assertEqual(window.agent_panel.fallback_logo.text(), "TaxaMask")
             self.assertIsNotNone(window.agent_panel.fallback_mark.pixmap())
@@ -607,9 +621,11 @@ class GuiSmokeTests(unittest.TestCase):
         try:
             command = panel._dashboard_command()
             self.assertEqual(command[0], panel.node_executable)
-            self.assertEqual(command[1], panel.ant_code_dashboard_entry)
-            if panel.ant_code_dashboard_entry.endswith("index.js"):
-                self.assertEqual(command[2], "dashboard")
+            self.assertIn("--experimental-strip-types", command)
+            self.assertIn(panel.ant_code_dashboard_entry, command)
+            entry_index = command.index(panel.ant_code_dashboard_entry)
+            if panel._dashboard_entry_uses_index(panel.ant_code_dashboard_entry):
+                self.assertEqual(command[entry_index + 1], "dashboard")
             self.assertNotIn(r"C:\legacy\ant-code.exe", command)
         finally:
             panel.deleteLater()
@@ -768,7 +784,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
         try:
             panel.port = 7410
-            panel.ant_code_dashboard_entry = str(PROJECT_ROOT / "vendor" / "ant-code" / "src" / "cli" / "dashboard.js")
+            panel.ant_code_dashboard_entry = str(PROJECT_ROOT / "vendor" / "ant-code" / "src" / "cli" / "index.ts")
             with patch.object(panel, "_wslpath", side_effect=lambda value: "/mnt/c/" + str(value)[3:].replace("\\", "/")):
                 command = panel._dashboard_command()
 
@@ -776,7 +792,9 @@ class GuiSmokeTests(unittest.TestCase):
             wsl_project = "/mnt/c/" + str(PROJECT_ROOT)[3:].replace("\\", "/")
             self.assertIn(f"LAB_AGENT_PACKAGE_ROOT={wsl_project}/vendor/ant-code", command)
             self.assertIn(f"LAB_AGENT_CONFIG={wsl_project}/AntSleap/config/taxamask_ant_code.config.json", command)
-            self.assertIn(f"{wsl_project}/vendor/ant-code/src/cli/dashboard.js", command)
+            self.assertIn("--experimental-strip-types", command)
+            self.assertIn(f"{wsl_project}/vendor/ant-code/src/cli/dashboard-embed.ts", command)
+            self.assertNotIn("dashboard", command)
             project_index = command.index("--project")
             self.assertEqual(command[project_index + 1], wsl_project)
         finally:
@@ -1241,6 +1259,12 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
 
             self.assertIn("#F5F8FC", css)
             self.assertIn("#FFFFFF", css)
+            self.assertIn(".taxamask-embed .composer", css)
+            self.assertIn("box-shadow: none !important", css)
+            self.assertIn("color-scheme: light !important", css)
+            self.assertIn(".settings-field-row select", css)
+            self.assertIn(".settings-field-stack textarea", css)
+            self.assertIn("--scrollbar-track", css)
             self.assertIn(".taxamask-embed .composer-shell", css)
             self.assertIn(".taxamask-embed #prompt-input", css)
             self.assertIn(".taxamask-embed .tool-result", css)
@@ -1502,6 +1526,10 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             dashboard = panel.ant_code_dashboard_entry
             self.assertTrue(panel._is_owned_dashboard_process(
                 f'"C:\\Program Files\\nodejs\\node.exe" "{dashboard}" dashboard --project "{project}" --port 7410 --no-open',
+                "node.exe",
+            ))
+            self.assertTrue(panel._is_owned_dashboard_process(
+                f'"C:\\Program Files\\nodejs\\node.exe" --experimental-strip-types "{dashboard}" --project "{project}" --port 7410 --no-open',
                 "node.exe",
             ))
             self.assertTrue(panel._is_owned_dashboard_process(
@@ -2427,7 +2455,13 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             self.assertLessEqual(len(progress_path_label.text()), 92)
             self.assertEqual(progress_path_label.toolTip(), str(self.project_dir / long_name))
             self.assertGreaterEqual(progress.minimumWidth(), 560)
-            self.assertLessEqual(progress.maximumWidth(), 560)
+            self.assertGreater(progress.maximumWidth(), progress.minimumWidth())
+            notice = window.vlm_preannotation_progress_notice_label
+            self.assertIsNotNone(notice)
+            self.assertGreaterEqual(
+                notice.minimumHeight(),
+                notice.fontMetrics().lineSpacing() * 2,
+            )
 
             window._mark_current_vlm_image_done("done")
 
@@ -2437,6 +2471,20 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
                 window.vlm_preannotation_progress_dialog.close()
                 window.vlm_preannotation_progress_dialog.deleteLater()
                 window.vlm_preannotation_progress_dialog = None
+            window.deleteLater()
+
+    def test_prepare_progress_dialog_does_not_pin_exact_windows_geometry(self):
+        window = self._make_window()
+        dialog = None
+        try:
+            dialog = main_module.QDialog(window)
+            window._prepare_progress_dialog(dialog, width=560)
+            self.assertGreaterEqual(dialog.minimumWidth(), 560)
+            self.assertGreater(dialog.maximumWidth(), 560)
+            self.assertEqual(dialog.minimumHeight(), 0)
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
             window.deleteLater()
 
     def test_vlm_result_refreshes_current_canvas_with_project_relative_path(self):

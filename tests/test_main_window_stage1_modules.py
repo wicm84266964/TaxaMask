@@ -115,6 +115,21 @@ class MainWindowStage1ModuleTests(unittest.TestCase):
         self.assertLessEqual(size_at_limit, 1024)
         self.assertEqual(final_size, size_at_limit)
 
+    def test_windows_geometry_warning_is_ignored_without_hiding_other_qt_messages(self):
+        from AntSleap import app_runtime
+
+        self.assertTrue(
+            app_runtime.qt_message_should_be_ignored(
+                'QWindowsWindow::setGeometry: Unable to set geometry 560x249+680+410 '
+                '(frame: 576x288+672+379) on QWidgetWindow/"QDialogClassWindow" on "V22FAB-RA".'
+            )
+        )
+        self.assertFalse(
+            app_runtime.qt_message_should_be_ignored(
+                "QPainter::begin: Paint device returned engine == 0, type: 3"
+            )
+        )
+
     def test_main_reexports_stage1_classes(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         import AntSleap.main as main_module

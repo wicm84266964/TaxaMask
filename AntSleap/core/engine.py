@@ -68,6 +68,149 @@ def _checkpoint_locator_scope(value, expected_count):
     return scope
 
 
+def _empty_locator_inspect_info(*, readable=False):
+    return {
+        "readable": readable,
+        "schema_version": "",
+        "architecture_id": "",
+        "num_classes": None,
+        "locator_scope": [],
+        "locator_size": None,
+        "scope_is_verifiable": False,
+    }
+
+
+def _inspect_locator_size(checkpoint_meta):
+    if not isinstance(checkpoint_meta, dict):
+        return None
+    saved_resolution = checkpoint_meta.get("locator_size")
+    legacy_resolution = checkpoint_meta.get("locator_resolution")
+    if saved_resolution is None and legacy_resolution is not None:
+        try:
+            legacy_side = max(1, int(legacy_resolution))
+        except Exception:
+            legacy_side = 512
+        saved_resolution = [legacy_side, legacy_side]
+    if saved_resolution is None:
+        return None
+    try:
+        return (
+            max(1, int(saved_resolution[0])),
+            max(1, int(saved_resolution[1])),
+        )
+    except Exception:
+        return None
+
+
+def _normalized_locator_scope(value):
+    scope = []
+    seen = set()
+    for item in value or []:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        scope.append(name)
+    return scope
+
+
+def inspect_locator_checkpoint_payload(saved_state):
+    info = _empty_locator_inspect_info(readable=True)
+    if not isinstance(saved_state, dict):
+        return _empty_locator_inspect_info(readable=False)
+
+    checkpoint_state = saved_state
+    checkpoint_meta = {}
+    if "state_dict" in saved_state:
+        checkpoint_state = saved_state.get("state_dict")
+        raw_meta = saved_state.get("meta")
+        if raw_meta is not None and not isinstance(raw_meta, dict):
+            return _empty_locator_inspect_info(readable=False)
+        checkpoint_meta = dict(raw_meta or {})
+        info["schema_version"] = str(saved_state.get("schema_version") or "")
+    if not isinstance(checkpoint_state, dict):
+        return _empty_locator_inspect_info(readable=False)
+
+    info["architecture_id"] = str(checkpoint_meta.get("architecture_id") or "")
+    info["locator_size"] = _inspect_locator_size(checkpoint_meta)
+
+    saved_num_classes = checkpoint_meta.get("num_classes")
+    if saved_num_classes is not None:
+        try:
+            info["num_classes"] = int(saved_num_classes)
+        except (TypeError, ValueError):
+            info["num_classes"] = None
+
+    output_weight = checkpoint_state.get("outc.conv.weight")
+    if info["num_classes"] is None and output_weight is not None:
+        try:
+            if getattr(output_weight, "ndim", 0) >= 1:
+                info["num_classes"] = int(output_weight.shape[0])
+        except Exception:
+            pass
+
+    raw_scope = checkpoint_meta.get("locator_scope")
+    if isinstance(raw_scope, (list, tuple)) and raw_scope:
+        scope = []
+        seen = set()
+        valid = True
+        for item in raw_scope:
+            if not isinstance(item, str) or not item.strip():
+                valid = False
+                break
+            name = item.strip()
+            if name in seen:
+                valid = False
+                break
+            seen.add(name)
+            scope.append(name)
+        if valid and scope:
+            info["locator_scope"] = scope
+            info["scope_is_verifiable"] = (
+                info["schema_version"] == LOCATOR_CHECKPOINT_SCHEMA_VERSION
+            )
+    return info
+
+
+def inspect_locator_checkpoint_file(path):
+    if not path or not os.path.isfile(path):
+        return _empty_locator_inspect_info(readable=False)
+    try:
+        saved_state = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        return _empty_locator_inspect_info(readable=False)
+    return inspect_locator_checkpoint_payload(saved_state)
+
+
+def locator_checkpoint_is_incompatible(info, expected_scope):
+    if not isinstance(info, dict) or not info.get("readable"):
+        return False
+    expected = _normalized_locator_scope(expected_scope)
+    if not expected:
+        return False
+    observed_classes = info.get("num_classes")
+    if observed_classes is not None:
+        try:
+            if int(observed_classes) != len(expected):
+                return True
+        except (TypeError, ValueError):
+            return True
+    saved_scope = _normalized_locator_scope(info.get("locator_scope"))
+    if saved_scope and saved_scope != expected:
+        return True
+    schema = str(info.get("schema_version") or "")
+    architecture = str(info.get("architecture_id") or "")
+    if (
+        schema == LOCATOR_CHECKPOINT_SCHEMA_VERSION
+        and architecture
+        and architecture != LOCATOR_ARCHITECTURE_ID
+    ):
+        return True
+    return False
+
+
 def _fsync_directory(path):
     try:
         descriptor = os.open(os.fspath(path), os.O_RDONLY)

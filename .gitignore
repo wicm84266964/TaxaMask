@@ -25,6 +25,8 @@ anaconda3/
 .lab-agent/runtime/
 .lab-agent/cache/
 AGENTS.md
+.grok/agent-memory
+.grok/agent-memory-local
 !ANTCODE.md
 .tmp_validation/
 tmp_*/
@@ -45,6 +47,8 @@ screener_configs/api_runtime_settings.json
 *token*
 *api_key*
 *apikey*
+!vendor/ant-code/src/credentials/
+!vendor/ant-code/src/credentials/**
 
 # Local project files and databases
 *.db
@@ -184,8 +188,9 @@ vendor/ant-code/docs/
 vendor/ant-code/docs/handoff/
 vendor/ant-code/docs/plans/
 vendor/ant-code/docs/phase-0/
-vendor/ant-code/tests/*
-!vendor/ant-code/tests/embedded-runtime.test.js
+vendor/ant-code/tests/**
+!vendor/ant-code/tests/unit/
+!vendor/ant-code/tests/unit/embedded-runtime.test.ts
 vendor/ant-code/scripts/audit-common.js
 vendor/ant-code/scripts/build-windows-exe.js
 vendor/ant-code/scripts/dependency-audit-common.js

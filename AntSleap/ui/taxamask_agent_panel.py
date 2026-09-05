@@ -29,6 +29,8 @@ def _ensure_qtwebengine_cpu_compositing():
 
 _ensure_qtwebengine_cpu_compositing()
 
+_NODE_TS_SUPPORT = {}
+
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
@@ -294,17 +296,54 @@ class TaxaMaskAgentPanel(QWidget):
     def _resolve_node_executable(self):
         if self.ant_code_runtime == "wsl":
             return os.environ.get("TAXAMASK_WSL_NODE_EXE", "").strip() or "node"
+        candidates = []
         env_path = os.environ.get("TAXAMASK_NODE_EXE")
         if env_path and Path(env_path).expanduser().exists():
-            return str(Path(env_path).expanduser().resolve())
+            candidates.append(str(Path(env_path).expanduser().resolve()))
         for candidate in self._node_executable_candidates():
             if candidate.exists():
-                return str(candidate.resolve())
+                candidates.append(str(candidate.resolve()))
         for command in ("node.exe", "node"):
             found = shutil.which(command)
             if found:
-                return found
+                candidates.append(found)
+        seen = set()
+        for path in candidates:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            if self._node_supports_typescript_source(path):
+                return path
         return None
+
+    def _node_supports_typescript_source(self, node_path):
+        if not node_path:
+            return False
+        key = os.path.normcase(os.path.abspath(node_path))
+        cached = _NODE_TS_SUPPORT.get(key)
+        if cached is not None:
+            return cached
+        probe = [
+            node_path,
+            "-e",
+            "const [major, minor] = process.versions.node.split('.').map(Number); process.exit((major > 22 || (major === 22 && minor >= 18)) ? 0 : 1);",
+        ]
+        kwargs = {"capture_output": True, "timeout": 8}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            completed = subprocess.run(probe, **kwargs)
+            supported = completed.returncode == 0
+        except Exception:
+            supported = False
+        _NODE_TS_SUPPORT[key] = supported
+        return supported
+
+    def _node_loader_flags(self, entry_path):
+        if str(entry_path or "").lower().endswith(".ts"):
+            return ["--experimental-strip-types", "--disable-warning=ExperimentalWarning"]
+        return []
 
     def _node_executable_candidates(self):
         names = ("node.exe", "node") if sys.platform == "win32" else ("node",)
@@ -338,7 +377,8 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _resolve_ant_code_dashboard_entry(self):
         for candidate in (
-            Path(self.ant_code_root) / "src" / "cli" / "dashboard.js",
+            Path(self.ant_code_root) / "src" / "cli" / "dashboard-embed.ts",
+            Path(self.ant_code_root) / "src" / "cli" / "index.ts",
             Path(self.ant_code_root) / "src" / "cli" / "index.js",
         ):
             if candidate.exists():
@@ -371,14 +411,13 @@ class TaxaMaskAgentPanel(QWidget):
         if not self._can_use_source_dashboard():
             raise FileNotFoundError(
                 "Ant-Code source dashboard is unavailable. Ensure Node.js is installed and "
-                "vendor/ant-code/src/cli/index.js exists."
+                "vendor/ant-code/src/cli/index.ts exists."
             )
         if self.ant_code_runtime == "wsl":
             return self._wsl_dashboard_command()
-        command = [
-            self.node_executable,
-            self.ant_code_dashboard_entry,
-        ]
+        command = [self.node_executable]
+        command.extend(self._node_loader_flags(self.ant_code_dashboard_entry))
+        command.append(self.ant_code_dashboard_entry)
         if self._dashboard_entry_uses_index(self.ant_code_dashboard_entry):
             command.append("dashboard")
         command.extend([
@@ -392,7 +431,7 @@ class TaxaMaskAgentPanel(QWidget):
 
     def _dashboard_entry_uses_index(self, entry_path):
         name = str(entry_path or "").replace("\\", "/").rstrip("/").split("/")[-1]
-        return name == "index.js"
+        return name in {"index.ts", "index.js"}
 
     def _wsl_dashboard_command(self):
         workspace_dir = self._wsl_workspace_dir()
@@ -407,8 +446,9 @@ class TaxaMaskAgentPanel(QWidget):
             f"LAB_AGENT_PACKAGE_ROOT={ant_code_root}",
             f"LAB_AGENT_CONFIG={config_path}",
             self.node_executable or "node",
-            dashboard_entry,
         ]
+        inner.extend(self._node_loader_flags(dashboard_entry))
+        inner.append(dashboard_entry)
         if self._dashboard_entry_uses_index(dashboard_entry):
             inner.append("dashboard")
         inner.extend([
@@ -454,7 +494,7 @@ if ! command -v node >/dev/null 2>&1; then
   if [ -n "$node_command" ] && [ "$node_command" != "${node_command#*/}" ] && [ -x "$node_command" ]; then
     :
   else
-    echo "Cannot find Linux Node.js in WSL. Install Node.js 20+ in Ubuntu, or set TAXAMASK_WSL_NODE_EXE." >&2
+    echo "Cannot find Linux Node.js in WSL. Install Node.js 22.18+ in Ubuntu, or set TAXAMASK_WSL_NODE_EXE." >&2
     exit 127
   fi
 fi
@@ -462,14 +502,20 @@ node_check="${4:-node}"
 if [ "$node_check" = "${node_check#*/}" ]; then
   node_check="$(command -v "$node_check" 2>/dev/null || true)"
 fi
-if [ -z "$node_check" ] || ! "$node_check" -e "const major=Number(process.versions.node.split('.')[0]); process.exit(major>=20?0:1)" >/dev/null 2>&1; then
-  echo "Node.js 20 or newer is required in WSL." >&2
+if [ -z "$node_check" ] || ! "$node_check" -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit((major>22||(major===22&&minor>=18))?0:1)" >/dev/null 2>&1; then
+  echo "Node.js 22.18 or newer is required in WSL." >&2
   exit 127
 fi
 if [ ! -d "$workspace/vendor/ant-code/node_modules" ]; then
   echo "Ant-Code dependencies are missing in WSL. Run: cd \"$workspace/vendor/ant-code\" && npm ci" >&2
   exit 126
 fi
+if [ -n "${XDG_CACHE_HOME:-}" ]; then
+  export NODE_COMPILE_CACHE="${XDG_CACHE_HOME}/taxamask/ant-code-compile-cache"
+else
+  export NODE_COMPILE_CACHE="${HOME}/.cache/taxamask/ant-code-compile-cache"
+fi
+mkdir -p "$NODE_COMPILE_CACHE"
 cd "$workspace"
 exec "$@"
 """.strip()
@@ -501,7 +547,7 @@ exec "$@"
             return override
         ant_root = self._wsl_ant_code_root_path()
         if ant_root:
-            return ant_root.rstrip("/") + "/src/cli/dashboard.js"
+            return ant_root.rstrip("/") + "/src/cli/dashboard-embed.ts"
         return self._wsl_path(self.ant_code_dashboard_entry)
 
     def _wsl_path(self, value, env_override=None):
@@ -569,7 +615,24 @@ exec "$@"
         config_path = Path(self.ant_code_config_path)
         if config_path.exists():
             env["LAB_AGENT_CONFIG"] = str(config_path)
+        cache_dir = self._ant_code_compile_cache_dir()
+        if cache_dir:
+            env["NODE_COMPILE_CACHE"] = cache_dir
         return env
+
+    def _ant_code_compile_cache_dir(self):
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+        if not base:
+            try:
+                base = str(Path.home() / ".cache")
+            except RuntimeError:
+                return None
+        path = Path(base) / "TaxaMask" / "ant-code-compile-cache"
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        return str(path)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -724,10 +787,26 @@ exec "$@"
             return False
         return True
 
+    def _embed_theme_name(self):
+        return "light" if get_theme_config(self.current_theme)["is_light"] else "dark"
+
+    def _remove_web_bootstrap_script(self):
+        if self.web_view is None:
+            return
+        try:
+            collection = self.web_view.page().scripts()
+            existing = list(collection.toList()) if hasattr(collection, "toList") else []
+            for script in existing:
+                if script.name() == "taxamask-agent-embed-bootstrap":
+                    collection.remove(script)
+        except Exception:
+            return
+
     def _install_web_bootstrap_script(self):
         if self.web_view is None or QWebEngineScript is None:
             return
         try:
+            self._remove_web_bootstrap_script()
             script = QWebEngineScript()
             script.setName("taxamask-agent-embed-bootstrap")
             script.setSourceCode(self._web_bootstrap_source())
@@ -748,9 +827,11 @@ exec "$@"
             workspace_background = c["bg_surface"]
             header_background = c["bg_surface_alt"]
             transcript_background = c["bg_surface"]
-            composer_background = c["bg_surface_alt"]
+            composer_background = c["bg_surface"]
+            composer_card_background = c["bg_surface"]
+            composer_shadow = "none"
             panel_background = c["bg_surface"]
-            input_background = c["bg_input"]
+            input_background = c["bg_surface"]
             workspace_border = c["border"]
             soft_border = c["border"]
             text_color = c["text_main"]
@@ -802,6 +883,8 @@ exec "$@"
                 "rgba(138, 157, 188, 0.045) 58%, rgba(7, 12, 22, 1))"
             )
             composer_background = "linear-gradient(180deg, rgba(13, 23, 39, 0.98), rgba(7, 12, 22, 1))"
+            composer_card_background = "transparent"
+            composer_shadow = "0 18px 40px rgba(7, 12, 22, 0.28)"
             panel_background = "rgba(16, 28, 47, 0.94)"
             input_background = "rgba(17, 30, 50, 0.96)"
             workspace_border = "rgba(127, 154, 191, 0.44)"
@@ -835,8 +918,10 @@ exec "$@"
             warning_panel_border = "#5b4b2a"
             danger_soft_background = "rgba(255, 133, 133, 0.08)"
             danger_soft_border = "rgba(255, 133, 133, 0.34)"
+        color_scheme = "light" if c["is_light"] else "dark"
         return f"""
       :root {{
+        color-scheme: {color_scheme} !important;
         --bg: {c['bg_main']} !important;
         --chrome: {c['bg_panel']} !important;
         --panel: {c['bg_surface']} !important;
@@ -853,6 +938,21 @@ exec "$@"
         --danger: {danger_text_color} !important;
         --running: {c['success']} !important;
         --success: {c['success']} !important;
+        --scrollbar-track: {scrollbar_track} !important;
+        --scrollbar-thumb: {scrollbar_thumb} !important;
+        --scrollbar-thumb-hover: {scrollbar_thumb_hover} !important;
+      }}
+      html,
+      body,
+      select,
+      option,
+      input,
+      textarea,
+      button,
+      .taxamask-embed .settings-field-row select,
+      .taxamask-embed .settings-form-actions select,
+      .taxamask-embed .reasoning-effort-control select {{
+        color-scheme: {color_scheme} !important;
       }}
       .taxamask-embed,
       .taxamask-embed-body,
@@ -863,33 +963,31 @@ exec "$@"
         overflow: hidden !important;
       }}
       html.taxamask-embed,
-      .taxamask-embed-body,
-      .taxamask-embed * {{
+      .taxamask-embed-body {{
         scrollbar-color: {scrollbar_thumb} {scrollbar_track} !important;
         scrollbar-width: thin !important;
       }}
       html.taxamask-embed::-webkit-scrollbar,
-      .taxamask-embed-body::-webkit-scrollbar,
-      .taxamask-embed *::-webkit-scrollbar {{
+      .taxamask-embed-body::-webkit-scrollbar {{
         height: 10px !important;
         width: 10px !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-track,
-      .taxamask-embed-body::-webkit-scrollbar-track,
-      .taxamask-embed *::-webkit-scrollbar-track {{
+      .taxamask-embed-body::-webkit-scrollbar-track {{
         background: {scrollbar_track} !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-thumb,
-      .taxamask-embed-body::-webkit-scrollbar-thumb,
-      .taxamask-embed *::-webkit-scrollbar-thumb {{
+      .taxamask-embed-body::-webkit-scrollbar-thumb {{
         background: {scrollbar_thumb} !important;
         border: 2px solid {scrollbar_track} !important;
         border-radius: 999px !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-thumb:hover,
-      .taxamask-embed-body::-webkit-scrollbar-thumb:hover,
-      .taxamask-embed *::-webkit-scrollbar-thumb:hover {{
+      .taxamask-embed-body::-webkit-scrollbar-thumb:hover {{
         background: {scrollbar_thumb_hover} !important;
+      }}
+      .taxamask-embed .atmosphere {{
+        display: none !important;
       }}
       .taxamask-embed .app-shell,
       .app-shell {{
@@ -936,6 +1034,7 @@ exec "$@"
       .composer-shell {{
         background: {composer_background} !important;
         border-top: 1px solid {soft_border} !important;
+        box-shadow: none !important;
       }}
       .taxamask-embed .empty-state,
       .taxamask-embed .message,
@@ -998,13 +1097,16 @@ exec "$@"
       }}
       .taxamask-embed .composer,
       .composer {{
-        background: transparent !important;
+        background: {composer_card_background} !important;
+        border-color: {soft_border} !important;
+        box-shadow: {composer_shadow} !important;
       }}
       .taxamask-embed #prompt-input,
       #prompt-input {{
         background: {input_background} !important;
         border-color: {soft_border} !important;
         color: {text_color} !important;
+        box-shadow: none !important;
       }}
       .taxamask-embed .attach-button,
       .taxamask-embed .attachment-chip,
@@ -1411,14 +1513,95 @@ exec "$@"
       .taxamask-embed .task-progress-fill {{
         background: {accent_color} !important;
       }}
+      .taxamask-embed .reasoning-effort-control,
+      .taxamask-embed .model-status-summary {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .reasoning-effort-control select,
+      .taxamask-embed .reasoning-effort-control option,
+      .taxamask-embed .model-switch-fields option,
+      .taxamask-embed select,
+      .taxamask-embed option,
+      .taxamask-embed input:not([type="checkbox"]):not([type="radio"]),
+      .taxamask-embed textarea,
+      .taxamask-embed .settings-field-row input,
+      .taxamask-embed .settings-field-row select,
+      .taxamask-embed .settings-field-stack textarea,
+      .taxamask-embed .settings-form-actions select,
+      .taxamask-embed .settings-field-row select option,
+      .taxamask-embed .settings-form-actions select option {{
+        background: {input_background} !important;
+        background-color: {input_background} !important;
+        color: {text_color} !important;
+        color-scheme: {color_scheme} !important;
+      }}
+      .taxamask-embed .settings-view,
+      .taxamask-embed .settings-view-header,
+      .taxamask-embed .settings-layout,
+      .taxamask-embed .settings-content,
+      .taxamask-embed .settings-section {{
+        background: {workspace_background} !important;
+        color: {text_color} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .settings-rail {{
+        background: {header_background} !important;
+        border-color: {soft_border} !important;
+      }}
+      .taxamask-embed .settings-rail button {{
+        background: {option_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .settings-rail button:hover,
+      .taxamask-embed .settings-rail button.active {{
+        background: {option_selected_background} !important;
+        border-color: {accent_color} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .settings-default-scope,
+      .taxamask-embed .settings-current-source,
+      .taxamask-embed .settings-default-summary {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .settings-default-scope-picker button {{
+        background: {option_background} !important;
+        border-color: {soft_border} !important;
+        color: {c['text_soft']} !important;
+      }}
+      .taxamask-embed .settings-default-scope-picker button[aria-pressed="true"] {{
+        background: {option_selected_background} !important;
+        border-color: {accent_color} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .model-config-scope,
+      .taxamask-embed .model-config-scope label {{
+        background: {option_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .settings-primary-action {{
+        background: {send_background} !important;
+        border-color: {accent_color} !important;
+        color: {send_text} !important;
+      }}
+      .taxamask-embed .goal-status-bar {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+      }}
     """.rstrip()
 
     def _web_bootstrap_source(self):
         return r"""
 (() => {
-  if (window.__taxamaskAgentBootstrapInstalled) return;
-  window.__taxamaskAgentBootstrapInstalled = true;
   const taxamaskEmbedCss = __TAXAMASK_EMBED_STYLE__;
+  const taxamaskTheme = __TAXAMASK_THEME__;
   const reloadKey = "__taxamaskAgentJsonReloaded";
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const guardedApiPath = (input) => {
@@ -1434,9 +1617,15 @@ exec "$@"
     }
   };
   const installStyle = () => {
-    if (!document.head) return;
-    document.documentElement.classList.add("taxamask-embed");
+    const root = document.documentElement;
+    if (root) {
+      root.classList.add("taxamask-embed");
+      root.classList.remove("taxamask-embed-light", "taxamask-embed-dark");
+      root.classList.add("taxamask-embed-" + taxamaskTheme);
+      root.style.colorScheme = taxamaskTheme;
+    }
     document.body?.classList.add("taxamask-embed-body");
+    if (!document.head) return;
     let style = document.querySelector("#taxamask-agent-embed-style");
     if (!style) {
       style = document.createElement("style");
@@ -1446,7 +1635,11 @@ exec "$@"
     style.textContent = taxamaskEmbedCss;
   };
   installStyle();
-  document.addEventListener("DOMContentLoaded", installStyle, { once: true });
+  if (!window.__taxamaskAgentBootstrapInstalled) {
+    document.addEventListener("DOMContentLoaded", installStyle, { once: true });
+  }
+  if (window.__taxamaskAgentBootstrapInstalled) return;
+  window.__taxamaskAgentBootstrapInstalled = true;
 
   const nativeFetch = window.fetch ? window.fetch.bind(window) : null;
   if (nativeFetch) {
@@ -1492,7 +1685,7 @@ exec "$@"
     }
   });
 })();
-""".replace("__TAXAMASK_EMBED_STYLE__", json.dumps(self._web_embed_style_source()))
+""".replace("__TAXAMASK_EMBED_STYLE__", json.dumps(self._web_embed_style_source())).replace("__TAXAMASK_THEME__", json.dumps(self._embed_theme_name()))
 
     def _sync_web_embed_theme(self):
         if self.web_view is None:
@@ -1503,9 +1696,16 @@ exec "$@"
             f"""
             (() => {{
               const css = {css};
-              if (!document.head) return false;
-              document.documentElement.classList.add("taxamask-embed");
+              const theme = {json.dumps(self._embed_theme_name())};
+              const root = document.documentElement;
+              if (root) {{
+                root.classList.add("taxamask-embed");
+                root.classList.remove("taxamask-embed-light", "taxamask-embed-dark");
+                root.classList.add("taxamask-embed-" + theme);
+                root.style.colorScheme = theme;
+              }}
               document.body?.classList.add("taxamask-embed-body");
+              if (!document.head) return false;
               let style = document.querySelector("#taxamask-agent-embed-style");
               if (!style) {{
                 style = document.createElement("style");
@@ -1559,6 +1759,7 @@ exec "$@"
 
     def set_theme(self, theme):
         self._apply_style(theme)
+        self._install_web_bootstrap_script()
         self._sync_web_embed_theme()
 
     def set_language(self, lang):
@@ -1788,7 +1989,10 @@ exec "$@"
             self.stack.setCurrentWidget(self.fallback)
             self._update_fallback()
         self._apply_web_view_background_color()
-        cache_key = f"taxamask_embed=1&taxamask_lang={self.lang}&reload={self._load_retries}"
+        cache_key = (
+            f"taxamask_embed=1&taxamask_theme={self._embed_theme_name()}"
+            f"&taxamask_lang={self.lang}&reload={self._load_retries}"
+        )
         self.web_view.load(QUrl(f"{self.dashboard_url}/?{cache_key}"))
 
     def _web_post_load_source(self):
@@ -3025,12 +3229,11 @@ exec "$@"
             return False
         name = Path(str(process_name or "")).name.lower()
         source_entry = self._normalize_process_command(self.ant_code_dashboard_entry or "")
+        is_embed_entry = "src\\cli\\dashboard-embed.ts" in command
+        is_index_entry = "src\\cli\\index.ts" in command or "src\\cli\\index.js" in command
         source_dashboard = (
-            (
-                "src\\cli\\dashboard.js" in command
-                or ("src\\cli\\index.js" in command and " dashboard " in f" {command} ")
-            )
-            and (not source_entry or source_entry in command or "src\\cli\\dashboard.js" in command)
+            (is_embed_entry or (is_index_entry and " dashboard " in f" {command} "))
+            and (not source_entry or source_entry in command or is_embed_entry or is_index_entry)
             and name in {"node", "node.exe"}
         )
         executable_dashboard = (

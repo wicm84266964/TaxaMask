@@ -1,7 +1,7 @@
 # TaxaMask LLM Context
 
 > Target: embedded AntCode agents, advanced LLM assistants, and developers maintaining the current TaxaMask `main` / v2.x line.
-> Last synchronized: 2026-08-24 for TaxaMask v2.5.0.
+> Last synchronized: 2026-09-05 for TaxaMask v2.6.0.
 
 This file is the current-state handoff document. It is not a changelog. Do not append dated development logs here. Keep it focused on the program state that an agent needs in order to diagnose, modify, and safely operate TaxaMask.
 
@@ -86,9 +86,9 @@ On Windows, embedded Qt WebEngine rendering defaults to `auto`, allowing availab
 
 The embedded Agent Center uses the first-party `vendor/ant-code/` runtime.
 
-The current embedded runtime is labeled `1.3.5-taxamask.1`: the version label follows the current Ant-Code formal release, while this update intentionally changes version metadata only and keeps the existing TaxaMask-adapted embedded source unchanged. Going forward, TaxaMask-only follow-up changes use `<upstream version>-taxamask.<N>`, with the suffix reset to `.1` when the upstream release label changes. Source synchronization remains a separate reviewed operation; do not infer that upstream bug fixes are present from the label alone. The embedded version is independent of the TaxaMask application version. It includes the 1.3 Dashboard session lifecycle, responsive/accessible UI, long-transcript paging, atomic model configuration, background subagent/terminal visibility, file safety, session persistence improvements, and read-only `git_status` / `git_diff` tools used by bundled review Skills. It intentionally does not include the standalone EXE/release pipeline, broader standalone Git mutation toolset, or the large TUI input-editor refactor.
+The current embedded runtime is labeled `2.0.5-taxamask.1`: TypeScript Ant Code 2.0.5 plus TaxaMask host adaptations (source-write guard, extra skill roots, Qt embed theme, `src/cli/dashboard-embed.ts` launch). TaxaMask-only follow-up changes use `<upstream version>-taxamask.<N>`, with the suffix reset to `.1` when the upstream release label changes. Source synchronization remains a separate reviewed operation; do not infer that upstream bug fixes are present from the label alone. The embedded version is independent of the TaxaMask application version. This development checkout (`Formica-Flow-Latest`) is the TaxaMask source tree the Agent Center opens; a folder named `TaxaMask` is not required. It includes the 2.0 Dashboard, config-v2, and the standalone git tool set under the TaxaMask source-write guard. It does not include the standalone EXE/release pipeline.
 
-Configuration precedence is TaxaMask-specific: bundled defaults < environment defaults < explicit `LAB_AGENT_CONFIG` < current project configuration. The Dashboard always saves to the current project's `.lab-agent/config.json`. Precedence is applied per field: project model and gateway fields override their matching environment defaults, while fields absent from the project continue to fall back to the environment; an environment API key may fill a missing or blank project key. The mere existence of `.lab-agent/config.json` must not suppress unrelated environment model or gateway fields. Do not restore automatic reads from the user's default `.ant-code` configuration directory. `LAB_AGENT_SKIP_PROJECT_CONFIG=1` must continue to disable project config loading when isolation is required.
+Configuration precedence is TaxaMask-specific: bundled defaults < environment defaults < explicit `LAB_AGENT_CONFIG` < current project configuration. The Dashboard uses config-v2 settings documents. Do not restore automatic reads from the user's default `.ant-code` configuration directory.
 
 Visible conversation history and model-resume context use separate transcript archives (`<session>.transcript/` and `<session>.model-context/`). Internal guide prompts must not appear as researcher-visible messages. The Dashboard must keep active background subagent and terminal state visible after the main answer ends, reconnect active sessions, and show the running send action as an interrupt action.
 

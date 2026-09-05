@@ -2206,6 +2206,52 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.close_project()
                 widget.deleteLater()
 
+    def test_specimen_tree_context_menu_offers_delete_imported_volume_on_full_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = self._make_volume_widget(Path(tmp), z_count=4)
+            try:
+                widget.refresh_project()
+                parent = widget.specimen_list.topLevelItem(0)
+                self.assertIsNotNone(parent)
+                full_item = parent.child(0)
+                parent_actions = widget._specimen_tree_context_menu_actions(widget._tree_item_payload(parent))
+                full_actions = widget._specimen_tree_context_menu_actions(widget._tree_item_payload(full_item))
+                self.assertEqual([item[0] for item in parent_actions], ["delete_imported"])
+                self.assertEqual([item[1] for item in parent_actions], ["Delete imported volume"])
+                self.assertEqual([item[0] for item in full_actions], ["delete_imported"])
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
+    def test_delete_imported_volume_from_tree_keeps_source_tif(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_tif = root / "source_keep.tif"
+            tifffile.imwrite(source_tif, np.arange(2 * 8 * 8, dtype=np.uint8).reshape((2, 8, 8)))
+            widget = self._make_volume_widget(root, z_count=4)
+            try:
+                specimen_dir = root / "viewer" / widget.project.specimen_dir("01-0101-21")
+                widget.project.project_data["specimens"][0]["source"] = {"raw_tif": str(source_tif)}
+                widget.project.save_project()
+                widget.refresh_project()
+                widget._select_volume_tree_item("01-0101-21", "full", "")
+                self.assertTrue(specimen_dir.exists())
+                self.assertTrue(widget.btn_delete_imported_volume.isEnabled())
+
+                with patch.object(widget, "load_specimen") as load_specimen, \
+                    patch("AntSleap.ui.tif_workbench.QMessageBox.question", return_value=QMessageBox.Yes):
+                    self.assertTrue(widget.delete_imported_volume("01-0101-21"))
+
+                load_specimen.assert_not_called()
+                self.assertFalse(specimen_dir.exists())
+                self.assertIsNone(widget.project.get_specimen("01-0101-21", default=None))
+                self.assertEqual(widget.current_specimen_id, "")
+                self.assertTrue(source_tif.exists())
+                self.assertIn("Deleted imported volume", widget.training_status_label.text())
+            finally:
+                widget.close_project()
+                widget.deleteLater()
+
     def test_part_freehand_contour_saves_overlay_and_deletes_key_slice(self):
         with tempfile.TemporaryDirectory() as tmp:
             widget = self._make_volume_widget(Path(tmp), z_count=5)
@@ -3761,6 +3807,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("combined into one specimen", widget.btn_import_tif_slices.toolTip())
             self.assertIn("physical Z spacing is not inferred", widget.btn_import_tif_slices.toolTip())
             self.assertEqual(widget.btn_import_amira.text(), "Import AMIRA directory")
+            self.assertEqual(widget.btn_delete_imported_volume.text(), "Delete imported volume")
             self.assertEqual(widget.btn_export_training.text(), "Export train-ready volumes")
             self.assertEqual(widget.btn_prepare_dataset.text(), "Prepare dataset")
             self.assertEqual(widget.btn_train_backend.text(), "Train backend")
@@ -3786,6 +3833,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_tif), "tifImportStackButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_tif_slices), "tifImportSliceSeriesButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_amira), "tifImportAmiraButton"))
+            self.assertIsNotNone(widget.findChild(type(widget.btn_delete_imported_volume), "tifDeleteImportedVolumeButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_prepare_dataset), "tifPrepareDatasetButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_train_backend), "tifTrainBackendButton"))
             self.assertIsNotNone(widget.findChild(type(widget.btn_import_prediction), "tifImportPredictionButton"))
@@ -7519,6 +7567,7 @@ class TifWorkbenchTests(unittest.TestCase):
             self.assertIn("合并为一个样本", widget.btn_import_tif_slices.toolTip())
             self.assertIn("不会自动推断 Z 向物理间距", widget.btn_import_tif_slices.toolTip())
             self.assertEqual(widget.btn_import_amira.text(), "导入 AMIRA 目录")
+            self.assertEqual(widget.btn_delete_imported_volume.text(), "删除导入体数据")
             self.assertEqual(widget.btn_export_training.text(), "导出可训练体数据")
             self.assertEqual(widget.btn_prepare_dataset.text(), "准备训练数据")
             self.assertEqual(widget.btn_train_backend.text(), "训练后端")

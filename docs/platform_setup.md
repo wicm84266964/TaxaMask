@@ -17,7 +17,7 @@ Install prerequisites first:
 - Git, or the ability to download and extract the GitHub ZIP archive.
 - Conda or another Python environment manager.
 - Python 3.12 for the recommended public source setup.
-- Node.js 20 or newer with npm for the embedded Agent Center / Ant-Code dashboard.
+- Node.js 22.18 or newer with npm for the embedded Agent Center / Ant-Code dashboard.
 
 Clone the source repository and enter it before installing dependencies:
 
@@ -66,7 +66,7 @@ TaxaMask can launch without API keys, and the Agent Center dashboard can open be
 If the PySide6 GUI cannot start after source changes, launch the bundled dashboard directly from the repository root:
 
 ```bash
-node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
+node vendor/ant-code/src/cli/index.ts dashboard --project . --port 7410
 ```
 
 On Windows, `启动AntCode修复面板.bat` provides the same recovery route with additional Node.js discovery. On Ubuntu/Linux or from a WSL shell, use:

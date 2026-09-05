@@ -51,14 +51,21 @@ jobs:
           if [[ "v$citation_version" != "$VERSION" ]]; then
             echo "CITATION.cff version $citation_version does not match requested release $VERSION." >&2; exit 1
           fi
+          citation_date="$(sed -n 's/^date-released: "\([^"]*\)"/\1/p' CITATION.cff)"
+          if [[ ! "$citation_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "CITATION.cff date-released must use YYYY-MM-DD." >&2; exit 1
+          fi
           shopt -s nullglob
-          release_notes=(docs/releases/"${VERSION#v}"-*.md)
+          release_notes=(docs/releases/"${VERSION#v}"-*_zh.md)
           if [[ "${#release_notes[@]}" -ne 1 ]]; then
-            echo "Expected exactly one docs/releases/${VERSION#v}-*.md release note, found ${#release_notes[@]}." >&2; exit 1
+            echo "Expected exactly one docs/releases/${VERSION#v}-*_zh.md release note, found ${#release_notes[@]}." >&2; exit 1
           fi
           heading="$(sed -n '1{s/\r$//;p;}' "${release_notes[0]}")"
-          if [[ "$heading" != "# TaxaMask $VERSION"* ]]; then
-            echo "Release note H1 must start with '# TaxaMask $VERSION'." >&2; exit 1
+          if [[ "$heading" != "# TaxaMask $VERSION："* && "$heading" != "# TaxaMask $VERSION: "* ]]; then
+            echo "Release note H1 must include a descriptive title after '# TaxaMask $VERSION：'." >&2; exit 1
+          fi
+          if ! grep -Fxq "发布日期：$citation_date" "${release_notes[0]}"; then
+            echo "Release note publication date must match CITATION.cff date-released $citation_date." >&2; exit 1
           fi
       - name: Require successful checks on this commit
         env:
@@ -88,9 +95,9 @@ jobs:
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           shopt -s nullglob
-          release_notes=(docs/releases/"${VERSION#v}"-*.md)
+          release_notes=(docs/releases/"${VERSION#v}"-*_zh.md)
           if [[ "${#release_notes[@]}" -ne 1 ]]; then
-            echo "Expected exactly one docs/releases/${VERSION#v}-*.md release note, found ${#release_notes[@]}." >&2
+            echo "Expected exactly one docs/releases/${VERSION#v}-*_zh.md release note, found ${#release_notes[@]}." >&2
             exit 1
           fi
           heading="$(sed -n '1{s/\r$//;p;}' "${release_notes[0]}")"

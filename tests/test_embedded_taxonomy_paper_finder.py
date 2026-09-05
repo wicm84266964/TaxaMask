@@ -40,22 +40,27 @@ class EmbeddedTaxonomyPaperFinderTests(unittest.TestCase):
         self.assertNotIn(".lab-agent/", skill_text)
 
     def test_ant_code_loads_pdf_evidence_from_the_bundled_skill_root(self):
-        registry_uri = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "skills" / "registry.js").resolve().as_uri()
+        registry_uri = (PROJECT_ROOT / "vendor" / "ant-code" / "src" / "skills" / "registry.ts").resolve().as_uri()
+        skills_root = str(SKILLS_ROOT)
         script = f"""
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {{ loadSkills, readSkill }} from {json.dumps(registry_uri)};
-const cwd = {json.dumps(str(PROJECT_ROOT))};
-const config = {{ skills: {{ enabled: true, includeProjectDefaults: false }} }};
-const skills = await loadSkills({{ cwd, config, env: process.env }});
+const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "taxamask-skills-"));
+const skillsRoot = {json.dumps(skills_root)};
+const config = {{ skills: {{ enabled: true, paths: [skillsRoot] }} }};
+const skills = await loadSkills({{ cwd, config, env: {{}} }});
 const hit = skills.find((item) => item.name === "taxamask-pdf-evidence");
 assert.ok(hit);
-assert.match(hit.source.replaceAll("\\\\", "/"), /vendor\/ant-code\/config\/skills$/);
-const loaded = await readSkill({{ cwd, config, env: process.env, name: "taxamask-pdf-evidence" }});
+assert.match(String(hit.source).replaceAll("\\\\", "/"), /vendor\\/ant-code\\/config\\/skills/);
+const loaded = await readSkill({{ cwd, config, env: {{}}, name: "taxamask-pdf-evidence" }});
 assert.equal(loaded.ok, true);
 assert.match(loaded.skill.content, /PDF outputs are evidence and review candidates/);
 """
         result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

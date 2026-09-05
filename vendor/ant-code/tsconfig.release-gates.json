@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": [
+    "scripts/build-dashboard-assets.ts",
+    "scripts/check-dashboard-assets.ts",
+    "scripts/check-types.ts",
+    "scripts/dashboard-assets.ts",
+    "scripts/lockfile-consistency.ts",
+    "scripts/type-ratchet.ts"
+  ]
+}

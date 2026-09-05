@@ -50,12 +50,12 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - Current maintained line: **TaxaMask `main` / v2.x**, integrating Agent Center, PDF evidence, 2D/STL morphology, and the newer TIF/CT workbench in one branch.
 - Startup defaults to TaxaMask Agent Center.
 - The start center main area embeds Ant-Code Dashboard through `AntSleap/ui/taxamask_agent_panel.py`.
-- The embedded Agent Center runtime is `1.3.0-taxamask.2`. TaxaMask keeps its embedded workspace/config boundary, read-only Git review tools, source guard, and selectively adapted Skill set rather than mirroring standalone Ant-Code wholesale.
-- The default registry exposes 14 maintained Skills, including `paper-distill` and `unsloth-studio-finetune`. Their source commit, local variant, license, sync policy, and test command are recorded in `skills/EMBEDDED_SKILLS.json`.
+- The embedded Agent Center runtime is `2.0.5-taxamask.1` (TypeScript, Node.js 22.18+). TaxaMask keeps its host workspace/config boundary, source-write guard, and selectively adapted Skill set; do not treat a separate `TaxaMask` folder name as a different repository from this checkout.
+- The default registry exposes 15 maintained Skills, including `paper-distill` and `unsloth-studio-finetune`. Their source commit, local variant, license, sync policy, and test command are recorded in `skills/EMBEDDED_SKILLS.json`.
 - Long-running terminal work should use registered background terminal tasks: prefer `background_shell`, check existing tasks with `background_terminal_list` before restarting servers/viewers/downloads/renders/training jobs, and cancel stale tasks with `background_terminal_cancel` when appropriate. Dashboard recycle actions can also cancel registered terminal tasks.
 - The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.
 - Normal Windows launch uses `启动TaxaMask.bat`, which discovers a usable Python environment instead of assuming a maintainer-specific Conda path. `TAXAMASK_PYTHON_EXE` can point to a custom `python.exe`.
-- If TaxaMask GUI cannot start after local source edits, use `启动AntCode修复面板.bat`. It starts the vendored Ant-Code browser Dashboard without importing the PySide6 GUI and sets `LAB_AGENT_SKIP_PROJECT_CONFIG=1` so broken project-local Ant-Code config JSON does not block repair. Model/API settings may need to be reconfirmed inside that recovery Dashboard.
+- If TaxaMask GUI cannot start after local source edits, use `启动AntCode修复面板.bat`. It starts the vendored Ant-Code browser Dashboard without importing the PySide6 GUI. Model/API settings may need to be reconfirmed inside that recovery Dashboard.
 - Workbenches expose lightweight `Start Center` / `Ask Agent` entries. Do not place full chat panes inside annotation workspaces by default.
 - `Settings` is split into:
   - `General Settings`: language, theme, startup behavior, autosave, default internal runtime device

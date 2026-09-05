@@ -233,7 +233,7 @@ python AntSleap/main.py
 启动AntCode修复面板.bat
 ```
 
-这个脚本只依赖 Node.js 20 或更新版本，不导入 TaxaMask 的 Python GUI，也不需要 PySide6。它会在浏览器里打开 Ant-Code Dashboard，让你继续查看文件、解释报错、撤回或修正刚才的代码改动。
+这个脚本只依赖 Node.js 22.18 或更新版本，不导入 TaxaMask 的 Python GUI，也不需要 PySide6。它会在浏览器里打开 Ant-Code Dashboard，让你继续查看文件、解释报错、撤回或修正刚才的代码改动。
 
 需要注意两点：
 

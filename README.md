@@ -255,7 +255,7 @@ Prerequisites:
 - Git, or a GitHub ZIP download.
 - Conda or another Python environment manager.
 - Python 3.12.
-- Node.js 20 or newer for the Agent Center dashboard.
+- Node.js 22.18 or newer for the Agent Center dashboard.
 
 Clone the maintained main branch:
 
@@ -335,7 +335,7 @@ bash ./启动TaxaMask.sh
 If source-code changes prevent the GUI from starting, launch the Agent Center recovery dashboard directly:
 
 ```bash
-node vendor/ant-code/src/cli/dashboard.js --project . --port 7410
+node vendor/ant-code/src/cli/index.ts dashboard --project . --port 7410
 ```
 
 On Windows, `启动AntCode修复面板.bat` uses this recovery route.

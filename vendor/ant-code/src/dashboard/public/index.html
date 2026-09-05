@@ -5,16 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=dashboard-agent-models" />
+    <link rel="stylesheet" href="/assets/styles.css?v=taxamask-light-composer" />
   </head>
   <body data-dashboard-view="conversation">
+    <div class="atmosphere" aria-hidden="true"></div>
     <div class="app-shell">
       <aside class="sidebar" id="session-panel" aria-label="任务线程">
         <div class="brand">
-          <div class="brand-mark">A</div>
+          <div class="brand-mark" aria-hidden="true">
+            <span class="brand-filament"></span>
+          </div>
           <div>
             <div class="brand-name">Ant Code</div>
-            <div class="brand-subtitle">Dashboard</div>
+            <div class="brand-subtitle">本机工作台</div>
           </div>
         </div>
         <button class="primary-action" id="new-task" type="button">新任务</button>
@@ -40,14 +43,16 @@
 
       <main class="workspace">
         <header class="workspace-header">
-          <div class="workspace-local" title="仅此电脑可打开，文件访问按当前权限执行">
-            <span class="local-dot" aria-hidden="true"></span>
-            <span>本地通用智能体</span>
-          </div>
+          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="仅此电脑可打开。本地网关未连接。点击重新连接" aria-label="本地网关未连接，点击重新连接">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span class="connection-label">本地网关未连接</span>
+          </button>
           <div class="header-actions">
-            <button class="connection-status" id="connection-status" type="button" data-state="idle" title="连接状态：未连接">
-              <span class="connection-dot" aria-hidden="true"></span>
-              <span class="connection-label">未连接</span>
+            <button class="header-settings" id="settings-button" type="button" aria-label="打开设置" aria-controls="settings-view" aria-pressed="false" title="设置">
+              <svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M10.2 3.4h3.6l.4 2.1a6.8 6.8 0 0 1 1.7.96l2-.9 1.8 3.12-1.6 1.5c.1.5.16 1 .16 1.52s-.06 1.02-.16 1.52l1.6 1.5-1.8 3.12-2-.9a6.8 6.8 0 0 1-1.7.96l-.4 2.1h-3.6l-.4-2.1a6.8 6.8 0 0 1-1.7-.96l-2 .9-1.8-3.12 1.6-1.5A6.6 6.6 0 0 1 8 12c0-.52.06-1.02.16-1.52l-1.6-1.5 1.8-3.12 2 .9a6.8 6.8 0 0 1 1.7-.96l.4-2.1ZM12 9.4A2.6 2.6 0 1 0 12 14.6 2.6 2.6 0 0 0 12 9.4Z"/>
+              </svg>
+              <span class="header-settings-label">设置</span>
             </button>
             <div class="status-pill" id="run-status">空闲</div>
             <button class="header-shutdown" id="header-shutdown-button" type="button">关闭</button>
@@ -56,12 +61,55 @@
 
         <section class="workflow-strip hidden" id="workflow-strip" aria-live="polite"></section>
 
+        <section class="settings-view hidden" id="settings-view" aria-labelledby="settings-title">
+          <header class="settings-view-header">
+            <button class="settings-back" id="settings-back" type="button" aria-label="返回对话" title="返回对话">
+              <svg class="settings-back-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m12 19-7-7 7-7"></path>
+                <path d="M19 12H5"></path>
+              </svg>
+            </button>
+            <div>
+              <div class="settings-kicker">Ant Code</div>
+              <h1 id="settings-title">设置</h1>
+            </div>
+          </header>
+          <div class="settings-layout">
+            <nav class="settings-rail" id="settings-rail" aria-label="设置分类">
+              <button type="button" class="active" aria-current="page" data-settings-section="models">
+                <span class="settings-rail-icon" aria-hidden="true">&#9678;</span>
+                <span>模型与网关</span>
+              </button>
+              <button type="button" data-settings-section="transcript">
+                <span class="settings-rail-icon" aria-hidden="true">&#9716;</span>
+                <span>隐私与历史</span>
+              </button>
+              <button type="button" data-settings-section="network">
+                <span class="settings-rail-icon" aria-hidden="true">&#8644;</span>
+                <span>网络边界</span>
+              </button>
+              <button type="button" data-settings-section="agents">
+                <span class="settings-rail-icon" aria-hidden="true">&#9671;</span>
+                <span>子智能体</span>
+              </button>
+              <button type="button" data-settings-section="reliability">
+                <span class="settings-rail-icon" aria-hidden="true">&#8635;</span>
+                <span>网关可靠性</span>
+              </button>
+            </nav>
+            <div class="settings-content" id="settings-content"></div>
+          </div>
+        </section>
+
         <div class="transcript-stage">
           <section class="transcript" id="transcript" role="log" aria-live="off" aria-label="对话记录" tabindex="0">
             <div class="empty-state" id="empty-state">
-              <div class="empty-kicker">Ant Code Dashboard</div>
+              <div class="empty-orbit" aria-hidden="true">
+                <span class="empty-core"></span>
+              </div>
+              <div class="empty-kicker">Ant Code · Local</div>
               <div class="empty-title">我将全力配合你的工作</div>
-              <div class="empty-copy">过程会保持折叠，结果和文件会在这里清楚呈现。</div>
+              <div class="empty-copy">过程折叠。结果展开。文件留在右侧。</div>
             </div>
           </section>
           <button class="transcript-jump hidden" id="transcript-jump" type="button">回到底部</button>
@@ -89,13 +137,19 @@
           </div>
           <div class="trust-panel hidden" id="trust-panel"></div>
           <div class="permission-confirm-panel hidden" id="permission-confirm-panel"></div>
+          <div class="permission-confirm-panel hidden" id="goal-confirm-panel"></div>
+          <div class="permission-confirm-panel hidden" id="goal-text-panel"></div>
           <div class="context-panel hidden" id="context-panel"></div>
           <div class="queue-panel hidden" id="queue-panel"></div>
+          <div class="goal-status-bar hidden" id="goal-status-bar"></div>
           <div class="mode-row">
-            <div class="segmented" id="permission-mode" role="radiogroup" aria-label="权限模式" aria-describedby="mode-description">
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-mode="plan" class="active">计划确认</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="workspace">工作区权限</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="fullAccess">完全访问</button>
+            <div class="mode-cluster">
+              <div class="segmented" id="permission-mode" role="radiogroup" aria-label="权限模式" aria-describedby="mode-description">
+                <button type="button" role="radio" aria-checked="true" tabindex="0" data-mode="plan" class="active">计划确认</button>
+                <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="workspace">工作区权限</button>
+                <button type="button" role="radio" aria-checked="false" tabindex="-1" data-mode="fullAccess">完全访问</button>
+              </div>
+              <button type="button" id="goal-mode" class="goal-mode-button" aria-pressed="false" aria-label="Goal 模式">Goal</button>
             </div>
             <div class="mode-description" id="mode-description">写入和命令需确认</div>
             <div class="context-actions">
@@ -110,7 +164,11 @@
             <span class="visually-hidden" id="prompt-description">按 Enter 发送，按 Shift 加 Enter 换行</span>
             <textarea id="prompt-input" rows="2" aria-describedby="prompt-description" placeholder="输入任务需求，例如：整理这批实验数据并生成一份简洁报告"></textarea>
             <input id="attachment-input" class="hidden" type="file" accept="image/*" multiple />
-            <button class="attach-button" id="attach-button" type="button" title="添加图片" aria-label="添加图片">+</button>
+            <button class="attach-button" id="attach-button" type="button" title="添加图片" aria-label="添加图片">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M16.5 6.5v8.2a4.5 4.5 0 1 1-9 0V7.8a3.2 3.2 0 1 1 6.4 0v6.6a1.9 1.9 0 1 1-3.8 0V8.2h1.7v6.2a.2.2 0 1 0 .4 0V7.8a1.5 1.5 0 1 0-3 0v6.9a3.2 3.2 0 1 0 6.4 0V6.5a4.8 4.8 0 1 0-9.6 0v8.2a6.2 6.2 0 1 0 12.4 0V6.5h-1.9Z"/>
+              </svg>
+            </button>
             <button id="send-button" type="button">发送</button>
           </div>
           <div class="composer-footer" aria-live="polite">
@@ -119,8 +177,8 @@
             <span id="change-status" class="change-status hidden"></span>
           </div>
           <div class="model-panel hidden" id="model-panel"></div>
-          <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
         </section>
+        <div class="model-config-panel hidden" id="model-config-panel" role="dialog" aria-modal="true" aria-labelledby="model-config-title"></div>
       </main>
 
       <aside class="preview" id="file-panel" aria-label="文件预览">
@@ -142,6 +200,7 @@
         <button type="button" data-dashboard-view="sessions" aria-controls="session-panel">会话</button>
         <button type="button" data-dashboard-view="conversation" aria-controls="transcript" aria-current="page">对话</button>
         <button type="button" data-dashboard-view="files" aria-controls="file-panel">文件</button>
+        <button type="button" data-dashboard-view="settings" aria-controls="settings-view">设置</button>
       </nav>
     </div>
     <div class="dashboard-live-region visually-hidden" id="dashboard-live-region" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -166,6 +225,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=dashboard-agent-models" type="module"></script>
+    <script src="/assets/app.js?v=cache-hit" type="module"></script>
   </body>
 </html>

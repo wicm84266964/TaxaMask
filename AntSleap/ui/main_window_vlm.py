@@ -822,7 +822,7 @@ class MainWindowVlmMixin:
             if bar_widget is not None:
                 bar_widget.setValue(percent)
 
-    def _fit_wrapped_dialog_label(self, label, content_width):
+    def _fit_wrapped_dialog_label(self, label, content_width, min_lines=1):
         if label is None:
             return
         label.setWordWrap(True)
@@ -833,7 +833,8 @@ class MainWindowVlmMixin:
             metrics = label.fontMetrics()
             needed = metrics.boundingRect(0, 0, width, 4000, Qt.TextWordWrap, label.text() or "").height()
         line = max(1, label.fontMetrics().lineSpacing())
-        label.setMinimumHeight(max(needed, line) + 4)
+        min_lines = max(1, int(min_lines or 1))
+        label.setMinimumHeight(max(needed, line * min_lines) + 4)
 
     def _create_vlm_progress_dialog(self):
         progress = QDialog(self)
@@ -855,7 +856,7 @@ class MainWindowVlmMixin:
         )
         notice_label.setWordWrap(True)
         notice_label.setStyleSheet("color: #9CA3AF;")
-        self._fit_wrapped_dialog_label(notice_label, content_width)
+        self._fit_wrapped_dialog_label(notice_label, content_width, min_lines=2)
         label = QLabel("")
         label.setWordWrap(True)
         self._fit_wrapped_dialog_label(label, content_width)

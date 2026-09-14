@@ -74,11 +74,11 @@ class TifStoragePanelController(QObject):
         wb.storage_table.setHorizontalHeaderLabels(
             [
                 tt("Path", lang),
-                tt("Role", lang),
-                tt("Layer", lang),
+                tt("File purpose", lang),
+                tt("Protection layer", lang),
                 tt("Size", lang),
                 tt("Status", lang),
-                tt("Reason", lang),
+                tt("Protected reason", lang),
             ]
         )
 
@@ -271,14 +271,20 @@ class TifStoragePanelController(QObject):
                 )
                 rows.append((item, status, item.get("classification_reason") or ""))
         table.setRowCount(len(rows))
+        try:
+            from AntSleap.core.tif_status_display import storage_role_label, storage_status_label
+        except ImportError:
+            from core.tif_status_display import storage_role_label, storage_status_label
+        lang = self.workbench.lang
         for row_index, (item, status, reason) in enumerate(rows):
+            display_status = status if item.get("state") in {None, "", "planned"} else item.get("state")
             values = [
                 item.get("original_path") or item.get("relative_path") or "",
-                item.get("role") or "",
+                tt(storage_role_label(item.get("role") or ""), lang),
                 item.get("authority_level") or "",
                 _bytes_text(item.get("size_bytes") or item.get("logical_bytes")),
-                status if item.get("state") in {None, "", "planned"} else item.get("state"),
-                reason,
+                tt(storage_status_label(display_status), lang),
+                tt(str(reason or ""), lang) if reason else "",
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))

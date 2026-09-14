@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QThread, QTimer
 from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPainterPath, QPixmap
 try:
     from AntSleap.core.project import AUTO_BOX_SOURCE_VLM
+    from AntSleap.core.training_truth import resolve_part_training_trust
     from AntSleap.core.cascade_routes import build_expert_id
     from AntSleap.core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from AntSleap.core.blink_expert_manifest import (
@@ -51,6 +52,7 @@ try:
     )
 except ImportError:
     from core.project import AUTO_BOX_SOURCE_VLM
+    from core.training_truth import resolve_part_training_trust
     from core.cascade_routes import build_expert_id
     from core.expert_notes import format_expert_display_name, load_expert_notes, set_expert_note
     from core.blink_expert_manifest import (
@@ -119,7 +121,20 @@ BLINK_TRANSLATIONS = {
         "Shrink Logic:": "收缩逻辑：",
         "AUTO-ANNOTATE DRAFT": "自动标注草稿",
         "EXECUTE AUTO-SHRINK": "执行自动收缩",
-        "APPLY TO GLOBAL": "应用到全局",
+        "APPLY TO GLOBAL": "确认并写回主图",
+        "Confirm and write back": "确认并写回主图",
+        "Confirm and write back to main image": "确认并写回主图",
+        "Image: {0}\nPart: {1}\n{2}{3}": "图片：{0}\n部位：{1}\n{2}{3}",
+        "This will replace the existing outline.": "这将替换已有轮廓。",
+        "This will add a new outline.": "这将新增轮廓。",
+        "Only the box will be written back. The existing outline confirmation status will not change.": "只会写回框，不会改变现有轮廓的确认状态。",
+        "This will replace the confirmed outline of {0} on the main workbench. The previous outline will be kept so it can be restored if write-back fails.": "这将替换主工作台上部位 {0} 的已确认轮廓。若写回失败，会恢复原来的轮廓。",
+        "Wrote {0} back to the main image.": "已将 {0} 写回主图。",
+        "Restored local Blink edits. Confirm and write back to keep them on the main image.": "已恢复本地子部位专家（Blink）编辑。要保留到主图请再点确认并写回主图。",
+        "Child Expert Session": "子部位专家（Blink）",
+        "Blink Control Room": "子部位专家（Blink）控制区",
+        "Kept the existing main-image outline for {0}.": "已保留主图上部位 {0} 的现有轮廓。",
+        "Write-back failed for {0}. The previous outline was restored.": "部位 {0} 写回失败，已恢复原来的轮廓。",
         "Training Settings": "训练设置",
         "Training Log": "训练日志",
         "Clear Log": "清空日志",
@@ -242,6 +257,7 @@ BLINK_TRANSLATIONS = {
         "Edited {0} in Blink session. Apply to Global to keep changes.": "已在 Blink 会话中编辑 {0}。请应用到全局以保留修改。",
         "Focus: {0}": "焦点：{0}",
         "Mode: {0}": "模式：{0}",
+        "Error: {0}": "错误：{0}",
         "Error: Select a part first!": "错误：请先选择部位！",
         "Error: Open a Blink session first.": "错误：请先打开一个 Blink 会话。",
         "Error: Blink auto-annotate needs a valid session ROI.": "错误：Blink 自动标注需要有效的会话 ROI。",
@@ -1201,7 +1217,7 @@ class BlinkLabWidget(QWidget):
         self.lbl_shrink_logic.setText(self.tr("Shrink Logic:"))
         self.btn_auto_annotate.setText(self.tr("AUTO-ANNOTATE DRAFT"))
         self.btn_auto_shrink.setText(self.tr("EXECUTE AUTO-SHRINK"))
-        self.btn_apply_global.setText(self.tr("APPLY TO GLOBAL"))
+        self.btn_apply_global.setText(self.tr("Confirm and write back"))
         self.training_settings_box.setTitle(self.tr("Training Settings"))
         self.lbl_epochs.setText(self.tr("Epochs:"))
         self.lbl_batch_size.setText(self.tr("Batch Size:"))
@@ -1317,6 +1333,8 @@ class BlinkLabWidget(QWidget):
         self.canvas.set_mode("BOX_PROMPT") # Default mode
         self.canvas.magic_box_completed.connect(self.on_box_drawn)
         self.canvas.polygon_completed.connect(self.on_local_polygon_changed)
+        if hasattr(self.canvas, "polygons_restored"):
+            self.canvas.polygons_restored.connect(self.on_local_polygons_restored)
         self.canvas_shell = QWidget()
         apply_surface_role(self.canvas_shell, SURFACE_ROLE_CANVAS, "blinkCanvasShell")
         canvas_layout = QVBoxLayout(self.canvas_shell)
@@ -1409,7 +1427,7 @@ class BlinkLabWidget(QWidget):
         self.btn_auto_shrink.clicked.connect(self.run_auto_shrink)
         action_layout.addWidget(self.btn_auto_shrink)
         
-        self.btn_apply_global = QPushButton("APPLY TO GLOBAL")
+        self.btn_apply_global = QPushButton("Confirm and write back")
         self.btn_apply_global.setFixedHeight(54)
         apply_semantic_button_style(self.btn_apply_global, BUTTON_ROLE_COMMIT, "font-weight: bold;")
         self.btn_apply_global.clicked.connect(self.apply_to_global)
@@ -2788,6 +2806,11 @@ class BlinkLabWidget(QWidget):
             self.session_dirty = True
             self.lbl_status.setText(self.tr("Edited {0} in Blink session. Apply to Global to keep changes.").format(part))
 
+    def on_local_polygons_restored(self, restored, previous, direction="undo"):
+        if self.has_active_session():
+            self.session_dirty = True
+            self.lbl_status.setText(self.tr("Restored local Blink edits. Confirm and write back to keep them on the main image."))
+
     def on_part_selected(self, item):
         part_name = item.text()
         if self.has_active_session() and self.session_target_part:
@@ -2866,6 +2889,40 @@ class BlinkLabWidget(QWidget):
         finally:
             self.btn_auto_annotate.setEnabled(True)
 
+    def _label_entry_for_image(self, image_path):
+        labels = getattr(getattr(self, "pm", None), "project_data", {}).get("labels", {})
+        if not isinstance(labels, dict):
+            return {}
+        entry = labels.get(image_path)
+        if isinstance(entry, dict):
+            return entry
+        key_fn = getattr(self.pm, "_image_data_key", None)
+        if callable(key_fn):
+            entry = labels.get(key_fn(image_path), {})
+        return entry if isinstance(entry, dict) else {}
+
+    def _confirm_apply_to_global(self, image_path, part_name, action, replaces_confirmed):
+        image_name = os.path.basename(str(image_path or "")) or str(image_path or "")
+        if action == "box_only":
+            action_text = self.tr("Only the box will be written back. The existing outline confirmation status will not change.")
+        elif action == "replace":
+            action_text = self.tr("This will replace the existing outline.")
+        else:
+            action_text = self.tr("This will add a new outline.")
+        warning = ""
+        if replaces_confirmed:
+            warning = "\n\n" + self.tr(
+                "This will replace the confirmed outline of {0} on the main workbench. The previous outline will be kept so it can be restored if write-back fails."
+            ).format(part_name)
+        message = self.tr("Image: {0}\nPart: {1}\n{2}{3}").format(image_name, part_name, action_text, warning)
+        reply = themed_yes_no_question(
+            self,
+            self.tr("Confirm and write back to main image"),
+            message,
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        return reply == QMessageBox.Yes
+
     def apply_to_global(self):
         """
         逆向投射：将局部图（如 800x800）中修改的选框和多边形，
@@ -2885,18 +2942,57 @@ class BlinkLabWidget(QWidget):
         existing_box = self.pm.get_boxes(self.current_image_path).get(target_part)
 
         global_box = self.mapper.bbox_local_to_global(local_box) if local_box else existing_box
-
-        if local_polys and len(local_polys) >= 3:
-            global_polys = self.mapper.poly_local_to_global(local_polys)
-            self.pm.update_label(self.current_image_path, target_part, global_polys, box=global_box)
-        elif global_box and existing_polys:
-            self.pm.update_label(self.current_image_path, target_part, existing_polys, box=global_box)
-        else:
+        replacing_polygon = bool(local_polys and len(local_polys) >= 3)
+        box_only = (not replacing_polygon) and bool(global_box) and bool(existing_polys)
+        if not replacing_polygon and not box_only:
             self.lbl_status.setText(self.tr("Nothing to apply for {0}.").format(target_part))
             return
 
+        existing_entry = self._label_entry_for_image(self.current_image_path)
+        existing_decision = resolve_part_training_trust(existing_entry, target_part) if existing_entry else {}
+        replaces_confirmed = bool(
+            replacing_polygon
+            and existing_polys
+            and len(existing_polys) >= 3
+            and existing_decision.get("state") == "confirmed"
+        )
+        action = "box_only" if box_only else ("replace" if existing_polys and len(existing_polys) >= 3 else "new")
+        if not self._confirm_apply_to_global(self.current_image_path, target_part, action, replaces_confirmed):
+            self.lbl_status.setText(self.tr("Kept the existing main-image outline for {0}.").format(target_part))
+            return
+
+        snapshot_fn = getattr(self.pm, "snapshot_part_annotation", None)
+        restore_fn = getattr(self.pm, "restore_part_annotation", None)
+        snapshot = snapshot_fn(self.current_image_path, target_part) if callable(snapshot_fn) else None
+        try:
+            if replacing_polygon:
+                global_polys = self.mapper.poly_local_to_global(local_polys)
+                self.pm.update_label(self.current_image_path, target_part, global_polys, box=global_box)
+            else:
+                self.pm.update_label(
+                    self.current_image_path,
+                    target_part,
+                    existing_polys,
+                    box=global_box,
+                    preserve_training_truth=True,
+                )
+        except TypeError:
+            if replacing_polygon:
+                global_polys = self.mapper.poly_local_to_global(local_polys)
+                self.pm.update_label(self.current_image_path, target_part, global_polys, box=global_box)
+            else:
+                self.pm.update_label(self.current_image_path, target_part, existing_polys, box=global_box)
+        except Exception:
+            if callable(restore_fn) and snapshot:
+                restore_fn(snapshot, save=False)
+                self.lbl_status.setText(self.tr("Write-back failed for {0}. The previous outline was restored.").format(target_part))
+            else:
+                self.lbl_status.setText(self.tr("Error: {0}").format(target_part))
+            return
+
+        self._last_replaced_annotation = snapshot
         self.session_dirty = False
-        self.lbl_status.setText(self.tr("Applied {0} to Global!").format(target_part))
+        self.lbl_status.setText(self.tr("Wrote {0} back to the main image.").format(target_part))
         self.global_labels_updated.emit() # Notify main window
 
     def run_auto_shrink(self):

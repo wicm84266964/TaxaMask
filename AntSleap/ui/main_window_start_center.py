@@ -8,14 +8,68 @@ class MainWindowStartCenterMixin:
     def _is_tif_workflow_enabled(self):
         return bool(getattr(self, "tif_workflow_enabled", False))
 
+    def _has_formal_2d_project(self):
+        path = getattr(getattr(self, "project", None), "current_project_path", "") or ""
+        if not path:
+            return False
+        is_startup = getattr(self, "_path_is_startup_project", None)
+        if callable(is_startup) and is_startup(path):
+            return False
+        return True
+
+    def _startup_project_has_research_content(self):
+        project = getattr(self, "project", None)
+        if project is None:
+            return False
+        images = list((project.project_data or {}).get("images", []) or [])
+        if images:
+            return True
+        labels = (project.project_data or {}).get("labels", {}) or {}
+        for entry in labels.values():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("parts") or entry.get("auto_boxes") or entry.get("boxes"):
+                return True
+        return False
+
+    def _prompt_formal_2d_project_before_enter(self):
+        if self._has_formal_2d_project():
+            return True
+        if QApplication.platformName() == "offscreen":
+            return True
+        message = tr(
+            "No formal 2D project is open. The startup placeholder is only for program initialization and should not receive new annotations. Create or open a research project first.",
+            self.current_lang,
+        )
+        if self._startup_project_has_research_content():
+            message = tr(
+                "The startup placeholder already has images or annotations. Open it to review, or save it as a formal project. Cancel stays here and does not write new labels into the placeholder.",
+                self.current_lang,
+            )
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Choose a 2D project", self.current_lang))
+        box.setText(message)
+        new_btn = box.addButton(tr("New 2D/STL project", self.current_lang), QMessageBox.AcceptRole)
+        open_btn = box.addButton(tr("Open project", self.current_lang), QMessageBox.ActionRole)
+        box.addButton(tr("Cancel", self.current_lang), QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is new_btn:
+            self.new_project()
+            return self._has_formal_2d_project()
+        if clicked is open_btn:
+            self.open_project()
+            return self._has_formal_2d_project()
+        return False
+
     def _show_tif_workflow_unavailable(self):
         QMessageBox.information(
             self,
             tr("TIF Volume Workbench", self.current_lang),
-            (
-                "The experimental TIF workflow is hidden in the public build. "
-                f"Set {EXPERIMENTAL_TIF_WORKFLOW_ENV}=1 before starting TaxaMask to enable it for local development."
-            ),
+            tr(
+                "The TIF volume workbench is hidden in this build. If you need it for local research, set {0}=1 before starting TaxaMask. This does not change saved projects.",
+                self.current_lang,
+            ).format(EXPERIMENTAL_TIF_WORKFLOW_ENV),
         )
 
     def _apply_window_icon(self):
@@ -340,6 +394,8 @@ class MainWindowStartCenterMixin:
         layout.addStretch(1)
         layout.addWidget(enter_button)
         layout.addWidget(create_button)
+        card.enter_button = enter_button
+        card.create_button = create_button
         return card
 
     def _show_start_center(self):
@@ -353,10 +409,10 @@ class MainWindowStartCenterMixin:
     def _update_start_center_texts(self):
         if not hasattr(self, "start_center_widget"):
             return
-        self.start_title.setText(tr("TaxaMask Agent Center", self.current_lang))
+        self.start_title.setText(tr("Start Center", self.current_lang))
         self.start_subtitle.setText(
             tr(
-                "Ask Ant-Code to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.",
+                "Ask the TaxaMask assistant to configure workflows, inspect errors, prepare PDF evidence, or plan training. Use the right rail when you want to enter a workbench directly.",
                 self.current_lang,
             )
         )
@@ -374,6 +430,17 @@ class MainWindowStartCenterMixin:
         self.btn_continue_last.setText(tr("Continue last project", self.current_lang))
         self.btn_open_any.setText(tr("Open any project", self.current_lang))
         self.btn_general_settings.setText(tr("General Settings", self.current_lang))
+        if hasattr(self, "start_image_card") and hasattr(self.start_image_card, "enter_button"):
+            if self._has_formal_2d_project():
+                path = getattr(self.project, "current_project_path", "") or ""
+                name = os.path.basename(os.path.dirname(os.path.normpath(path)) or path)
+                self.start_image_card.enter_button.setText(
+                    tr("Return to 2D: {0}", self.current_lang).format(name or tr("current project", self.current_lang))
+                )
+                self.start_image_card.enter_button.setProperty("textKey", "")
+            else:
+                self.start_image_card.enter_button.setProperty("textKey", "Enter 2D/STL workflow")
+                self.start_image_card.enter_button.setText(tr("Enter 2D/STL workflow", self.current_lang))
         if hasattr(self, "btn_start_ant_code"):
             self._apply_agent_running_state_buttons()
         self._refresh_project_console()
@@ -526,6 +593,17 @@ class MainWindowStartCenterMixin:
         last_project = self.config.get("last_project_path", "") or ""
         if last_project:
             return tr("Recent project: {0}", self.current_lang).format(self._compact_project_path(last_project)), os.path.abspath(last_project)
+        startup_path = getattr(getattr(self, "project", None), "current_project_path", "") or ""
+        if startup_path and getattr(self, "_path_is_startup_project", lambda _p: False)(startup_path):
+            if self._startup_project_has_research_content():
+                return (
+                    tr("Startup placeholder has content to review", self.current_lang),
+                    os.path.abspath(startup_path),
+                )
+            return (
+                tr("No formal 2D project is open; startup placeholder is for initialization only", self.current_lang),
+                os.path.abspath(startup_path),
+            )
         return tr("Repository only; no research project selected", self.current_lang), REPO_ROOT
 
     def _compact_project_path(self, path):
@@ -545,21 +623,30 @@ class MainWindowStartCenterMixin:
     def _start_console_image_summary(self):
         images = list((self.project.project_data or {}).get("images", []))
         labels = (self.project.project_data or {}).get("labels", {})
-        labeled_count = 0
+        confirmed_count = 0
+        pending_count = 0
         stl_count = 0
+        try:
+            from AntSleap.core.annotation_display import SCREEN_CONFIRMED, SCREEN_PENDING, classify_image_entry
+        except ImportError:
+            from core.annotation_display import SCREEN_CONFIRMED, SCREEN_PENDING, classify_image_entry
         for image_path in images:
             entry = labels.get(image_path, {}) if isinstance(labels, dict) else {}
-            if isinstance(entry, dict) and entry.get("parts"):
-                labeled_count += 1
+            screen = classify_image_entry(entry).get("screen")
+            if screen == SCREEN_CONFIRMED:
+                confirmed_count += 1
+            elif screen == SCREEN_PENDING:
+                pending_count += 1
             provenance = self.project.get_image_provenance(image_path)
             if provenance.get("source_type") == "stl_rendered_view":
                 stl_count += 1
-        summary = tr("{0} image(s), {1} labeled, {2} STL rendered 2D view(s)", self.current_lang).format(
-            len(images),
-            labeled_count,
-            stl_count,
+        summary = tr(
+            "{0} image(s), {1} confirmed, {2} pending review, {3} STL rendered 2D view(s)",
+            self.current_lang,
+        ).format(len(images), confirmed_count, pending_count, stl_count)
+        detail = tr("2D/STL images", self.current_lang) + (
+            f": {len(images)}; confirmed: {confirmed_count}; pending review: {pending_count}; STL rendered 2D views: {stl_count}"
         )
-        detail = tr("2D/STL images", self.current_lang) + f": {len(images)}; labeled: {labeled_count}; STL rendered 2D views: {stl_count}"
         return summary, detail
 
     def _start_console_tif_summary(self):
@@ -577,12 +664,14 @@ class MainWindowStartCenterMixin:
                 for specimen in specimens
                 if isinstance(specimen, dict) and (specimen.get("train_ready") or specimen.get("review_status") == "train_ready")
             )
-        summary = tr("{0} specimen(s), {1} train-ready, {2} with manual_truth", self.current_lang).format(
-            len(specimens),
-            train_ready_count,
-            manual_truth_count,
+        summary = tr(
+            "{0} whole specimen(s), {1} train-ready at specimen level, {2} with reviewed training truth. This line counts whole specimens only, not parts or reslices.",
+            self.current_lang,
+        ).format(len(specimens), train_ready_count, manual_truth_count)
+        detail = (
+            tr("TIF specimens", self.current_lang)
+            + f": {len(specimens)}; train-ready whole specimens: {train_ready_count}; reviewed training truth: {manual_truth_count}"
         )
-        detail = tr("TIF specimens", self.current_lang) + f": {len(specimens)}; train-ready: {train_ready_count}; manual_truth: {manual_truth_count}"
         return summary, detail
 
     def _start_console_pdf_summary(self):
@@ -616,9 +705,18 @@ class MainWindowStartCenterMixin:
 
     def _start_console_agent_status(self):
         panel = getattr(self, "agent_panel", None)
-        if panel is None or not panel.is_running():
-            return tr("Ant-Code stopped", self.current_lang)
-        return tr("Ant-Code ready", self.current_lang)
+        state = ""
+        if panel is not None and hasattr(panel, "running_state"):
+            state = str(panel.running_state() or "")
+        if state == "starting":
+            return tr("Assistant starting", self.current_lang)
+        if state == "running":
+            return tr("Assistant ready", self.current_lang)
+        if state == "stopping":
+            return tr("Assistant stopping", self.current_lang)
+        if state == "error":
+            return tr("Assistant failed", self.current_lang)
+        return tr("Assistant stopped", self.current_lang)
 
     def _agent_current_workflow_label(self):
         kind = getattr(self, "active_project_kind", "start")

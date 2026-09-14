@@ -109,8 +109,6 @@ class MainWindowBlinkContextMixin:
         if block_reason == "expert_unappointed":
             return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False
         if block_reason == "expert_model_missing":
-            if has_appointed:
-                return "ready", tr("Expert file missing", self.current_lang), True
             return "missing_file", tr("Expert file missing", self.current_lang), False
         if not has_appointed:
             return "unappointed", ui_text("Expert not appointed yet", self.current_lang), False

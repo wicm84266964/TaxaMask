@@ -3944,24 +3944,37 @@ class TifWorkbenchWidget(QWidget):
         self.result_review_controller.refresh_result_comparison_if_visible()
 
     def _format_specimen_label(self, specimen):
-        status = specimen.get("review_status", "not_started")
+        try:
+            from AntSleap.core.tif_status_display import review_status_label
+        except ImportError:
+            from core.tif_status_display import review_status_label
+        status = review_status_label(specimen.get("review_status", "not_started"))
         train = tt("train-ready", self.lang) if specimen.get("train_ready") else tt("not train-ready", self.lang)
-        return f"{specimen.get('display_name') or specimen.get('specimen_id')} ({status}, {train})"
+        return f"{specimen.get('display_name') or specimen.get('specimen_id')} ({tt(status, self.lang)}, {train})"
 
     def _format_part_label(self, part):
+        try:
+            from AntSleap.core.tif_status_display import part_has_model_source, system_status_label
+        except ImportError:
+            from core.tif_status_display import part_has_model_source, system_status_label
         status = str((part or {}).get("status", "draft") or "draft")
         name = str((part or {}).get("display_name") or (part or {}).get("part_id") or tt("Part volume", self.lang))
         training = (part or {}).get("training") or {}
         system_status = str(training.get("system_status") or (part or {}).get("system_status") or status)
+        label = system_status_label(system_status, has_model_source=part_has_model_source(part))
         tag_lookup = self._part_user_tag_lookup()
         tag_labels = [tag_lookup.get(str(tag_id), str(tag_id)) for tag_id in (part or {}).get("user_tags", []) if str(tag_id or "")]
         suffix = f" | {', '.join(tag_labels)}" if tag_labels else ""
-        return f"{name} ({system_status}){suffix}"
+        return f"{name} ({tt(label, self.lang)}){suffix}"
 
     def _format_reslice_label(self, reslice):
+        try:
+            from AntSleap.core.tif_status_display import system_status_label
+        except ImportError:
+            from core.tif_status_display import system_status_label
         name = str((reslice or {}).get("display_name") or (reslice or {}).get("reslice_id") or "reslice")
-        status = str((reslice or {}).get("status") or "exported")
-        return f"{name} ({status})"
+        status = system_status_label(str((reslice or {}).get("status") or "exported"))
+        return f"{name} ({tt(status, self.lang)})"
 
     def _tree_item_payload(self, item):
         payload = item.data(0, Qt.UserRole) if item is not None else {}
@@ -4720,20 +4733,37 @@ class TifWorkbenchWidget(QWidget):
             except Exception:
                 part_readiness = {"train_ready": False, "reasons": []}
             training = part.get("training") or {}
+            try:
+                from AntSleap.core.tif_status_display import format_train_ready_reasons, part_has_model_source, system_status_label
+            except ImportError:
+                from core.tif_status_display import format_train_ready_reasons, part_has_model_source, system_status_label
+            status_text = tt(
+                system_status_label(
+                    training.get("system_status") or part.get("system_status") or part.get("status", "draft"),
+                    has_model_source=part_has_model_source(part),
+                ),
+                self.lang,
+            )
+            reasons = format_train_ready_reasons(part_readiness.get("reasons", []), translate=lambda text: tt(text, self.lang))
             self.status_label.setText(
                 f"{tt('Current view', self.lang)}: {tt('Part volume', self.lang)}\n"
                 f"{tt('Part', self.lang)}: {part.get('display_name') or part.get('part_id')}\n"
-                f"{tt('Status', self.lang)}: {training.get('system_status') or part.get('system_status') or part.get('status', 'draft')}\n"
+                f"{tt('Status', self.lang)}: {status_text}\n"
                 f"{tt('Train-ready', self.lang)}: {tt('yes', self.lang) if part_readiness.get('train_ready') else tt('no', self.lang)}\n"
-                f"{tt('Reasons', self.lang)}: {', '.join(part_readiness.get('reasons', [])) if part_readiness.get('reasons') else '-'}\n"
+                f"{tt('Reasons', self.lang)}: {', '.join(reasons) if reasons else '-'}\n"
                 f"{tt('Parent specimen', self.lang)}: {specimen.get('display_name') or specimen.get('specimen_id')}"
             )
         else:
+            try:
+                from AntSleap.core.tif_status_display import format_train_ready_reasons, review_status_label
+            except ImportError:
+                from core.tif_status_display import format_train_ready_reasons, review_status_label
+            reasons = format_train_ready_reasons(readiness.get("reasons", []), translate=lambda text: tt(text, self.lang))
             self.status_label.setText(
                 f"{tt('Current view', self.lang)}: {tt('Full volume', self.lang)}\n"
-                f"{tt('Status', self.lang)}: {specimen.get('review_status', 'not_started')}\n"
+                f"{tt('Status', self.lang)}: {tt(review_status_label(specimen.get('review_status', 'not_started')), self.lang)}\n"
                 f"{tt('Train-ready', self.lang)}: {tt('yes', self.lang) if readiness['train_ready'] else tt('no', self.lang)}\n"
-                f"{tt('Reasons', self.lang)}: {', '.join(readiness['reasons']) if readiness['reasons'] else '-'}"
+                f"{tt('Reasons', self.lang)}: {', '.join(reasons) if reasons else '-'}"
             )
         working = specimen.get("working_volume") or {}
         labels = specimen.get("labels") or {}

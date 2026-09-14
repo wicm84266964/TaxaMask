@@ -259,7 +259,8 @@ class TifBackendPanelController(QObject):
         blocked = 0
         for row_index in range(total):
             item = table.item(row_index, 0)
-            if item is not None and item.checkState() == Qt.Checked:
+            checked = item is not None and item.checkState() == Qt.Checked
+            if checked:
                 selected += 1
             ready_item = table.item(row_index, 6)
             is_ready = bool(ready_item.data(Qt.UserRole)) if ready_item is not None else False
@@ -268,12 +269,12 @@ class TifBackendPanelController(QObject):
             else:
                 blocked += 1
             overwrite_item = table.item(row_index, 7)
-            if overwrite_item is not None and bool(overwrite_item.data(Qt.UserRole)):
+            if checked and overwrite_item is not None and bool(overwrite_item.data(Qt.UserRole)):
                 overwrite += 1
         text = tt(
-            "Prediction targets: {0} listed, {1} ready, {2} selected, {3} will overwrite editable AI result, {4} incomplete.",
+            "Listed {0}; selected {1}; this run would replace editable results for {2} of the selected items; {3} ready, {4} incomplete.",
             self.lang,
-        ).format(total, ready, selected, overwrite, blocked)
+        ).format(total, selected, overwrite, ready, blocked)
         self.workbench.predict_targets_summary_label.setText(text)
 
     def refresh_predict_targets(self):
@@ -1181,35 +1182,12 @@ class TifBackendPanelController(QObject):
         self._start_backend_action_with_selection(action, selection)
 
     def _format_train_ready_reasons(self, reasons):
+        try:
+            from AntSleap.core.tif_status_display import format_train_ready_reasons
+        except ImportError:
+            from core.tif_status_display import format_train_ready_reasons
         wb = self.workbench
-        labels = {
-            "manual_truth_missing": "Training truth is missing; accept the current editable labels as training truth first.",
-            "part_not_marked_train_ready": "Part has not been marked as verified train-ready.",
-            "part_record_missing": "Part record is missing.",
-            "part_volume_missing": "Part image is missing.",
-            "reslice_record_missing": "Reslice record is missing.",
-            "reslice_output_missing": "Reslice image is missing.",
-            "label_schema_missing": "Label schema is missing or empty.",
-            "part_label_shape_mismatch": "Part label shape does not match the part/reslice image.",
-            "unknown_label_ids": "Label IDs are not all defined in the bound label schema.",
-            "label_volume_unreadable": "Label volume cannot be read.",
-            "specimen_not_marked_train_ready": "Specimen has not been marked train-ready.",
-            "working_volume_missing": "Working image is missing.",
-            "material_map_missing": "Material map is missing.",
-            "image_label_shape_mismatch": "Image and label shapes do not match.",
-            "no_trainable_material": "No trainable material is defined in the material map.",
-        }
-        readable = []
-        for reason in reasons or []:
-            text = str(reason or "").strip()
-            if not text:
-                continue
-            key = text.split(":", 1)[0]
-            label = tt(labels.get(key, text), wb.lang)
-            if ":" in text and key in labels:
-                label = f"{label} ({text.split(':', 1)[1]})"
-            readable.append(label)
-        return readable
+        return format_train_ready_reasons(reasons, translate=lambda text: tt(text, wb.lang))
 
     def _part_training_readiness_reports(self, prefer_current=False, limit=4):
         wb = self.workbench

@@ -57,6 +57,9 @@ screener_configs/api_runtime_settings.json
 *.json
 AntSleap/specimens/
 !AntSleap/config/*.json
+AntSleap/config/credentials.json
+AntSleap/config/settings.json
+AntSleap/config/settings.migration.json
 !json_projects/templates/*.json
 !json_projects/samples/*.json
 !screener_configs/*.json

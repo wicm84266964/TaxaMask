@@ -120,7 +120,7 @@ class DummyProjectManager:
                 model_boxes[part_name] = box
         return model_boxes, vlm_boxes
 
-    def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None):
+    def update_label(self, image_path, part_name, points, description_text=None, box=None, auto_box=None, **kwargs):
         label_entry = self.project_data["labels"].setdefault(
             image_path,
             {"parts": {}, "boxes": {}, "auto_boxes": {}, "trajectories": {}},
@@ -128,7 +128,7 @@ class DummyProjectManager:
         label_entry["parts"][part_name] = points
         if box:
             label_entry["boxes"][part_name] = box
-        self.updated_labels.append((image_path, part_name, points, box))
+        self.updated_labels.append((image_path, part_name, points, box, dict(kwargs)))
 
     def update_trajectory(self, image_path, part_name, trajectory, parent_context=None):
         label_entry = self.project_data["labels"].setdefault(
@@ -869,12 +869,36 @@ class BlinkBridgeTests(unittest.TestCase):
         widget.canvas.polygons["Eye"] = [[60.0, 30.0], [70.0, 30.0], [65.0, 40.0]]
         widget.canvas.manual_boxes["Eye"] = [58.0, 28.0, 72.0, 42.0]
 
-        widget.apply_to_global()
+        with patch("ui.blink_lab.themed_yes_no_question", return_value=QMessageBox.Yes):
+            widget.apply_to_global()
 
         self.assertEqual(len(self.pm.updated_labels), 1)
-        _, part_name, _, _ = self.pm.updated_labels[0]
+        _, part_name, _, _, _ = self.pm.updated_labels[0]
         self.assertEqual(part_name, "Mandible")
         self.assertNotIn("Eye", self.pm.project_data["labels"][self.image_path]["boxes"])
+
+    def test_apply_to_global_keeps_outline_when_write_back_is_cancelled(self):
+        widget = BlinkLabWidget(self.engine, self.pm)
+        session = {
+            "image_path": self.image_path,
+            "target_part": "Mandible",
+            "focus_roi": {"part": "Head", "source": "manual", "box": [10.0, 10.0, 80.0, 70.0]},
+        }
+        widget.start_session(
+            session,
+            self.pm.get_labels(self.image_path),
+            self.pm.get_boxes(self.image_path),
+            self.pm.get_auto_boxes(self.image_path),
+        )
+        widget.canvas.polygons["Mandible"] = [[25.0, 25.0], [55.0, 25.0], [45.0, 55.0]]
+        widget.canvas.manual_boxes["Mandible"] = [22.0, 22.0, 58.0, 58.0]
+        original = list(self.pm.project_data["labels"][self.image_path]["parts"]["Mandible"])
+
+        with patch("ui.blink_lab.themed_yes_no_question", return_value=QMessageBox.No):
+            widget.apply_to_global()
+
+        self.assertEqual(self.pm.updated_labels, [])
+        self.assertEqual(self.pm.project_data["labels"][self.image_path]["parts"]["Mandible"], original)
 
     def test_refresh_from_workbench_skips_dirty_session_reload(self):
         widget = BlinkLabWidget(self.engine, self.pm)

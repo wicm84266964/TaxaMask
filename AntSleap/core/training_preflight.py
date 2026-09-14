@@ -161,6 +161,7 @@ def build_training_preflight(
     excluded_invalid_annotation_images = []
     excluded_auto_draft_images = []
     excluded_untrusted_images = []
+    mixed_trust_images = []
     excluded_untrusted_parts = []
 
     locator_exact_size_counts = {}
@@ -225,6 +226,9 @@ def build_training_preflight(
             else:
                 excluded_zero_annotation_images.append(str(image_path))
             continue
+
+        if skipped_untrusted_parts:
+            mixed_trust_images.append(str(image_path))
 
         locator_valid_parts = {
             part_name: points
@@ -315,6 +319,10 @@ def build_training_preflight(
     if conflict_count:
         warnings.append(
             f"Excluded {conflict_count} part annotation(s) with conflicting trust metadata from training."
+        )
+    if mixed_trust_images:
+        warnings.append(
+            f"{len(mixed_trust_images)} image(s) have mixed confirmed and unconfirmed parts; only confirmed parts enter this training run."
         )
     if excluded_zero_annotation_images:
         warnings.append(

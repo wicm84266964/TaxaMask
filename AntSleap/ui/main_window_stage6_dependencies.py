@@ -24,6 +24,12 @@ try:
         AUTO_BOX_SOURCE_MODEL,
         AUTO_BOX_SOURCE_VLM,
     )
+    from AntSleap.core.training_truth import (
+        TRAINING_REVIEW_CONFIRMED,
+        TRAINING_REVIEW_DRAFT,
+        TRAINING_SOURCE_MODEL,
+        resolve_part_training_trust,
+    )
     from AntSleap.core.sam_helper import SAMWorker
     from AntSleap.ui.main_window_dialog_support import (
         _blink_preferred_roi_parts,
@@ -32,7 +38,7 @@ try:
     )
     from AntSleap.ui.main_window_dialogs import BlinkEntryDialog
     from AntSleap.ui.main_window_i18n import tr, ui_text
-    from AntSleap.ui.style import BUTTON_ROLE_RUN, themed_yes_no_question
+    from AntSleap.ui.style import BUTTON_ROLE_COMMIT, BUTTON_ROLE_RUN, themed_yes_no_question
 except ImportError:
     from core.blink_refiner import BlinkRefiner
     from core.blink_training_strategy import DEFAULT_BLINK_TRAINING_STRATEGY, sanitize_blink_training_strategy
@@ -44,11 +50,17 @@ except ImportError:
         AUTO_BOX_SOURCE_MODEL,
         AUTO_BOX_SOURCE_VLM,
     )
+    from core.training_truth import (
+        TRAINING_REVIEW_CONFIRMED,
+        TRAINING_REVIEW_DRAFT,
+        TRAINING_SOURCE_MODEL,
+        resolve_part_training_trust,
+    )
     from core.sam_helper import SAMWorker
     from ui.main_window_dialog_support import _blink_preferred_roi_parts, _clean_box, _runtime_child_backend_defaults
     from ui.main_window_dialogs import BlinkEntryDialog
     from ui.main_window_i18n import tr, ui_text
-    from ui.style import BUTTON_ROLE_RUN, themed_yes_no_question
+    from ui.style import BUTTON_ROLE_COMMIT, BUTTON_ROLE_RUN, themed_yes_no_question
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

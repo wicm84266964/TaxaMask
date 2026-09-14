@@ -9,6 +9,9 @@ import cv2
 class AnnotationCanvas(QWidget):
     # Signals
     polygon_completed = Signal(str, list) 
+    history_checkpoint = Signal()
+    history_cleared = Signal()
+    polygons_restored = Signal(object, object)
     magic_wand_clicked = Signal(float, float) 
     magic_box_completed = Signal(float, float, float, float)
     annotation_box_completed = Signal(float, float, float, float)
@@ -23,6 +26,14 @@ class AnnotationCanvas(QWidget):
         self.auto_boxes = {}   # model prediction boxes: part -> [x1, y1, x2, y2]
         self.vlm_boxes = {}    # low-priority VLM draft boxes: part -> [x1, y1, x2, y2]
         self.shrink_loose_boxes = {} # part -> [x1, y1, x2, y2]
+        self.part_display = {}
+        self.box_captions = {
+            "manual": "[Manual]",
+            "vlm": "[VLM]",
+            "auto": "[Auto]",
+            "shrink": "[Shrink Start]",
+        }
+        self.legend_lines = []
         
         # Image Enhancement
         self.brightness = 0
@@ -84,8 +95,10 @@ class AnnotationCanvas(QWidget):
         self.auto_boxes = {}
         self.vlm_boxes = {}
         self.shrink_loose_boxes = {}
+        self.part_display = {}
         self.update()
         self.setFocus()
+        self.history_cleared.emit()
 
     def set_enhancements(self, brightness, contrast):
         self.brightness = brightness
@@ -143,27 +156,36 @@ class AnnotationCanvas(QWidget):
             self.shrink_loose_boxes = copy.deepcopy(shrink)
         self.update()
 
+    def set_part_display(self, mapping, legend_lines=None, box_captions=None):
+        self.part_display = dict(mapping or {})
+        if legend_lines is not None:
+            self.legend_lines = list(legend_lines or [])
+        if box_captions:
+            self.box_captions.update(box_captions)
+        self.update()
+
     def save_state(self):
         if len(self.history) > 20: 
             self.history.pop(0)
         self.history.append(copy.deepcopy(self.polygons))
         self.redo_stack.clear()
+        self.history_checkpoint.emit()
 
     def undo(self):
         if not self.history: return
-        self.redo_stack.append(copy.deepcopy(self.polygons))
+        previous = copy.deepcopy(self.polygons)
+        self.redo_stack.append(previous)
         self.polygons = self.history.pop()
         self.update()
-        for part in self.polygons:
-            self.polygon_completed.emit(part, self.polygons[part])
+        self.polygons_restored.emit(copy.deepcopy(self.polygons), previous, "undo")
 
     def redo(self):
         if not self.redo_stack: return
-        self.history.append(copy.deepcopy(self.polygons))
+        previous = copy.deepcopy(self.polygons)
+        self.history.append(previous)
         self.polygons = self.redo_stack.pop()
         self.update()
-        for part in self.polygons:
-            self.polygon_completed.emit(part, self.polygons[part])
+        self.polygons_restored.emit(copy.deepcopy(self.polygons), previous, "redo")
 
     def set_active_part(self, part_name):
         self.current_tool_part = part_name
@@ -290,25 +312,45 @@ class AnnotationCanvas(QWidget):
                     screen_poly.append(self.image_to_screen(pt[0], pt[1]))
                 
                 is_selected = (part == self.current_tool_part)
-                fill_color = QColor(0, 255, 0, 50) if is_selected else QColor(255, 255, 0, 30)
-                stroke_color = QColor(0, 255, 0) if is_selected else QColor(255, 255, 0)
+                display = self.part_display.get(part) or {}
+                kind = str(display.get("kind") or "")
+                if kind == "conflict":
+                    fill_color = QColor(220, 60, 60, 55 if is_selected else 35)
+                    stroke_color = QColor(220, 50, 50)
+                    pen_style = Qt.SolidLine
+                elif kind == "draft":
+                    fill_color = QColor(255, 140, 40, 55 if is_selected else 30)
+                    stroke_color = QColor(255, 140, 40)
+                    pen_style = Qt.DashLine
+                elif kind == "confirmed":
+                    fill_color = QColor(0, 255, 0, 50) if is_selected else QColor(80, 160, 255, 28)
+                    stroke_color = QColor(0, 200, 0) if is_selected else QColor(70, 140, 230)
+                    pen_style = Qt.SolidLine
+                else:
+                    fill_color = QColor(0, 255, 0, 50) if is_selected else QColor(255, 255, 0, 30)
+                    stroke_color = QColor(0, 255, 0) if is_selected else QColor(255, 255, 0)
+                    pen_style = Qt.SolidLine
                 
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(fill_color)
                 painter.drawPolygon(screen_poly)
                 
-                pen = QPen(stroke_color, 2)
+                pen = QPen(stroke_color, 3 if is_selected else 2, pen_style)
                 painter.setPen(pen)
                 painter.setBrush(Qt.NoBrush)
                 painter.drawPolygon(screen_poly)
                 
                 painter.setBrush(stroke_color)
                 for pt in screen_poly:
-                    painter.drawEllipse(pt, 3, 3)
+                    painter.drawEllipse(pt, 4 if is_selected else 3, 4 if is_selected else 3)
 
                 if len(screen_poly) > 0:
                     painter.setPen(QColor(255, 255, 255))
-                    painter.drawText(screen_poly[0], part)
+                    caption = str(part)
+                    extra = str(display.get("caption") or "")
+                    if extra and (is_selected or len(self.polygons) <= 4):
+                        caption = f"{part} {extra}"
+                    painter.drawText(screen_poly[0], caption)
             
             # Draw Manual Boxes (Green Dashed - User Ground Truth)
             for part, box in self.manual_boxes.items():
@@ -321,7 +363,7 @@ class AnnotationCanvas(QWidget):
                 painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine)) # Green
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(rect)
-                painter.drawText(tl + QPointF(5, 15), f"{part} [Manual]")
+                painter.drawText(tl + QPointF(5, 15), f"{part} {self.box_captions.get('manual', '[Manual]')}")
 
             # Draw VLM Boxes (Magenta Dotted - first-mile draft)
             for part, box in self.vlm_boxes.items():
@@ -334,7 +376,7 @@ class AnnotationCanvas(QWidget):
                 painter.setPen(QPen(QColor(210, 90, 255), 2, Qt.DotLine))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(rect)
-                painter.drawText(tl + QPointF(5, -20), f"{part} [VLM]")
+                painter.drawText(tl + QPointF(5, -20), f"{part} {self.box_captions.get('vlm', '[VLM]')}")
 
             # Draw Auto Boxes (Orange Dashed - trained/external model prediction)
             for part, box in self.auto_boxes.items():
@@ -347,7 +389,7 @@ class AnnotationCanvas(QWidget):
                 painter.setPen(QPen(QColor(255, 165, 0), 2, Qt.DashDotLine)) # Orange
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(rect)
-                painter.drawText(tl + QPointF(5, -5), f"{part} [Auto]")
+                painter.drawText(tl + QPointF(5, -5), f"{part} {self.box_captions.get('auto', '[Auto]')}")
 
             # Draw Blink Shrink Start Boxes (Blue Dashed - trajectory start prompt)
             for part, box in self.shrink_loose_boxes.items():
@@ -360,7 +402,7 @@ class AnnotationCanvas(QWidget):
                 painter.setPen(QPen(QColor(80, 180, 255), 2, Qt.DashLine))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(rect)
-                painter.drawText(tl + QPointF(5, 30), f"{part} [Shrink Start]")
+                painter.drawText(tl + QPointF(5, 30), f"{part} {self.box_captions.get('shrink', '[Shrink Start]')}")
 
             # Draw Highlighted Vertex
             if self.hover_vertex:
@@ -407,6 +449,14 @@ class AnnotationCanvas(QWidget):
                 painter.setBrush(QColor(255, 0, 255))
                 painter.drawEllipse(self.scale_start, 4, 4)
                 painter.drawEllipse(self.scale_end, 4, 4)
+
+            if self.legend_lines:
+                x = 10
+                y = 18
+                painter.setPen(QColor(240, 240, 240))
+                for line in self.legend_lines:
+                    painter.drawText(x, y, str(line))
+                    y += 16
 
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:

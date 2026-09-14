@@ -1,9 +1,37 @@
 try:
     from AntSleap.ui.main_window_navigation_dependencies import *
     from AntSleap.core.path_identity import path_identity
+    from AntSleap.core.annotation_display import (
+        CAT_CONFIRMED_ONLY,
+        CAT_DRAFT_ONLY,
+        CAT_HELPER_ONLY,
+        CAT_MIXED,
+        CAT_NEEDS_CHECK,
+        CAT_UNLABELED,
+        SCREEN_CONFIRMED,
+        SCREEN_EMPTY,
+        SCREEN_PENDING,
+        add_image_counts,
+        classify_image_entry,
+        empty_image_counts,
+    )
 except ImportError:
     from ui.main_window_navigation_dependencies import *
     from core.path_identity import path_identity
+    from core.annotation_display import (
+        CAT_CONFIRMED_ONLY,
+        CAT_DRAFT_ONLY,
+        CAT_HELPER_ONLY,
+        CAT_MIXED,
+        CAT_NEEDS_CHECK,
+        CAT_UNLABELED,
+        SCREEN_CONFIRMED,
+        SCREEN_EMPTY,
+        SCREEN_PENDING,
+        add_image_counts,
+        classify_image_entry,
+        empty_image_counts,
+    )
 
 
 class MainWindowImageNavigationMixin:
@@ -743,6 +771,7 @@ class MainWindowImageNavigationMixin:
             group_definitions = list(state.get("group_definitions", []) or [])
             labeled_images = set(state.get("labeled_images", set()) or set())
             split_images = set(state.get("split_images", set()) or set())
+            image_screens = dict(state.get("image_screens", {}) or {})
             non_empty_groups = [group for group in group_definitions if group[2]]
             has_collapsed_group = any(
                 bool(self.image_list_group_collapsed.get(group[0], False))
@@ -779,12 +808,12 @@ class MainWindowImageNavigationMixin:
                 if is_split_crop:
                     item.setToolTip(tr("Split Crops", self.current_lang))
 
-                if img in labeled_images:
-                    item.setForeground(QColor(theme_colors["success"]))
-                elif is_split_crop:
-                    item.setForeground(QColor(theme_colors["text_dim"]))
-                else:
-                    item.setForeground(QColor(theme_colors["text_soft"]))
+                self._apply_image_list_item_color(
+                    item,
+                    image_screens.get(img, SCREEN_EMPTY),
+                    is_split_crop=is_split_crop,
+                    theme_colors=theme_colors,
+                )
 
                 self.file_list.addItem(item)
                 if first_image_item is None:
@@ -814,37 +843,88 @@ class MainWindowImageNavigationMixin:
                         self.on_file_selected(target_item, None)
 
             # Update the header label on the left side
-            header_base = tr("PROJECT IMAGES", self.current_lang)
-            self.label_project_images.setText(f"{header_base} ({labeled_count}/{total_count})")
+            self._apply_image_list_header(state)
             self._refresh_training_scope_combo()
         finally:
             self.file_list.setUpdatesEnabled(True)
             self.file_list.blockSignals(False)
 
+    def _image_label_entry(self, image_path):
+        if not image_path:
+            return {}
+        key_fn = getattr(self.project, "_image_data_key", None)
+        key = key_fn(image_path) if callable(key_fn) else image_path
+        entry = (self.project.project_data or {}).get("labels", {}).get(key, {})
+        if not isinstance(entry, dict):
+            entry = (self.project.project_data or {}).get("labels", {}).get(image_path, {})
+        return entry if isinstance(entry, dict) else {}
+
+    def _classify_image_status(self, image_path):
+        return classify_image_entry(self._image_label_entry(image_path))
+
     def _image_has_review_content(self, image_path):
         if not image_path:
             return False
-        return bool(self.project.get_labels(image_path) or self.project.get_auto_boxes(image_path))
+        classification = self._classify_image_status(image_path)
+        return classification.get("screen") != SCREEN_EMPTY or classification.get("category") == CAT_NEEDS_CHECK
+
+    def _apply_image_list_item_color(self, item, screen_kind, is_split_crop=False, theme_colors=None):
+        if item is None:
+            return
+        theme_colors = theme_colors or get_theme_config(self.current_theme)
+        if screen_kind == SCREEN_CONFIRMED:
+            item.setForeground(QColor(theme_colors["success"]))
+        elif screen_kind == SCREEN_PENDING:
+            item.setForeground(QColor(theme_colors["warning"]))
+        elif is_split_crop:
+            item.setForeground(QColor(theme_colors["text_dim"]))
+        else:
+            item.setForeground(QColor(theme_colors["text_soft"]))
+
+    def _apply_image_list_header(self, state):
+        counts = dict(state.get("counts") or empty_image_counts())
+        total = int(state.get("total_count", 0) or 0)
+        header_base = tr("PROJECT IMAGES", self.current_lang)
+        self.label_project_images.setText(
+            tr(
+                "{0} (confirmed {1} · pending {2} · empty/check {3} / {4})",
+                self.current_lang,
+            ).format(
+                header_base,
+                int(counts.get(SCREEN_CONFIRMED, 0) or 0),
+                int(counts.get(SCREEN_PENDING, 0) or 0),
+                int(counts.get(SCREEN_EMPTY, 0) or 0),
+                total,
+            )
+        )
+        self.label_project_images.setToolTip(
+            tr(
+                "Internal counts: needs check {0}; mixed {1}; confirmed only {2}; draft/box {3}; helper boxes {4}; unlabeled {5}. Sum equals {6}.",
+                self.current_lang,
+            ).format(
+                int(counts.get(CAT_NEEDS_CHECK, 0) or 0),
+                int(counts.get(CAT_MIXED, 0) or 0),
+                int(counts.get(CAT_CONFIRMED_ONLY, 0) or 0),
+                int(counts.get(CAT_DRAFT_ONLY, 0) or 0),
+                int(counts.get(CAT_HELPER_ONLY, 0) or 0),
+                int(counts.get(CAT_UNLABELED, 0) or 0),
+                total,
+            )
+        )
 
     def _set_image_list_item_status(self, item, image_path, labeled_images=None, split_images=None):
         if item is None or not image_path:
             return
         group_key = str(item.data(Qt.UserRole + 2) or "")
-        if labeled_images is None:
-            is_labeled = self._image_has_review_content(image_path)
-        else:
-            is_labeled = image_path in set(labeled_images or [])
+        state = self._image_list_state_cache if isinstance(getattr(self, "_image_list_state_cache", None), dict) else {}
+        screen_kind = (state.get("image_screens") or {}).get(image_path)
+        if not screen_kind:
+            screen_kind = self._classify_image_status(image_path).get("screen") or SCREEN_EMPTY
         if split_images is None:
             is_split_crop = group_key == "split" or self._is_split_crop_image(image_path)
         else:
             is_split_crop = group_key == "split" or image_path in set(split_images or [])
-        theme_colors = get_theme_config(self.current_theme)
-        if is_labeled:
-            item.setForeground(QColor(theme_colors["success"]))
-        elif is_split_crop:
-            item.setForeground(QColor(theme_colors["text_dim"]))
-        else:
-            item.setForeground(QColor(theme_colors["text_soft"]))
+        self._apply_image_list_item_color(item, screen_kind, is_split_crop=is_split_crop)
 
     def _refresh_current_image_list_status(self, image_path=None):
         image_path = image_path or self.current_image
@@ -856,17 +936,32 @@ class MainWindowImageNavigationMixin:
             state = self._build_image_list_state()
             self._image_list_state_cache = state
 
+        classification = self._classify_image_status(image_path)
+        screens = dict(state.get("image_screens", {}) or {})
+        categories = dict(state.get("image_categories", {}) or {})
+        counts = dict(state.get("counts") or empty_image_counts())
+        old_screen = screens.get(image_path)
+        old_category = categories.get(image_path)
+        new_screen = classification.get("screen") or SCREEN_EMPTY
+        new_category = classification.get("category") or CAT_UNLABELED
+        if old_screen:
+            counts[old_screen] = max(0, int(counts.get(old_screen, 0) or 0) - 1)
+        if old_category:
+            counts[old_category] = max(0, int(counts.get(old_category, 0) or 0) - 1)
+        counts[new_screen] = int(counts.get(new_screen, 0) or 0) + 1
+        counts[new_category] = int(counts.get(new_category, 0) or 0) + 1
+        screens[image_path] = new_screen
+        categories[image_path] = new_category
         labeled_images = set(state.get("labeled_images", set()) or set())
-        before_labeled = image_path in labeled_images
-        after_labeled = self._image_has_review_content(image_path)
-        if after_labeled:
-            labeled_images.add(image_path)
-        else:
+        if new_screen == SCREEN_EMPTY and new_category != CAT_NEEDS_CHECK:
             labeled_images.discard(image_path)
-
+        else:
+            labeled_images.add(image_path)
+        state["image_screens"] = screens
+        state["image_categories"] = categories
+        state["counts"] = counts
         state["labeled_images"] = labeled_images
-        if before_labeled != after_labeled:
-            state["labeled_count"] = max(0, int(state.get("labeled_count", 0) or 0) + (1 if after_labeled else -1))
+        state["labeled_count"] = len(labeled_images)
 
         target_item = None
         for index in range(self.file_list.count()):
@@ -878,14 +973,9 @@ class MainWindowImageNavigationMixin:
             self._set_image_list_item_status(
                 target_item,
                 image_path,
-                labeled_images=labeled_images,
                 split_images=set(state.get("split_images", set()) or set()),
             )
-
-        header_base = tr("PROJECT IMAGES", self.current_lang)
-        self.label_project_images.setText(
-            f"{header_base} ({int(state.get('labeled_count', 0) or 0)}/{int(state.get('total_count', 0) or 0)})"
-        )
+        self._apply_image_list_header(state)
         return target_item is not None
 
     def _refresh_image_list_status_or_rebuild(self, image_path=None):
@@ -989,6 +1079,20 @@ class MainWindowImageNavigationMixin:
             for path in set(state.get("split_images", set()) or set())
             if self._image_list_path_identity(path) not in remove_identities
         }
+        screens = dict(state.get("image_screens", {}) or {})
+        categories = dict(state.get("image_categories", {}) or {})
+        counts = dict(state.get("counts") or empty_image_counts())
+        for path in list(screens):
+            if self._image_list_path_identity(path) in remove_identities:
+                old_screen = screens.pop(path, None)
+                old_category = categories.pop(path, None)
+                if old_screen:
+                    counts[old_screen] = max(0, int(counts.get(old_screen, 0) or 0) - 1)
+                if old_category:
+                    counts[old_category] = max(0, int(counts.get(old_category, 0) or 0) - 1)
+        state["image_screens"] = screens
+        state["image_categories"] = categories
+        state["counts"] = counts
         state["total_count"] = max(0, int(state.get("total_count", 0) or 0) - len(remove_identities))
         state["labeled_count"] = max(0, int(state.get("labeled_count", 0) or 0) - removed_labeled)
         state["group_definitions"] = self._filtered_group_definitions_after_removal(
@@ -997,10 +1101,7 @@ class MainWindowImageNavigationMixin:
         )
         self._refresh_visible_image_group_header_counts(state.get("group_definitions", []))
 
-        header_base = tr("PROJECT IMAGES", self.current_lang)
-        self.label_project_images.setText(
-            f"{header_base} ({int(state.get('labeled_count', 0) or 0)}/{int(state.get('total_count', 0) or 0)})"
-        )
+        self._apply_image_list_header(state)
         self._refresh_training_scope_combo()
         return removed_visible_rows > 0
 
@@ -1065,11 +1166,17 @@ class MainWindowImageNavigationMixin:
     def _build_image_list_state(self):
         images = [img for img in self.project.project_data.get("images", []) if img]
         total_count = len(images)
-        labeled_images = {
-            img
-            for img in images
-            if bool(self.project.get_labels(img) or self.project.get_auto_boxes(img))
-        }
+        image_screens = {}
+        image_categories = {}
+        counts = empty_image_counts()
+        labeled_images = set()
+        for img in images:
+            classification = classify_image_entry(self._image_label_entry(img))
+            image_screens[img] = classification.get("screen") or SCREEN_EMPTY
+            image_categories[img] = classification.get("category") or CAT_UNLABELED
+            counts = add_image_counts(counts, classification)
+            if image_screens[img] != SCREEN_EMPTY or image_categories[img] == CAT_NEEDS_CHECK:
+                labeled_images.add(img)
         image_groups = self._project_image_groups(
             images=images,
             labeled_images=labeled_images,
@@ -1087,6 +1194,9 @@ class MainWindowImageNavigationMixin:
             "labeled_images": labeled_images,
             "split_images": set(image_groups.get("split", []) or []),
             "group_definitions": group_definitions,
+            "image_screens": image_screens,
+            "image_categories": image_categories,
+            "counts": counts,
         }
 
     def _handle_image_list_item_clicked(self, item):

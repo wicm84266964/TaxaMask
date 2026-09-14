@@ -3406,7 +3406,125 @@ class ProjectManager:
         """Removes all labels marked as 'Auto-Annotated'."""
         return self.remove_auto_labels_for_images(self.project_data.get("labels", {}).keys(), save=save)
 
-    def verify_image_labels(self, image_path, save=True):
+    def snapshot_part_annotation(self, image_path, part_name):
+        image_path = self._image_data_key(image_path)
+        part_name = str(part_name or "").strip()
+        if not image_path or not part_name:
+            return None
+        entry = self.project_data.get("labels", {}).get(image_path)
+        if not isinstance(entry, dict):
+            return {
+                "image_path": image_path,
+                "part_name": part_name,
+                "entry_existed": False,
+            }
+        parts = entry.get("parts") if isinstance(entry.get("parts"), dict) else {}
+        boxes = entry.get("boxes") if isinstance(entry.get("boxes"), dict) else {}
+        auto_boxes = entry.get("auto_boxes") if isinstance(entry.get("auto_boxes"), dict) else {}
+        auto_meta = entry.get("auto_box_meta") if isinstance(entry.get("auto_box_meta"), dict) else {}
+        descriptions = entry.get("descriptions") if isinstance(entry.get("descriptions"), dict) else {}
+        truth = get_part_training_truth(entry, part_name)
+        return {
+            "image_path": image_path,
+            "part_name": part_name,
+            "entry_existed": True,
+            "had_part": part_name in parts,
+            "points": copy.deepcopy(parts.get(part_name)),
+            "had_box": part_name in boxes,
+            "box": copy.deepcopy(boxes.get(part_name)),
+            "had_auto_box": part_name in auto_boxes,
+            "auto_box": copy.deepcopy(auto_boxes.get(part_name)),
+            "had_auto_box_meta": part_name in auto_meta,
+            "auto_box_meta": copy.deepcopy(auto_meta.get(part_name)),
+            "had_description": part_name in descriptions,
+            "description": copy.deepcopy(descriptions.get(part_name)),
+            "had_training_truth": truth is not None,
+            "training_truth": copy.deepcopy(truth),
+        }
+
+    def restore_part_annotation(self, snapshot, save=False):
+        if not isinstance(snapshot, dict):
+            return False
+        image_path = self._image_data_key(snapshot.get("image_path"))
+        part_name = str(snapshot.get("part_name") or "").strip()
+        if not image_path or not part_name:
+            return False
+        labels = self.project_data.setdefault("labels", {})
+        if not snapshot.get("entry_existed"):
+            entry = labels.get(image_path)
+            if isinstance(entry, dict):
+                for field in ("parts", "boxes", "auto_boxes", "auto_box_meta", "descriptions"):
+                    mapping = entry.get(field)
+                    if isinstance(mapping, dict):
+                        mapping.pop(part_name, None)
+                remove_part_training_truth(entry, part_name)
+                if not self._label_entry_has_saved_content(entry):
+                    labels.pop(image_path, None)
+            self._append_label_journal_entry(image_path, "restore_part_annotation")
+            self._mark_sqlite_image_dirty(image_path)
+            if save:
+                self.save_project()
+            return True
+
+        entry = labels.setdefault(image_path, self._default_label_entry())
+
+        def restore_field(field_name, had_key, value_key):
+            mapping = entry.get(field_name)
+            if not isinstance(mapping, dict):
+                mapping = {}
+                entry[field_name] = mapping
+            if snapshot.get(had_key):
+                mapping[part_name] = copy.deepcopy(snapshot.get(value_key))
+            else:
+                mapping.pop(part_name, None)
+
+        restore_field("parts", "had_part", "points")
+        restore_field("boxes", "had_box", "box")
+        restore_field("auto_boxes", "had_auto_box", "auto_box")
+        restore_field("auto_box_meta", "had_auto_box_meta", "auto_box_meta")
+        restore_field("descriptions", "had_description", "description")
+        truth = snapshot.get("training_truth") if snapshot.get("had_training_truth") else None
+        if isinstance(truth, dict) and truth.get("source") and truth.get("review_status"):
+            set_part_training_truth(
+                entry,
+                part_name,
+                source=truth.get("source"),
+                review_status=truth.get("review_status"),
+                accepted_via=truth.get("accepted_via", ""),
+            )
+        else:
+            remove_part_training_truth(entry, part_name)
+        if entry.get("parts"):
+            entry["status"] = "labeled"
+        else:
+            entry["status"] = "unlabeled"
+        self._append_label_journal_entry(image_path, "restore_part_annotation")
+        self._mark_sqlite_image_dirty(image_path)
+        if save:
+            self.save_project()
+        return True
+
+    def restore_image_labels(self, image_path, entry, save=False):
+        image_path = self._image_data_key(image_path)
+        if not image_path:
+            return False
+        labels = self.project_data.setdefault("labels", {})
+        if not isinstance(entry, dict) or not entry:
+            labels[image_path] = self._default_label_entry()
+        else:
+            labels[image_path] = copy.deepcopy(entry)
+        restored = labels[image_path]
+        if restored.get("parts"):
+            restored["status"] = "labeled"
+        else:
+            restored["status"] = "unlabeled"
+        self._append_label_journal_entry(image_path, "restore_image_labels")
+        self._mark_sqlite_image_dirty(image_path)
+        if save:
+            self.save_project()
+        return True
+
+    def verify_image_labels(self, image_path, save=True, part_names=None):
         """Confirm saved polygon drafts whose recorded source is AI."""
         image_path = self._image_data_key(image_path)
         if image_path not in self.project_data["labels"]: return 0
@@ -3414,18 +3532,28 @@ class ProjectManager:
         labels = self.project_data["labels"][image_path]
         parts = labels.get("parts", {}) if isinstance(labels.get("parts", {}), dict) else {}
         count = 0
-        part_names = set(parts)
-        part_names.update(
+        available_parts = set(parts)
+        available_parts.update(
             labels.get("descriptions", {}).keys()
             if isinstance(labels.get("descriptions"), dict)
             else []
         )
-        part_names.update(
+        available_parts.update(
             labels.get(LABEL_PART_METADATA_FIELD, {}).keys()
             if isinstance(labels.get(LABEL_PART_METADATA_FIELD), dict)
             else []
         )
-        for part in sorted(part_names):
+        if part_names is None:
+            selected_parts = available_parts
+        elif isinstance(part_names, str):
+            selected_parts = {part_names.strip()} if part_names.strip() else set()
+        else:
+            selected_parts = {
+                str(part).strip() for part in part_names if str(part).strip()
+            }
+        for part in sorted(available_parts):
+            if part not in selected_parts:
+                continue
             decision = resolve_part_training_trust(labels, part)
             if (
                 decision.get("state") == "draft"

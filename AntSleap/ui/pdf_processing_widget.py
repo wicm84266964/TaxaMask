@@ -191,8 +191,8 @@ TRANSLATIONS = {
         "PDF Evidence Tools": "PDF 文献证据工具",
         "Agent first: confirm whether PDFs already exist or need lawful open-access harvest, then configure keys/models and adapt screening/review rules.": "先让 Agent 确认是否已有 PDF、是否需要合法采集开放 PDF，再配置 key/模型并适配筛选/复核规则。",
         "Start Center": "启动中心",
-        "Ask Agent": "询问 Agent",
-        "Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.": "运行前让 Agent 先确认是否已有 PDF 或需要合法采集开放 PDF，再适配 key/模型、筛选方案、图文复核、证据来源和候选复核边界。",
+        "Ask Agent": "带上当前 PDF 状态询问助手",
+        "Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.": "把当前页签、文件夹和最近一次任务状态带给助手。已有 PDF 工具时从当前阶段继续，不再每次从“有没有 PDF”问起。",
         "Show Advanced Config": "显示高级配置",
         "Hide Advanced Config": "隐藏高级配置",
         "Screening Mode:": "筛选模式:",
@@ -240,7 +240,8 @@ TRANSLATIONS = {
         "Human:": "人工:",
         "VLM:": "多模态:",
         "Sort:": "排序:",
-        "Accepted only": "仅 accepted",
+        "Accepted only": "仅机器筛选通过",
+        "Machine accepted only": "仅机器筛选通过",
         "Needs review": "待复核",
         "Rejected": "已拒绝",
         "All": "全部",
@@ -268,9 +269,10 @@ TRANSLATIONS = {
         "Open Folder": "打开文件夹",
         "Open PDF": "打开 PDF",
         "Save Review": "保存复核",
-        "Mark Filtered Import Ready": "当前筛选全部设为可导入/通过",
-        "Mark {0} passable rows as import_ready? {1} rows already marked rejected/needs_crop will be kept.": "确认将当前筛选中 {0} 条可通过记录设为“可导入/通过”？已有 {1} 条人工拒绝/需裁剪记录会被保留。",
-        "Marked {0} filtered rows as import_ready.": "已将 {0} 条筛选记录设为“可导入/通过”。",
+        "Mark Filtered Import Ready": "将当前筛选结果标记为可导入",
+        "This only updates review marks. Images are not added to a 2D project and no training labels are created.": "这只更新复核标记。图片还不会加入 2D 项目，也不会生成训练标签。",
+        "Mark {0} passable rows as import_ready? {1} rows already marked rejected/needs_crop will be kept.": "将当前筛选中 {0} 条记录标记为可导入？已有 {1} 条人工拒绝/需裁剪记录会被保留。这只更新复核标记，不会把图片加入 2D 项目，也不会生成训练标签。",
+        "Marked {0} filtered rows as import_ready.": "已将 {0} 条筛选记录标记为可导入。图片尚未加入 2D 项目。",
         "No passable rows match the current filters.": "当前筛选条件下没有可批量通过的记录。",
         "Human Status:": "人工状态:",
         "Review Note:": "复核备注:",
@@ -294,6 +296,19 @@ TRANSLATIONS = {
         "Please select source and output directories.": "请选择输入和输出目录。",
         "Please select input folder.": "请选择输入文件夹。",
         "Task Finished.": "任务已完成。",
+        "Extraction finished: all required steps succeeded.": "提取结束：所需步骤均已成功。",
+        "Extraction finished with partial success. Some PDFs failed or export was incomplete.": "提取部分成功。有的 PDF 失败，或可导入导出不完整。",
+        "Extraction stopped. Kept finished results; remaining PDFs were not run.": "提取已停止。已完成的结果保留，其余 PDF 未运行。",
+        "Extraction did not run: no PDF files found.": "提取未执行：没有发现 PDF。",
+        "Extraction failed. No usable new results were produced.": "提取失败，没有产生可用的新结果。",
+        "Extraction finished.": "提取已结束。",
+        "Planned {0}, attempted {1}, succeeded {2}, skipped {3}, failed {4}, not run {5}.": "计划 {0}，尝试 {1}，成功 {2}，跳过 {3}，失败 {4}，未运行 {5}。",
+        "Import-ready figure export was incomplete.": "可导入图片导出不完整。",
+        "Failed files: {0}.": "失败文件：{0}。",
+        "score": "评分",
+        "pages": "页码",
+        "source refs": "来源引用",
+        "not provided": "未提供",
         "Process stopped by user.": "用户已停止任务。",
         "Classification Finished.": "分类已完成。",
         "Extraction Pipeline Completed.": "提取流程已完成。",
@@ -840,7 +855,7 @@ class DatabaseViewerDialog(QDialog):
         self.status_label = QLabel(self.tr("Status:"))
         self.status_combo = NoWheelComboBox()
         self.status_combo.addItem(self.tr("All"), "")
-        self.status_combo.addItem(self.tr("Accepted only"), "accepted")
+        self.status_combo.addItem(self.tr("Machine accepted only"), "accepted")
         self.status_combo.addItem(self.tr("Needs review"), "needs_review")
         self.status_combo.addItem(self.tr("Rejected"), "rejected")
         self.human_filter_label = QLabel(self.tr("Human:"))
@@ -1521,7 +1536,7 @@ class DatabaseViewerDialog(QDialog):
                             display_text += (
                                 f"[{taxon_name or 'Unknown'} | {caste or 'unknown'} | {part_label} | "
                                 f"file={part_file_name or ''} | hash={part_file_hash or ''} | "
-                                f"conf={float(confidence or 0.0):.3f} | {status} | pages={source_pages} | refs={source_refs}]\n"
+                                f"{self.tr('score')}={self.tr('not provided') if confidence is None else f'{float(confidence):.3f}'} | {status} | {self.tr('pages')}={source_pages or self.tr('not provided')} | {self.tr('source refs')}={source_refs or self.tr('not provided')}]\n"
                                 f"{part_file_path or ''}\n"
                                 f"{description}\n\n"
                             )
@@ -2189,9 +2204,8 @@ class PDFWorker(QThread):
             if self.task_type == "classify":
                 result_paths = self.run_classify()
             elif self.task_type == "extract":
-                self.run_extract()
-                # Extractor mainly populates DB, we could return DB path
-                result_paths = {"db": self.kwargs['db_path']}
+                extract_summary = self.run_extract()
+                result_paths = {"db": self.kwargs['db_path'], "extract_summary": extract_summary}
         except Exception as e:
             self.log_signal.emit(self.tr("Error: {0}").format(str(e)))
             import traceback
@@ -2370,24 +2384,42 @@ class PDFWorker(QThread):
         pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf')]
         
         total = len(pdf_files)
+        summary = {
+            "planned": total,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+            "not_executed": 0,
+            "stopped": False,
+            "export_incomplete": False,
+            "failures": [],
+        }
         if total == 0:
             self.log_signal.emit(self.tr("No PDF files found in input directory."))
-            return
+            summary["outcome"] = "not_executed"
+            return summary
 
         for i, pdf_file in enumerate(pdf_files):
             if not self._is_running: 
                 self.log_signal.emit(self.tr("Process stopped by user."))
+                summary["stopped"] = True
+                summary["not_executed"] = total - i
                 break
             
             self.report_progress(i + 1, total)
                 
             self.log_signal.emit(self.tr("Processing {0}/{1}: {2}").format(i + 1, total, pdf_file))
             pdf_path = os.path.join(pdf_dir, pdf_file)
+            summary["attempted"] += 1
             try:
                 res = extractor.extract_from_pdf(pdf_path)
                 stats = res.get('stats', {})
                 if stats.get("resumed_skip"):
+                    summary["skipped"] += 1
                     self.log_signal.emit(self.tr("  > Existing completed PDF result found; skipped re-extraction."))
+                else:
+                    summary["succeeded"] += 1
                 self.log_signal.emit(
                     self.tr("  > Figures: {0}, Accepted: {1}, Review: {2}").format(
                         stats.get('total_figures', stats.get('total_images', 0)),
@@ -2409,6 +2441,8 @@ class PDFWorker(QThread):
                 accepted_exported = int(stats.get("accepted_exported_figures", 0) or 0)
                 review_exported = int(stats.get("review_exported_figures", 0) or 0)
                 export_status = str(stats.get("import_ready_export_status", "") or "").strip().lower()
+                if export_status in {"error", "failed"}:
+                    summary["export_incomplete"] = True
                 if accepted_dir and export_status not in {"error", "failed"}:
                     self.log_signal.emit(
                         self.tr("  > Import-ready accepted figures: {0} -> {1}").format(
@@ -2425,10 +2459,22 @@ class PDFWorker(QThread):
                     )
                 self._log_extract_pdf_warnings(stats)
             except Exception as e:
+                summary["failed"] += 1
+                summary["failures"].append(str(pdf_file))
                 self.log_signal.emit(self.tr("  > Failed: {0}").format(e))
         
         extractor.close()
-        self.log_signal.emit(self.tr("Extraction Pipeline Completed."))
+        if summary["stopped"]:
+            summary["outcome"] = "stopped"
+        elif summary["planned"] == 0:
+            summary["outcome"] = "not_executed"
+        elif summary["failed"] == 0 and not summary["export_incomplete"] and (summary["succeeded"] + summary["skipped"]) >= summary["planned"]:
+            summary["outcome"] = "success"
+        elif summary["succeeded"] > 0 or summary["skipped"] > 0:
+            summary["outcome"] = "partial_success"
+        else:
+            summary["outcome"] = "failed"
+        return summary
 
     def stop(self):
         self._is_running = False
@@ -4286,15 +4332,31 @@ class PdfProcessingWidget(QWidget):
         if hasattr(self, "log_area"):
             recent_log = "\n".join(self.log_area.toPlainText().splitlines()[-6:])
         current_tab = ""
+        tab_index = -1
         if hasattr(self, "tabs"):
-            index = self.tabs.currentIndex()
-            if index >= 0:
-                current_tab = self.tabs.tabText(index)
+            tab_index = self.tabs.currentIndex()
+            if tab_index >= 0:
+                current_tab = self.tabs.tabText(tab_index)
+        extract_dir = self._safe_text(getattr(self, "edit_ext_src", None))
+        source_dir = self._safe_text(getattr(self, "edit_src_folder", None))
+        last_summary = getattr(self, "_last_worker_results", {}) or {}
+        has_extract_summary = isinstance(last_summary, dict) and bool(last_summary.get("extract_summary"))
+        has_extract_folder = bool(extract_dir and os.path.isdir(extract_dir))
+        has_source_folder = bool(source_dir and os.path.isdir(source_dir))
+        if tab_index == 1 or has_extract_summary or has_extract_folder:
+            settings_focus = "stage_3_figure_extraction_review_and_import_ready_export"
+            acquisition_stage = "stage_3_current_extraction_or_review"
+        elif tab_index == 0 and has_source_folder:
+            settings_focus = "stage_2_screening_criteria_and_run_diagnosis"
+            acquisition_stage = "stage_2_existing_pdf_folder_ready_for_screening"
+        else:
+            settings_focus = "stage_0_confirm_existing_pdfs_or_discovery_mode"
+            acquisition_stage = "stage_0_existing_pdfs_daily_review_topic_search_selected_download_or_batch_harvest"
         return {
             "source_workbench": "pdf_evidence",
             "project_type": "pdf_evidence",
-            "settings_question_focus": "stage_0_confirm_existing_pdfs_or_discovery_mode",
-            "pdf_acquisition_stage": "stage_0_existing_pdfs_daily_review_topic_search_selected_download_or_batch_harvest",
+            "settings_question_focus": settings_focus,
+            "pdf_acquisition_stage": acquisition_stage,
             "harvest_skill": "taxonomy-paper-finder",
             "harvest_skill_path": "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md",
             "harvest_outputs": "paper-records.json; screening-report.json; digest.json/md/html; records.csv; doi_list.txt; summary.json; download_manifest.csv; pdfs/",
@@ -4734,14 +4796,53 @@ class PdfProcessingWidget(QWidget):
             self.btn_stop_extract.setEnabled(False)
 
     def on_worker_result(self, results):
+        self._last_worker_results = results if isinstance(results, dict) else {}
         if 'txt' in results and 'csv' in results and os.path.exists(results['txt']) and os.path.exists(results['csv']):
             dlg = ProcessingResultDialog(results['txt'], results['csv'], self, self.current_lang)
             dlg.exec()
 
+    def _format_extract_summary(self, summary):
+        summary = summary if isinstance(summary, dict) else {}
+        outcome = str(summary.get("outcome") or "")
+        counts = self.tr(
+            "Planned {0}, attempted {1}, succeeded {2}, skipped {3}, failed {4}, not run {5}."
+        ).format(
+            int(summary.get("planned", 0) or 0),
+            int(summary.get("attempted", 0) or 0),
+            int(summary.get("succeeded", 0) or 0),
+            int(summary.get("skipped", 0) or 0),
+            int(summary.get("failed", 0) or 0),
+            int(summary.get("not_executed", 0) or 0),
+        )
+        if outcome == "success":
+            headline = self.tr("Extraction finished: all required steps succeeded.")
+        elif outcome == "partial_success":
+            headline = self.tr("Extraction finished with partial success. Some PDFs failed or export was incomplete.")
+        elif outcome == "stopped":
+            headline = self.tr("Extraction stopped. Kept finished results; remaining PDFs were not run.")
+        elif outcome == "not_executed":
+            headline = self.tr("Extraction did not run: no PDF files found.")
+        elif outcome == "failed":
+            headline = self.tr("Extraction failed. No usable new results were produced.")
+        else:
+            headline = self.tr("Extraction finished.")
+        extra = ""
+        if summary.get("export_incomplete"):
+            extra = " " + self.tr("Import-ready figure export was incomplete.")
+        failures = list(summary.get("failures") or [])
+        if failures:
+            extra += " " + self.tr("Failed files: {0}.").format(", ".join(failures[:8]))
+        return f"{headline} {counts}{extra}".strip()
+
     def on_finished(self):
+        results = getattr(self, "_last_worker_results", {}) or {}
         self.worker = None
         self.toggle_buttons(False)
-        self.log(self.tr("Task Finished."))
+        extract_summary = results.get("extract_summary") if isinstance(results, dict) else None
+        if extract_summary:
+            self.log(self._format_extract_summary(extract_summary))
+        else:
+            self.log(self.tr("Task Finished."))
 
     def toggle_buttons(self, running):
         # running = True means task started, so Start disabled, Stop enabled

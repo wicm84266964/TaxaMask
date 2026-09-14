@@ -2078,7 +2078,7 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             self.assertEqual(tif_compact["volume_projection_mode"], "mip")
             self.assertEqual(tif_compact["volume_performance_diagnosis"], "gpu_ok")
             self.assertEqual(tif_compact["predict_group_filter"], "tag:review_batch")
-            self.assertIn("3 listed", tif_compact["predict_target_summary"])
+            self.assertIn("Listed 3", tif_compact["predict_target_summary"])
             self.assertEqual(tif_compact["predict_selected_target_count"], "1")
             self.assertIn("head_local_axis_001", tif_compact["predict_selected_targets"])
             self.assertIn("running_count", tif_compact["tif_task_summary"])

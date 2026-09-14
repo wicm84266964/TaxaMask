@@ -414,7 +414,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(startup_path.exists())
             self.assertTrue((startup_path.parent / "TaxaMask_Project.taxamask.sqlite").exists())
             self.assertNotIn("AntSleap", startup_path.parts)
-            self.assertEqual(window.start_title.text(), "TaxaMask Agent Center")
+            self.assertEqual(window.start_title.text(), "Start Center")
             self.assertIsNotNone(window.findChild(main_module.QWidget, "start2DWorkflowCard"))
             self.assertIsNone(window.findChild(main_module.QWidget, "start" + "T" + "if" + "WorkflowCard"))
             self.assertIsNotNone(window.findChild(main_module.QWidget, "startProjectConsole"))
@@ -955,8 +955,42 @@ class GuiSmokeTests(unittest.TestCase):
             panel._set_running_state("error")
             panel.start_dashboard()
             self.assertEqual(panel.running_state(), "starting")
-            self.assertEqual(panel._health_checks_remaining, 80)
+            from AntSleap.ui.taxamask_agent_panel import DASHBOARD_HEALTH_ATTEMPTS
+            self.assertEqual(panel._health_checks_remaining, DASHBOARD_HEALTH_ATTEMPTS)
             self.assertTrue(panel.health_timer.isActive())
+        finally:
+            panel.health_timer.stop()
+            panel.process = None
+            panel.deleteLater()
+
+    def test_agent_panel_ignores_start_while_already_starting(self):
+        panel = main_module.TaxaMaskAgentPanel("en", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel._set_running_state("starting")
+            called = []
+            panel._prepare_dashboard_load = lambda **_kwargs: called.append("load")
+            panel.start_dashboard()
+            self.assertEqual(called, [])
+            self.assertEqual(panel.running_state(), "starting")
+        finally:
+            panel.process = None
+            panel.deleteLater()
+
+    def test_agent_panel_start_timeout_explains_wait_instead_of_raw_timeout(self):
+        panel = main_module.TaxaMaskAgentPanel("zh", workspace_dir=str(PROJECT_ROOT))
+        try:
+            panel.process = type("Process", (), {"poll": lambda self: None})()
+            panel._set_running_state("starting")
+            panel._health_checks_remaining = 0
+            panel._health_started_at = time.monotonic() - 40
+            panel._last_health_error = "dashboard port not listening yet"
+            panel._poll_dashboard_ready()
+            self.assertEqual(panel.running_state(), "error")
+            self.assertNotEqual(panel._preflight_error, "timeout")
+            self.assertIn("启动超时", panel._preflight_error)
+            self.assertIn("dashboard port not listening yet", panel._preflight_error)
+            self.assertIn("启动超时", panel.status_text())
         finally:
             panel.health_timer.stop()
             panel.process = None
@@ -1664,7 +1698,7 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             window.change_language("zh")
             self.assertEqual(window.current_lang, "zh")
             self.assertIn("TaxaMask Workbench", window.windowTitle())
-            self.assertEqual(window.start_title.text(), "TaxaMask Agent 中心")
+            self.assertEqual(window.start_title.text(), "启动中心")
             self.assertEqual(window.btn_start_ant_code.text(), "启动 Ant-Code")
             self.assertEqual(window.btn_general_settings.text(), "通用设置")
 
@@ -2009,7 +2043,7 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
                     "backend_result_json": "C:/taxamask/runs/train/train_1/result.json",
                     "predict_group_filter": "tag:review_batch",
                     "predict_group_filter_label": "Review batch",
-                    "predict_target_summary": "Prediction targets: 3 listed, 2 ready, 1 selected, 0 will overwrite editable AI result, 1 incomplete.",
+                    "predict_target_summary": "Listed 3; selected 1; this run would replace editable results for 0 of the selected items; 2 ready, 1 incomplete.",
                     "predict_selected_target_count": "1",
                     "predict_selected_targets": "ANTSCAN_0001/head/head_local_axis_001",
                     "tif_task_summary": "{'running_count': 1, 'busy_locked': True}",
@@ -2986,7 +3020,10 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             self.assertIsNone(window.image_import_thread)
             self.assertIsNone(window.image_import_progress_dialog)
             self.assertEqual(len(window.project.project_data["images"]), len(image_paths))
-            self.assertEqual(window.label_project_images.text(), f"PROJECT IMAGES (0/{len(image_paths)})")
+            self.assertEqual(
+                window.label_project_images.text(),
+                f"PROJECT IMAGES (confirmed 0 · pending 0 · empty/check {len(image_paths)} / {len(image_paths)})",
+            )
         finally:
             window.deleteLater()
 

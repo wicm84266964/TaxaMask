@@ -357,6 +357,8 @@ class MainWindowPartTreeMixin:
                 self.on_enhancement_changed()
             self.canvas.set_polygons(labels)
             self.canvas.set_boxes(manual_boxes, auto_boxes, self._current_shrink_loose_boxes(), vlm=vlm_boxes)
+            if hasattr(self, "_refresh_canvas_part_display"):
+                self._refresh_canvas_part_display()
             get_taxon = getattr(self.project, "get_taxon", self.project.get_genus)
             self.genus_combo.blockSignals(True)
             try:
@@ -370,6 +372,8 @@ class MainWindowPartTreeMixin:
         if not p:
             self.canvas.set_active_part(None)
             self.desc_box.clear()
+            self.log(tr("Select a specific structure before drawing.", self.current_lang))
+            self._refresh_blink_refine_state()
             return
         self.canvas.set_active_part(p)
         self.update_db_description(p)

@@ -1932,6 +1932,9 @@ class UiPolishScopeTests(unittest.TestCase):
                     }
                 ],
             }
+            expert_path = Path(self.weights_dir) / "experts" / "Mandible" / "expert_v20260501_090000.pth"
+            expert_path.parent.mkdir(parents=True, exist_ok=True)
+            expert_path.write_bytes(b"expert")
 
             window.refresh_route_table()
             window.current_image = image_path
@@ -2225,6 +2228,9 @@ class UiPolishScopeTests(unittest.TestCase):
                     }
                 ],
             }
+            expert_path = Path(self.weights_dir) / "experts" / "Mandible" / "expert_v20260501_090000.pth"
+            expert_path.parent.mkdir(parents=True, exist_ok=True)
+            expert_path.write_bytes(b"expert")
             window.refresh_route_table()
             window.current_image = image_key
             window._select_part_in_tree("Mandible")
@@ -2294,6 +2300,9 @@ class UiPolishScopeTests(unittest.TestCase):
                 "auto_boxes": {"Head": [12.0, 14.0, 74.0, 58.0]},
                 "meta": {},
             }
+            expert_path = Path(self.weights_dir) / "experts" / "Mandible" / "expert_v20260501_090000.pth"
+            expert_path.parent.mkdir(parents=True, exist_ok=True)
+            expert_path.write_bytes(b"expert")
             window.refresh_route_table()
             window.current_image = image_key
             window._select_part_in_tree("Mandible")
@@ -5937,7 +5946,7 @@ class UiPolishScopeTests(unittest.TestCase):
                 self.app.processEvents()
                 full_refresh.assert_not_called()
 
-            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (confirmed 1 · pending 0 · empty/check 0 / 1)")
             color = window.file_list.item(0).foreground().color()
             self.assertEqual(color, QColor(get_theme_config(window.current_theme)["success"]))
         finally:
@@ -6006,7 +6015,7 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertEqual(self.project_manager.project_data["images"], image_paths[1:])
             self.assertNotIn(image_paths[0], self.project_manager.project_data["labels"])
             self.assertEqual(window.current_image, image_paths[1])
-            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (0/2)")
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (confirmed 0 · pending 0 · empty/check 2 / 2)")
             visible_paths = [
                 window.file_list.item(row).data(main_module.Qt.UserRole)
                 for row in range(window.file_list.count())
@@ -6373,7 +6382,7 @@ class UiPolishScopeTests(unittest.TestCase):
             full_refresh.assert_not_called()
             self.assertEqual(self.project_manager.save_calls, baseline_save_calls)
             self.assertTrue(window.project_save_pending)
-            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (confirmed 1 · pending 0 · empty/check 0 / 1)")
             self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["success"]))
         finally:
             window.hide()
@@ -6878,8 +6887,8 @@ class UiPolishScopeTests(unittest.TestCase):
             self.assertTrue(window.project_save_pending)
             self.assertEqual(window.vlm_preannotation_saved_total, 1)
             self.assertIn("Head", self.project_manager.project_data["labels"][image_key]["parts"])
-            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (1/1)")
-            self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["success"]))
+            self.assertEqual(window.label_project_images.text(), "PROJECT IMAGES (confirmed 0 · pending 1 · empty/check 0 / 1)")
+            self.assertEqual(window.file_list.item(0).foreground().color(), QColor(get_theme_config(window.current_theme)["warning"]))
         finally:
             window.hide()
             window.deleteLater()

@@ -1,7 +1,14 @@
+import copy
+
 try:
     from AntSleap.ui.main_window_stage6_dependencies import *
 except ImportError:
     from ui.main_window_stage6_dependencies import *
+
+try:
+    from AntSleap.core.annotation_display import classify_image_entry, classify_part
+except ImportError:
+    from core.annotation_display import classify_image_entry, classify_part
 
 from PySide6.QtCore import QObject
 
@@ -215,7 +222,125 @@ class MainWindowAnnotationMixin:
             self._log_stale_project_task_result("sam_mask_result", task_context)
             return
         if image_path and part:
-            self.on_polygon_completed(part, pts, box, image_path=image_path, description_text=description_text)
+            self._apply_sam_generated_polygon(
+                part,
+                pts,
+                box,
+                image_path=image_path,
+                description_text=description_text,
+            )
+
+    def _usable_polygon_points(self, pts):
+        if not pts:
+            return []
+        clean_points = []
+        for point in pts:
+            if not point or len(point) < 2:
+                continue
+            try:
+                clean_points.append([float(point[0]), float(point[1])])
+            except (TypeError, ValueError):
+                continue
+        return clean_points if len(clean_points) >= 3 else []
+
+    def _apply_sam_generated_polygon(self, part, pts, box=None, image_path=None, description_text=None):
+        target_image = image_path or self.current_image
+        if not target_image or not part:
+            return
+        clean_points = self._usable_polygon_points(pts)
+        if not clean_points:
+            self.log(tr("SAM did not return a usable outline. Existing labels were kept.", self.current_lang))
+            return
+        snapshot_fn = getattr(self.project, "snapshot_part_annotation", None)
+        snapshot = snapshot_fn(target_image, part) if callable(snapshot_fn) else None
+        existing_points = (snapshot or {}).get("points") if (snapshot or {}).get("had_part") else None
+        if existing_points and len(existing_points) >= 3:
+            entry = (self.project.project_data.get("labels") or {}).get(
+                self.project._image_data_key(target_image),
+                {},
+            )
+            decision = resolve_part_training_trust(entry, part)
+            if decision.get("state") == "confirmed":
+                image_name = os.path.basename(str(target_image)) or str(target_image)
+                reply = themed_yes_no_question(
+                    self,
+                    tr("Replace confirmed outline?", self.current_lang),
+                    tr(
+                        "SAM generated a new outline for {0} on {1}. This will replace the confirmed outline. The new result will stay as a review-pending draft until you confirm it.",
+                        self.current_lang,
+                    ).format(part, image_name),
+                    confirm_role=BUTTON_ROLE_COMMIT,
+                )
+                if reply != QMessageBox.Yes:
+                    self.log(tr("Kept the confirmed outline for {0}.", self.current_lang).format(part))
+                    return
+        label_description = "" if description_text is None else str(description_text)
+        if label_description.strip() == "Auto-Annotated":
+            label_description = ""
+        clean_box = _clean_box(box) if box is not None else None
+        restore_fn = getattr(self.project, "restore_part_annotation", None)
+        try:
+            self.project.update_label(
+                target_image,
+                part,
+                clean_points,
+                label_description or None,
+                auto_box=clean_box,
+                save=False,
+                training_source=TRAINING_SOURCE_MODEL,
+                training_review_status=TRAINING_REVIEW_DRAFT,
+                training_accepted_via="",
+            )
+            if clean_box:
+                update_auto_box = getattr(self.project, "update_auto_box", None)
+                if callable(update_auto_box):
+                    update_auto_box(
+                        target_image,
+                        part,
+                        clean_box,
+                        source_meta={
+                            "source": AUTO_BOX_SOURCE_MODEL,
+                            "review_status": AUTO_BOX_REVIEW_DRAFT,
+                        },
+                        save=False,
+                    )
+            label_entry = (self.project.project_data.get("labels") or {}).get(
+                self.project._image_data_key(target_image),
+                {},
+            )
+            boxes = label_entry.get("boxes")
+            if isinstance(boxes, dict):
+                boxes.pop(part, None)
+        except Exception:
+            if callable(restore_fn) and snapshot:
+                restore_fn(snapshot, save=False)
+            raise
+        self._last_replaced_annotation = snapshot
+        canvas = getattr(self, "canvas", None)
+        save_state = getattr(canvas, "save_state", None)
+        if callable(save_state) and existing_points:
+            try:
+                save_state()
+            except Exception:
+                pass
+        self._schedule_project_save()
+        is_current_image = bool(self.current_image) and self._same_project_image_path(target_image, self.current_image)
+        if is_current_image:
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self._refresh_current_canvas_boxes()
+        self._refresh_current_image_list_status(target_image)
+        if is_current_image and self.check_morpho.isChecked():
+            self.update_measurements(part)
+        if is_current_image:
+            self._refresh_blink_refine_state()
+        self.log(
+            tr(
+                "Saved a review-pending SAM outline for {0}. Confirm this part or use the existing AI draft buttons before training.",
+                self.current_lang,
+            ).format(part)
+        )
+        if is_current_image:
+            self._refresh_canvas_part_display()
 
     def on_sam_prompt_failed(self, message):
         self.sam_busy = False
@@ -247,6 +372,114 @@ class MainWindowAnnotationMixin:
                 self.update_measurements(p)
             if is_current_image:
                 self._refresh_blink_refine_state()
+            if is_current_image:
+                self._refresh_canvas_part_display()
+
+    def _label_entry_for_image(self, image_path):
+        if not image_path or not hasattr(self, "project"):
+            return {}
+        key_fn = getattr(self.project, "_image_data_key", None)
+        key = key_fn(image_path) if callable(key_fn) else image_path
+        entry = (self.project.project_data or {}).get("labels", {}).get(key, {})
+        return entry if isinstance(entry, dict) else {}
+
+    def _refresh_canvas_part_display(self):
+        if not hasattr(self, "canvas"):
+            return
+        entry = self._label_entry_for_image(self.current_image)
+        mapping = {}
+        canvas_parts = getattr(self.canvas, "polygons", {}) or {}
+        for part_name in set(canvas_parts) | set(entry.get("parts") or {}):
+            state = classify_part(entry, part_name)
+            caption = ""
+            if state["kind"] == "conflict":
+                caption = tr("needs check", self.current_lang)
+            elif state["kind"] == "draft":
+                source = tr(state["source_label_key"], self.current_lang) if state.get("source_label_key") else tr("AI draft", self.current_lang)
+                caption = f"{tr('review-pending', self.current_lang)} · {source}"
+            elif state["kind"] == "confirmed":
+                source = tr(state["source_label_key"], self.current_lang) if state.get("source_label_key") else tr("hand-drawn", self.current_lang)
+                caption = f"{tr('confirmed', self.current_lang)} · {source}"
+            mapping[part_name] = {"kind": state["kind"], "caption": caption}
+        legend = [
+            tr("Confirmed = solid, review-pending = dashed, selected = thicker.", self.current_lang),
+            tr("Confirm AI drafts before training. Color is not the only status cue.", self.current_lang),
+        ]
+        captions = {
+            "manual": tr("[manual box]", self.current_lang),
+            "vlm": tr("[VLM draft]", self.current_lang),
+            "auto": tr("[model box]", self.current_lang),
+            "shrink": tr("[shrink start]", self.current_lang),
+        }
+        setter = getattr(self.canvas, "set_part_display", None)
+        if callable(setter):
+            setter(mapping, legend_lines=legend, box_captions=captions)
+
+    def _on_annotation_history_checkpoint(self):
+        if not self.current_image:
+            return
+        key_fn = getattr(self.project, "_image_data_key", None)
+        key = key_fn(self.current_image) if callable(key_fn) else self.current_image
+        history = getattr(self, "_annotation_entry_history", None)
+        if history is None:
+            self._annotation_entry_history = []
+            self._annotation_entry_redo = []
+            history = self._annotation_entry_history
+        if len(history) > 20:
+            history.pop(0)
+        history.append({"image": key, "entry": copy.deepcopy(self._label_entry_for_image(key))})
+        self._annotation_entry_redo = []
+
+    def _on_annotation_history_cleared(self):
+        self._annotation_entry_history = []
+        self._annotation_entry_redo = []
+
+    def _on_annotation_polygons_restored(self, restored, previous, direction="undo"):
+        if not self.current_image:
+            return
+        key_fn = getattr(self.project, "_image_data_key", None)
+        current_key = key_fn(self.current_image) if callable(key_fn) else self.current_image
+        current_entry = copy.deepcopy(self._label_entry_for_image(current_key))
+        history = list(getattr(self, "_annotation_entry_history", []) or [])
+        redo = list(getattr(self, "_annotation_entry_redo", []) or [])
+        snapshot = None
+        if str(direction or "undo") == "redo":
+            if redo:
+                snapshot = redo.pop()
+                history.append({"image": current_key, "entry": current_entry})
+        elif history:
+            snapshot = history.pop()
+            redo.append({"image": current_key, "entry": current_entry})
+        self._annotation_entry_history = history
+        self._annotation_entry_redo = redo
+        if snapshot and snapshot.get("image") == current_key:
+            restore = getattr(self.project, "restore_image_labels", None)
+            if callable(restore):
+                restore(current_key, snapshot.get("entry") or {}, save=False)
+                self._schedule_project_save()
+                self.canvas.set_polygons(self.project.get_labels(self.current_image))
+                self._refresh_current_canvas_boxes()
+                self._refresh_current_image_list_status(self.current_image)
+                self._refresh_blink_refine_state()
+                self._refresh_canvas_part_display()
+                return
+        restored = restored if isinstance(restored, dict) else {}
+        previous = previous if isinstance(previous, dict) else {}
+        for part in set(previous) - set(restored):
+            self.project.delete_label(self.current_image, part, save=False)
+        for part, points in restored.items():
+            self.project.update_label(
+                self.current_image,
+                part,
+                points,
+                save=False,
+                preserve_training_truth=True,
+            )
+        self._schedule_project_save()
+        self._refresh_current_canvas_boxes()
+        self._refresh_current_image_list_status(self.current_image)
+        self._refresh_blink_refine_state()
+        self._refresh_canvas_part_display()
 
     def toggle_morphometrics(self, state):
         on = self.check_morpho.isChecked()

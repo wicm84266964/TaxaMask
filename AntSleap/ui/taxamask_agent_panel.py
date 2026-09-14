@@ -5,7 +5,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+DASHBOARD_HEALTH_INTERVAL_MS = 500
+DASHBOARD_HEALTH_ATTEMPTS = 240
+DASHBOARD_HEALTH_HTTP_TIMEOUT = 2.0
 
 try:
     from AntSleap.app_runtime import ensure_qtwebengine_quiet_cpu_flags
@@ -122,8 +127,13 @@ AGENT_TRANSLATIONS = {
         "Browser mode is active for this Linux/macOS/WSL session. If the dashboard did not open automatically, open the URL below.": "当前为浏览器模式。如果浏览器没有自动打开，请打开下面的网址。",
         "Stop": "停止",
         "Starting Ant-Code Dashboard...": "正在启动 Ant-Code Dashboard...",
+        "Starting Ant-Code Dashboard... waited {0}s of {1}s.": "正在启动助手… 已等待 {0} 秒（最长约 {1} 秒）。",
+        "Ant-Code start timed out after {0}s. The process is still running, but the dashboard page did not become ready. Stop it and retry, or click Reload if the page appears later.": "助手启动超时（已等 {0} 秒）。进程还在，但页面没有就绪。可先点停止再重试；如果稍后页面出现了，也可以点重新加载。",
+        "Last check error: {0}": "最近一次检查错误：{0}",
         "Ant-Code Dashboard is ready.": "Ant-Code Dashboard 已就绪。",
         "Ant-Code Dashboard is not running.": "Ant-Code Dashboard 尚未启动。",
+        "Stopping Ant-Code...": "正在停止助手...",
+        "Unable to start Ant-Code.": "无法启动助手。",
         "Qt WebEngine is unavailable in this environment. Start Ant-Code and open it in a browser.": "当前环境缺少 Qt WebEngine。可以启动 Ant-Code 后在浏览器中打开。",
         "Ant-Code process exited.": "Ant-Code 进程已退出。",
         "Unable to start Ant-Code: {0}": "无法启动 Ant-Code：{0}",
@@ -207,6 +217,8 @@ class TaxaMaskAgentPanel(QWidget):
         self.port = None
         self._context = {}
         self._health_checks_remaining = 0
+        self._health_started_at = 0.0
+        self._last_health_error = ""
         self._pending_context_prompt = ""
         self._project_display = self.workspace_dir
         self._status_text = ""
@@ -708,7 +720,7 @@ exec "$@"
         root.addWidget(self.stack, 1)
 
         self.health_timer = QTimer(self)
-        self.health_timer.setInterval(500)
+        self.health_timer.setInterval(DASHBOARD_HEALTH_INTERVAL_MS)
         self.health_timer.timeout.connect(self._poll_dashboard_ready)
         self.prompt_retry_timer = QTimer(self)
         self.prompt_retry_timer.setSingleShot(True)
@@ -1764,12 +1776,33 @@ exec "$@"
 
     def set_language(self, lang):
         self.lang = lang
-        if self.is_running():
-            status = at("Ant-Code Dashboard is ready.", lang)
-        else:
-            status = at("Ant-Code Dashboard is not running.", lang)
-        self._update_status_label(status)
+        self._refresh_running_state_status()
         self._update_fallback()
+
+    def _refresh_running_state_status(self):
+        state = str(getattr(self, "_running_state", "stopped") or "stopped")
+        if state == "starting":
+            if getattr(self, "_health_started_at", 0):
+                self._update_start_wait_status()
+            else:
+                self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+        elif state == "running":
+            self._update_status_label(at("Ant-Code Dashboard is ready.", self.lang))
+        elif state == "stopping":
+            self._update_status_label(at("Stopping Ant-Code...", self.lang))
+        elif state == "error":
+            err = str(
+                getattr(self, "_preflight_error", "")
+                or getattr(self, "_embedded_page_error", "")
+                or getattr(self, "_last_console_error", "")
+                or ""
+            ).strip()
+            if err:
+                self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(err))
+            else:
+                self._update_status_label(at("Unable to start Ant-Code.", self.lang))
+        else:
+            self._update_status_label(at("Ant-Code Dashboard is not running.", self.lang))
 
     def update_runtime_status(self, model_status=None, workflow=None, project=None, state=None):
         if project:
@@ -1794,11 +1827,14 @@ exec "$@"
             if self._running_state == "error":
                 self._preflight_error = ""
                 self._embedded_page_error = ""
-                self._health_checks_remaining = 80
+                self._last_health_error = ""
+                self._begin_dashboard_health_wait()
                 self._set_running_state("starting")
-                self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+                self._update_start_wait_status()
                 self._update_fallback()
                 self.health_timer.start()
+                return
+            if self._running_state in {"starting", "stopping"}:
                 return
             if self.browser_mode:
                 self._browser_opened_for_url = ""
@@ -1820,6 +1856,7 @@ exec "$@"
             self._preflight_checks_remaining = 0
             self._preflight_error = ""
             self._embedded_page_error = ""
+            self._last_health_error = ""
             self._json_health_warning = self._dashboard_workspace_json_warning()
             self._json_health_error = self._dashboard_json_health_error()
             if self._json_health_error:
@@ -1844,8 +1881,8 @@ exec "$@"
             self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
             self._update_fallback()
             return
-        self._health_checks_remaining = 80
-        self._update_status_label(at("Starting Ant-Code Dashboard...", self.lang))
+        self._begin_dashboard_health_wait()
+        self._update_start_wait_status()
         self._update_fallback()
         self.health_timer.start()
 
@@ -1912,6 +1949,44 @@ exec "$@"
             return 0
         return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+    def _begin_dashboard_health_wait(self):
+        self._health_checks_remaining = DASHBOARD_HEALTH_ATTEMPTS
+        self._health_started_at = time.monotonic()
+        self._last_health_error = ""
+
+    def _dashboard_wait_budget_seconds(self):
+        return max(1, int(DASHBOARD_HEALTH_ATTEMPTS * DASHBOARD_HEALTH_INTERVAL_MS / 1000))
+
+    def _dashboard_wait_elapsed_seconds(self):
+        started = float(getattr(self, "_health_started_at", 0) or 0)
+        if started <= 0:
+            return 0
+        return max(0, int(time.monotonic() - started))
+
+    def _update_start_wait_status(self):
+        self._update_status_label(
+            at("Starting Ant-Code Dashboard... waited {0}s of {1}s.", self.lang).format(
+                self._dashboard_wait_elapsed_seconds(),
+                self._dashboard_wait_budget_seconds(),
+            )
+        )
+
+    def _format_start_timeout_error(self):
+        elapsed = self._dashboard_wait_elapsed_seconds() or self._dashboard_wait_budget_seconds()
+        parts = [
+            at(
+                "Ant-Code start timed out after {0}s. The process is still running, but the dashboard page did not become ready. Stop it and retry, or click Reload if the page appears later.",
+                self.lang,
+            ).format(elapsed)
+        ]
+        last = str(getattr(self, "_last_health_error", "") or "").strip()
+        if last:
+            parts.append(at("Last check error: {0}", self.lang).format(last))
+        log_tail = self._dashboard_log_tail(600)
+        if log_tail:
+            parts.append(log_tail)
+        return "\n".join(parts)
+
     def _poll_dashboard_ready(self):
         if not self.is_running():
             self.health_timer.stop()
@@ -1923,19 +1998,23 @@ exec "$@"
             return
         if self._health_checks_remaining <= 0:
             self.health_timer.stop()
-            self._preflight_error = "timeout"
+            self._preflight_error = self._format_start_timeout_error()
             self._set_running_state("error")
-            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format("timeout"))
+            self._update_status_label(at("Unable to start Ant-Code: {0}", self.lang).format(self._preflight_error))
             self._update_fallback()
             return
         self._health_checks_remaining -= 1
+        self._update_start_wait_status()
         try:
-            status = self._dashboard_json_request("/api/status", timeout=0.5)
+            status = self._dashboard_json_request("/api/status", timeout=DASHBOARD_HEALTH_HTTP_TIMEOUT)
             if isinstance(status, dict) and status.get("ok") is not False:
                 self.health_timer.stop()
                 self._on_dashboard_ready()
-        except Exception:
-            return
+                return
+            self._last_health_error = "dashboard /api/status did not report ready"
+        except Exception as exc:
+            self._last_health_error = str(exc)
+            self._reset_dashboard_http_session()
 
     def _on_dashboard_ready(self):
         self._close_dashboard_log()
@@ -2461,7 +2540,10 @@ exec "$@"
         import urllib.request
 
         cookie_jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(cookie_jar),
+        )
         with opener.open(f"{self.dashboard_url}/", timeout=timeout) as response:
             response.read()
             if response.status < 200 or response.status >= 300:

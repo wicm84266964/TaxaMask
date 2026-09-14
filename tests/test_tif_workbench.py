@@ -8941,7 +8941,7 @@ class TifWorkbenchTests(unittest.TestCase):
                 widget.backend_panel_controller.refresh_predict_targets()
 
                 self.assertGreaterEqual(widget.predict_targets_table.rowCount(), 1)
-                self.assertIn("Prediction targets:", widget.predict_targets_summary_label.text())
+                self.assertIn("Listed", widget.predict_targets_summary_label.text())
                 status_item = widget.predict_targets_table.item(0, 6)
                 label_item = widget.predict_targets_table.item(0, 5)
                 tag_item = widget.predict_targets_table.item(0, 4)

@@ -112,6 +112,14 @@ class MainWindowPresentationMixin:
                     self.current_lang,
                 )
             )
+        if hasattr(self, "btn_accept_current_part_ai_draft"):
+            self.btn_accept_current_part_ai_draft.setText(tr("Confirm this part's AI draft", self.current_lang))
+            self.btn_accept_current_part_ai_draft.setToolTip(
+                tr(
+                    "Confirms the selected structure's AI polygon draft on the current image. Box-only drafts stay pending.",
+                    self.current_lang,
+                )
+            )
         if hasattr(self, "btn_accept_current_ai_drafts"):
             self.btn_accept_current_ai_drafts.setText(tr("Confirm current AI polygon drafts", self.current_lang))
             self.btn_accept_current_ai_drafts.setToolTip(
@@ -546,6 +554,8 @@ class MainWindowPresentationMixin:
             apply_theme_button_style(self.btn_vlm_preannotate_current, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_vlm_preannotate_batch"):
             apply_theme_button_style(self.btn_vlm_preannotate_batch, BUTTON_ROLE_RUN, "padding: 6px;", self.current_theme)
+        if hasattr(self, "btn_accept_current_part_ai_draft"):
+            apply_theme_button_style(self.btn_accept_current_part_ai_draft, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_accept_current_ai_drafts"):
             apply_theme_button_style(self.btn_accept_current_ai_drafts, BUTTON_ROLE_COMMIT, "padding: 6px;", self.current_theme)
         if hasattr(self, "btn_accept_batch_ai_drafts"):

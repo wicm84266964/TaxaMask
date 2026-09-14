@@ -1067,7 +1067,9 @@ class MainWindowTrainingMixin:
         self.log(tr("Training scope: {0} ({1} image(s))", self.current_lang).format(scope_label, len(images)))
         self.log(tr("Training with Taxonomy ({0}): {1}", self.current_lang).format(len(tax), tax))
         self.log(tr("Training with Locator Scope ({0}): {1}", self.current_lang).format(len(locator_scope), locator_scope))
-        self.log(describe_training_preflight(preflight))
+        self.log(
+            "\n".join(tr(line, self.current_lang) for line in describe_training_preflight(preflight).splitlines())
+        )
         train_segmenter = not self.chk_train_locator_only.isChecked()
         if not train_segmenter and not preflight.get("locator_samples"):
             QMessageBox.warning(

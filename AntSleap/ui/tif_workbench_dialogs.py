@@ -38,7 +38,7 @@ class MaterialEditorDialog(QDialog):
     def __init__(self, material=None, next_id=1, parent=None, lang="en"):
         super().__init__(parent)
         self.lang = lang
-        self.setWindowTitle(tt("Material", self.lang))
+        self.setWindowTitle(tt("Material label", self.lang))
         material = dict(material or {})
         self.id_spin = WheelSafeSpinBox()
         self.id_spin.setRange(0, 65535)

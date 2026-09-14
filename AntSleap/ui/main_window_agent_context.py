@@ -385,6 +385,10 @@ class MainWindowAgentContextMixin:
         self.open_stl_model_settings()
 
     def enter_image_workflow(self):
+        prompt = getattr(self, "_prompt_formal_2d_project_before_enter", None)
+        if callable(prompt) and not prompt():
+            self.log(tr("Stayed on Start Center. No annotations were written to the startup placeholder.", self.current_lang))
+            return
         self.active_project_kind = "image"
         self.last_workbench_kind = "image"
         self._refresh_project_bound_views()

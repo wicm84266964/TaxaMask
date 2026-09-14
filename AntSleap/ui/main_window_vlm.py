@@ -1089,6 +1089,41 @@ class MainWindowVlmMixin:
         self.vlm_preannotation_completed_image_keys = set()
         self._present_vlm_run_outcome(summary, report_path)
 
+    def accept_current_part_ai_draft(self):
+        if not self.current_image:
+            return
+        part = self._current_part_name() if hasattr(self, "_current_part_name") else None
+        if not part:
+            self.log(tr("Select a structure first, then confirm this part's AI draft.", self.current_lang))
+            return
+        summarize = getattr(self.project, "summarize_image_ai_drafts", None)
+        draft_summary = summarize(self.current_image) if callable(summarize) else {}
+        reviewable_parts = list((draft_summary or {}).get("reviewable_polygon_parts", []) or [])
+        if part not in reviewable_parts:
+            self.log(tr("No reviewable AI polygon draft for {0}.", self.current_lang).format(part))
+            return
+        reply = themed_yes_no_question(
+            self,
+            tr("Confirm AI Drafts", self.current_lang),
+            tr(
+                "Accept the AI polygon draft for {0} on the current image?\n\nIt will become a training label for this part only.",
+                self.current_lang,
+            ).format(part),
+            confirm_role=BUTTON_ROLE_COMMIT,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        count = self.project.verify_image_labels(self.current_image, save=False, part_names=[part])
+        if count:
+            self._schedule_project_save()
+            self.canvas.set_polygons(self.project.get_labels(self.current_image))
+            self._refresh_current_canvas_boxes()
+            self._refresh_image_list_status_or_rebuild(self.current_image)
+            self._refresh_blink_refine_state()
+            self.log(tr("Accepted the AI draft for {0}.", self.current_lang).format(part))
+        else:
+            self.log(tr("No reviewable AI polygon draft for {0}.", self.current_lang).format(part))
+
     def accept_current_image_ai_drafts(self):
         if not self.current_image:
             return

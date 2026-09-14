@@ -1,3 +1,4 @@
+import copy
 import json
 import sqlite3
 import tempfile
@@ -17,6 +18,7 @@ from AntSleap.core.training_truth import (
     TRAINING_SOURCE_AUTO_SHRINK,
     TRAINING_SOURCE_BLINK_EXPERT,
     TRAINING_SOURCE_LEGACY_JOURNAL_RECOVERY,
+    TRAINING_SOURCE_MODEL,
     get_part_training_truth,
     remove_part_training_truth,
     resolve_part_training_trust,
@@ -319,6 +321,131 @@ class TrainingTruthTests(unittest.TestCase):
                 "Excluded 1 unconfirmed part annotation(s) from training.",
                 preflight["warnings"],
             )
+
+    def test_sam_model_prediction_draft_is_not_eligible_until_confirmed(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("sam.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {image_path: manager._default_label_entry()}
+        manager.update_label(
+            image_path,
+            "Head",
+            self._polygon(),
+            auto_box=[4, 4, 31, 26],
+            save=False,
+            training_source=TRAINING_SOURCE_MODEL,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        manager.update_label(
+            image_path,
+            "Eye",
+            self._polygon(),
+            auto_box=[5, 5, 20, 20],
+            save=False,
+            training_source=TRAINING_SOURCE_MODEL,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        entry = manager.project_data["labels"][image_path]
+        decision = resolve_part_training_trust(entry, "Head")
+        self.assertFalse(decision["eligible"])
+        self.assertEqual(decision["state"], "draft")
+        self.assertEqual(decision["source"], TRAINING_SOURCE_MODEL)
+        self.assertEqual(
+            manager.summarize_image_ai_drafts(image_path)["reviewable_polygon_parts"],
+            ["Eye", "Head"],
+        )
+        self.assertEqual(manager.verify_image_labels(image_path, save=False, part_names=["Head"]), 1)
+        self.assertEqual(
+            get_part_training_truth(entry, "Head")["review_status"],
+            TRAINING_REVIEW_CONFIRMED,
+        )
+        self.assertEqual(
+            get_part_training_truth(entry, "Eye")["review_status"],
+            TRAINING_REVIEW_DRAFT,
+        )
+        self.assertEqual(manager.verify_image_labels(image_path, save=False, part_names=["Eye"]), 1)
+        self.assertEqual(
+            get_part_training_truth(entry, "Eye")["review_status"],
+            TRAINING_REVIEW_CONFIRMED,
+        )
+
+    def test_snapshot_and_restore_part_annotation_round_trip(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("restore.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {image_path: manager._default_label_entry()}
+        original = self._polygon()
+        manager.update_label(image_path, "Head", original, save=False)
+        snapshot = manager.snapshot_part_annotation(image_path, "Head")
+        manager.update_label(
+            image_path,
+            "Head",
+            [[1.0, 1.0], [8.0, 1.0], [4.0, 7.0]],
+            auto_box=[1, 1, 8, 7],
+            save=False,
+            training_source=TRAINING_SOURCE_MODEL,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        self.assertEqual(
+            resolve_part_training_trust(manager.project_data["labels"][image_path], "Head")["state"],
+            "draft",
+        )
+        self.assertTrue(manager.restore_part_annotation(snapshot, save=False))
+        restored = get_part_training_truth(manager.project_data["labels"][image_path], "Head")
+        self.assertEqual(manager.project_data["labels"][image_path]["parts"]["Head"], original)
+        self.assertEqual(restored["source"], "manual")
+        self.assertEqual(restored["review_status"], TRAINING_REVIEW_CONFIRMED)
+
+    def test_preserve_training_truth_keeps_draft_when_only_box_changes(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("box-only.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {image_path: manager._default_label_entry()}
+        polygon = self._polygon()
+        manager.update_label(
+            image_path,
+            "Mandible",
+            polygon,
+            save=False,
+            training_source=TRAINING_SOURCE_MODEL,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        manager.update_label(
+            image_path,
+            "Mandible",
+            polygon,
+            box=[3, 3, 28, 24],
+            save=False,
+            preserve_training_truth=True,
+        )
+        truth = get_part_training_truth(manager.project_data["labels"][image_path], "Mandible")
+        self.assertEqual(truth["source"], TRAINING_SOURCE_MODEL)
+        self.assertEqual(truth["review_status"], TRAINING_REVIEW_DRAFT)
+
+    def test_restore_image_labels_replaces_whole_entry(self):
+        manager = ProjectManager()
+        image_path = manager._image_data_key("restore-image.png")
+        manager.project_data["images"] = [image_path]
+        manager.project_data["labels"] = {image_path: manager._default_label_entry()}
+        manager.update_label(image_path, "Head", self._polygon(), save=False)
+        snapshot = copy.deepcopy(manager.project_data["labels"][image_path])
+        manager.update_label(
+            image_path,
+            "Eye",
+            self._polygon(),
+            save=False,
+            training_source=TRAINING_SOURCE_MODEL,
+            training_review_status=TRAINING_REVIEW_DRAFT,
+            training_accepted_via="",
+        )
+        self.assertIn("Eye", manager.project_data["labels"][image_path]["parts"])
+        self.assertTrue(manager.restore_image_labels(image_path, snapshot, save=False))
+        self.assertNotIn("Eye", manager.project_data["labels"][image_path]["parts"])
+        self.assertIn("Head", manager.project_data["labels"][image_path]["parts"])
 
 
 class BlinkTrainingTruthGateTests(unittest.TestCase):

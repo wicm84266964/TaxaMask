@@ -31,7 +31,7 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
    - Agent Center / Ant-Code integration
    - 2D/STL morphology workflow
    - TIF volume workflow
-   - PDF evidence workflow
+   - Material processing center (current connected intake pathway: PDF evidence workflow)
    - settings/model/backend configuration
    - documentation/context/changelog sync
    - validation/debugging/release review
@@ -53,7 +53,8 @@ Treat this TaxaMask protocol as always active, not as an optional skill:
 - The embedded Agent Center runtime is `2.0.24-taxamask.1` (TypeScript, Node.js 22.18+). TaxaMask keeps its host workspace/config boundary, source-write guard, and selectively adapted Skill set; do not treat a separate `TaxaMask` folder name as a different repository from this checkout.
 - The default registry exposes 15 maintained Skills, including `paper-distill` and `unsloth-studio-finetune`. Their source commit, local variant, license, sync policy, and test command are recorded in `skills/EMBEDDED_SKILLS.json`.
 - Long-running terminal work should use registered background terminal tasks: prefer `background_shell`, check existing tasks with `background_terminal_list` before restarting servers/viewers/downloads/renders/training jobs, and cancel stale tasks with `background_terminal_cancel` when appropriate. Dashboard recycle actions can also cancel registered terminal tasks.
-- The start center right rail contains recent/open/general settings controls followed by `PDF evidence workflow`, `2D/STL Morphology`, and `TIF Volume` cards. PDF evidence should remain visible near the top because it is often the first screening/review step before candidate import.
+- The start center right rail contains recent/open/general settings controls followed by `Material processing center`, `2D/STL Morphology`, and `TIF Volume` cards. The center currently connects the PDF evidence pathway into the workbench. Keep this card near the top because literature screening is often the first step before candidate import.
+- A new material intake page must live in its own module, call `register_material_intake_page()` in `AntSleap/ui/material_intake_registry.py`, and set `material_page_id` on its tab widget before `addTab`. Ask Agent follows that registration. Leave `connected_to_workbench` false unless the page has an explicit import contract. Do not copy `source_workbench=pdf_evidence` onto a new intake method.
 - Normal Windows launch uses `启动TaxaMask.bat`, which discovers a usable Python environment instead of assuming a maintainer-specific Conda path. `TAXAMASK_PYTHON_EXE` can point to a custom `python.exe`.
 - If TaxaMask GUI cannot start after local source edits, use `启动AntCode修复面板.bat`. It starts the vendored Ant-Code browser Dashboard without importing the PySide6 GUI. Model/API settings may need to be reconfirmed inside that recovery Dashboard.
 - Workbenches expose lightweight `Start Center` / `Ask Agent` entries. Do not place full chat panes inside annotation workspaces by default.

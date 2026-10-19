@@ -212,7 +212,7 @@ AGENT_CONTEXT_ROUTES = {
     },
     "pdf_evidence": {
         "diagnostic_route": "pdf_evidence_context",
-        "diagnostic_focus": "PDF evidence guided workflow. Handle one stage per reply: stage 0 decide whether PDFs already exist or whether daily review, topic search, selected-paper acquisition, or batch harvest is needed; then check key/model readiness, screening criteria, figure-review criteria, and run/results.",
+        "diagnostic_focus": "Material processing center. The pathway currently connected to the workbench is still PDF evidence. Handle one stage per reply: stage 0 decide whether PDFs already exist or whether daily review, topic search, selected-paper acquisition, or batch harvest is needed; then check key/model readiness, screening criteria, figure-review criteria, and run/results.",
         "llm_context_refs": (
             "LLM_CONTEXT_DETAILED.md -> 7. PDF Evidence Route",
             "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
@@ -233,7 +233,28 @@ AGENT_CONTEXT_ROUTES = {
             "For PDF acquisition, use only open metadata and legally exposed PDF links. Do not use Sci-Hub, LibGen, paywall bypasses, CAPTCHA bypasses, or logged-in scraping.",
             "PDF evidence and extracted figures are candidates/provenance only; never promote them into training truth automatically.",
         ),
-        "suggested_agent_action": "First ask whether the user already has a PDF folder or needs daily monitoring, a focused topic search, selected-paper acquisition, or a batch harvest. If literature discovery or acquisition is needed, load taxonomy-paper-finder first; otherwise load the PDF evidence skill. Keep discovery metadata-first, ask before downloading, default selected-paper handoff to deep reads, stay on the current stage, ask at most three concise requirement-confirmation questions, summarize them as at most three items, do not dump the full workflow, and move forward only after the current stage is resolved.",
+        "suggested_agent_action": "The user is in the Material Processing Center. The connected pathway is still PDF evidence; do not treat this as a new input type. First ask whether the user already has a PDF folder or needs daily monitoring, a focused topic search, selected-paper acquisition, or a batch harvest. If literature discovery or acquisition is needed, load taxonomy-paper-finder first; otherwise load the PDF evidence skill. Keep discovery metadata-first, ask before downloading, default selected-paper handoff to deep reads, stay on the current stage, ask at most three concise requirement-confirmation questions, summarize them as at most three items, do not dump the full workflow, and move forward only after the current stage is resolved.",
+    },
+    "material_intake": {
+        "diagnostic_route": "material_intake_context",
+        "diagnostic_focus": "Material processing center, unconnected intake page. Read the visible page name and material_page_instruction. Do not treat this page as PDF screening, figure extraction, or a workbench import.",
+        "llm_context_refs": (
+            "LLM_CONTEXT_DETAILED.md -> 5. Agent Center",
+            "AntSleap/ui/material_intake_registry.py",
+        ),
+        "source_code_refs": (
+            "AntSleap/ui/material_intake_registry.py",
+            "AntSleap/ui/pdf_processing_widget.py",
+        ),
+        "artifact_hints": (
+            "Use only artifacts named by this page. Do not open the PDF evidence database unless the page instruction says this intake is connected to it.",
+        ),
+        "safety_notes": COMMON_SAFETY_NOTES
+        + (
+            "This intake page is not connected to the labeling workbench. Do not write manual_truth, training labels, or PDF import-ready marks for it.",
+            "Do not load taxamask-pdf-evidence or taxonomy-paper-finder unless the page instruction names those skills.",
+        ),
+        "suggested_agent_action": "Help only with the visible material intake page. Ask what files or specimen materials it should accept. Do not import anything into 2D/STL or TIF projects, and do not reuse the PDF evidence route.",
     },
 }
 

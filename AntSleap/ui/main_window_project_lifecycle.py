@@ -891,7 +891,7 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         self._ensure_pdf_widget()
         index = self.tabs.indexOf(self.pdf_widget)
         if index < 0:
-            index = self.tabs.addTab(self.pdf_widget, tr("PDF Evidence Tools", self.current_lang))
+            index = self.tabs.addTab(self.pdf_widget, tr("Material Processing Center", self.current_lang))
         self.tabs.setCurrentIndex(index)
 
     def open_pdf_multimodal_api_settings(self):

@@ -188,11 +188,13 @@ TRANSLATIONS = {
         "Multimodal LLM test failed: {0}": "多模态模型测试失败：{0}",
         "Send a tiny text-only request to verify the text model settings before screening PDFs.": "发送一个极小的纯文本请求，在筛选 PDF 前验证文本模型配置。",
         "Send a tiny generated PNG plus text to verify the vision model settings before extracting figures.": "发送一张极小的程序生成 PNG 和文本，在提取图版前验证视觉模型配置。",
-        "PDF Evidence Tools": "PDF 文献证据工具",
+        "Material Processing Center": "材料处理中心",
+        "PDF literature evidence pathway": "PDF 文献证据途径",
+        "Unregistered material intake": "尚未接通工作台的新材料接口",
         "Agent first: confirm whether PDFs already exist or need lawful open-access harvest, then configure keys/models and adapt screening/review rules.": "先让 Agent 确认是否已有 PDF、是否需要合法采集开放 PDF，再配置 key/模型并适配筛选/复核规则。",
         "Start Center": "启动中心",
-        "Ask Agent": "带上当前 PDF 状态询问助手",
-        "Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.": "把当前页签、文件夹和最近一次任务状态带给助手。已有 PDF 工具时从当前阶段继续，不再每次从“有没有 PDF”问起。",
+        "Ask with current material state": "带上当前材料处理状态询问助手",
+        "Send the current material-processing tab, folders, and latest task state to the assistant. Continue from the current PDF pathway stage instead of asking again whether PDFs exist.": "把当前页签、文件夹和最近一次任务状态带给助手。已在材料处理中心时从当前 PDF 途径阶段继续，不再每次从“有没有 PDF”问起。",
         "Show Advanced Config": "显示高级配置",
         "Hide Advanced Config": "隐藏高级配置",
         "Screening Mode:": "筛选模式:",
@@ -2753,6 +2755,7 @@ class PdfProcessingWidget(QWidget):
 
     start_center_requested = Signal()
     agent_requested = Signal(dict)
+    material_page_changed = Signal(dict)
 
     def __init__(self, current_lang="en", parent=None):
         super().__init__(parent)
@@ -4016,6 +4019,7 @@ class PdfProcessingWidget(QWidget):
         l_class.addWidget(self.classify_action_panel)
         l_class.addStretch()
         
+        tab_classify.setProperty("material_page_id", "literature_screening")
         self.tabs.addTab(tab_classify, "")
         
         # Tab 2: Extractor
@@ -4110,7 +4114,9 @@ class PdfProcessingWidget(QWidget):
         l_ext.addWidget(util_group)
         l_ext.addStretch()
         
+        tab_extract.setProperty("material_page_id", "data_extraction")
         self.tabs.addTab(tab_extract, "")
+        self.tabs.currentChanged.connect(self._emit_material_page_context)
         
         layout.addWidget(self.tabs, 1)
         
@@ -4178,14 +4184,14 @@ class PdfProcessingWidget(QWidget):
             self.tr("Send a tiny generated PNG plus text to verify the vision model settings before extracting figures.")
         )
         self.btn_save_api_settings.setText(self.tr("Save API Settings"))
-        self.lbl_workbench_title.setText(self.tr("PDF Evidence Tools"))
+        self.lbl_workbench_title.setText(self.tr("Material Processing Center"))
         self.lbl_workbench_hint.setText(
             self.tr("Agent first: confirm whether PDFs already exist or need lawful open-access harvest, then configure keys/models and adapt screening/review rules.")
         )
         self.btn_start_center.setText(self.tr("Start Center"))
-        self.btn_ask_agent.setText(self.tr("Ask Agent"))
+        self.btn_ask_agent.setText(self.tr("Ask with current material state"))
         self.btn_ask_agent.setToolTip(
-            self.tr("Ask Agent to first check whether PDFs already exist or need lawful open-access harvest, then adapt keys/models, screening, figure review, provenance, and safe candidate review.")
+            self.tr("Send the current material-processing tab, folders, and latest task state to the assistant. Continue from the current PDF pathway stage instead of asking again whether PDFs exist.")
         )
         self.btn_toggle_advanced.setText(
             self.tr("Hide Advanced Config") if self.advanced_config_visible else self.tr("Show Advanced Config")
@@ -4326,46 +4332,75 @@ class PdfProcessingWidget(QWidget):
         except Exception:
             return ""
 
+    def _emit_material_page_context(self, _index=None):
+        if not hasattr(self, "edit_src_folder"):
+            return
+        self.material_page_changed.emit(self.get_agent_context())
+
+    def _checked_text(self, widget):
+        if widget is None or not hasattr(widget, "isChecked"):
+            return ""
+        try:
+            return "yes" if widget.isChecked() else "no"
+        except Exception:
+            return ""
+
+    def _last_task_summary_text(self):
+        results = getattr(self, "_last_worker_results", {}) or {}
+        if not isinstance(results, dict) or not results:
+            return ""
+        summary = results.get("extract_summary")
+        if isinstance(summary, dict) and summary:
+            outcome = str(summary.get("outcome") or "recorded")
+            return f"data_extraction:{outcome}"
+        if results.get("txt") or results.get("csv"):
+            return "literature_screening:result_files_ready"
+        return "recorded"
+
+    def _material_page_stage(self, page_id, has_source_folder):
+        try:
+            from AntSleap.ui.material_intake_registry import resolve_material_intake_page
+        except ImportError:
+            from ui.material_intake_registry import resolve_material_intake_page
+        return resolve_material_intake_page(page_id, {"has_source_folder": has_source_folder})
+
+    def _active_material_page_id(self):
+        widget = self.tabs.currentWidget() if hasattr(self, "tabs") else None
+        if widget is None:
+            return "literature_screening"
+        return str(widget.property("material_page_id") or "unregistered_intake_page")
+
     def get_agent_context(self):
         multimodal_settings = self._current_multimodal_api_settings()
         recent_log = ""
         if hasattr(self, "log_area"):
             recent_log = "\n".join(self.log_area.toPlainText().splitlines()[-6:])
         current_tab = ""
-        tab_index = -1
+        tab_index = 0
         if hasattr(self, "tabs"):
             tab_index = self.tabs.currentIndex()
             if tab_index >= 0:
                 current_tab = self.tabs.tabText(tab_index)
-        extract_dir = self._safe_text(getattr(self, "edit_ext_src", None))
         source_dir = self._safe_text(getattr(self, "edit_src_folder", None))
-        last_summary = getattr(self, "_last_worker_results", {}) or {}
-        has_extract_summary = isinstance(last_summary, dict) and bool(last_summary.get("extract_summary"))
-        has_extract_folder = bool(extract_dir and os.path.isdir(extract_dir))
         has_source_folder = bool(source_dir and os.path.isdir(source_dir))
-        if tab_index == 1 or has_extract_summary or has_extract_folder:
-            settings_focus = "stage_3_figure_extraction_review_and_import_ready_export"
-            acquisition_stage = "stage_3_current_extraction_or_review"
-        elif tab_index == 0 and has_source_folder:
-            settings_focus = "stage_2_screening_criteria_and_run_diagnosis"
-            acquisition_stage = "stage_2_existing_pdf_folder_ready_for_screening"
-        else:
-            settings_focus = "stage_0_confirm_existing_pdfs_or_discovery_mode"
-            acquisition_stage = "stage_0_existing_pdfs_daily_review_topic_search_selected_download_or_batch_harvest"
-        return {
-            "source_workbench": "pdf_evidence",
-            "project_type": "pdf_evidence",
+        stage = self._material_page_stage(self._active_material_page_id(), has_source_folder)
+        page_id = stage["page_id"]
+        settings_focus = stage["settings_focus"]
+        acquisition_stage = stage["acquisition_stage"]
+        page_instruction = stage["page_instruction"]
+        context = {
+            "source_workbench": stage["source_workbench"],
+            "project_type": stage["project_type"],
+            "diagnostic_route": stage["diagnostic_route"],
+            "workbench_import_allowed": "yes" if stage["connected_to_workbench"] else "no",
+            "material_center_label": self.tr("Material Processing Center"),
+            "intake_pathway_label": self.tr(stage["pathway_label_key"]),
+            "active_material_page": current_tab,
+            "active_material_page_id": page_id,
+            "material_page_instruction": page_instruction,
             "settings_question_focus": settings_focus,
             "pdf_acquisition_stage": acquisition_stage,
-            "harvest_skill": "taxonomy-paper-finder",
-            "harvest_skill_path": "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md",
-            "harvest_outputs": "paper-records.json; screening-report.json; digest.json/md/html; records.csv; doi_list.txt; summary.json; download_manifest.csv; pdfs/",
-            "harvest_safety_boundary": "open metadata and legally exposed PDF links only; no Sci-Hub, LibGen, paywall bypass, CAPTCHA bypass, or logged-in scraping",
             "active_label_role": current_tab,
-            "screener_profile": self.current_profile_name,
-            "figure_profile": self.current_figure_profile_name,
-            "part_description_profile": self.current_part_description_profile_name,
-            "screening_mode": self._safe_current_data(getattr(self, "combo_mode", None)),
             "text_llm_key_configured": "yes" if self._safe_text(getattr(self, "edit_api_key", None)) else "no",
             "text_llm_base_url_configured": "yes" if self._safe_text(getattr(self, "edit_base_url", None)) else "no",
             "text_llm_model": self._safe_text(getattr(self, "edit_model", None)),
@@ -4375,15 +4410,34 @@ class PdfProcessingWidget(QWidget):
             "multimodal_llm_base_url_configured": "yes" if multimodal_settings.get("base_url") else "no",
             "multimodal_llm_model": multimodal_settings.get("model", ""),
             "multimodal_llm_api_protocol": multimodal_settings.get("api_protocol", "auto"),
-            "pdf_source_dir": self._safe_text(getattr(self, "edit_src_folder", None)),
-            "screening_output_dir": self._safe_text(getattr(self, "edit_out_folder", None)),
-            "extract_input_dir": self._safe_text(getattr(self, "edit_ext_src", None)),
-            "extract_result_folder": self._safe_text(getattr(self, "edit_db_path", None)),
-            "extract_db_name": self._extract_db_name(),
-            "extract_db_path": self._resolve_extract_db_path(self._safe_text(getattr(self, "edit_db_path", None))),
-            "multimodal_enabled": "yes" if getattr(self, "check_mllm", None) is not None and self.check_mllm.isChecked() else "no",
             "recent_log_excerpt": recent_log,
         }
+        if stage.get("include_pdf_fields"):
+            context.update({
+                "harvest_skill": "taxonomy-paper-finder",
+                "harvest_skill_path": "vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md",
+                "harvest_outputs": "paper-records.json; screening-report.json; digest.json/md/html; records.csv; doi_list.txt; summary.json; download_manifest.csv; pdfs/",
+                "harvest_safety_boundary": "open metadata and legally exposed PDF links only; no Sci-Hub, LibGen, paywall bypass, CAPTCHA bypass, or logged-in scraping",
+                "screener_profile": self.current_profile_name,
+                "figure_profile": self.current_figure_profile_name,
+                "part_description_profile": self.current_part_description_profile_name,
+                "screening_mode": self._safe_current_data(getattr(self, "combo_mode", None)),
+                "screening_lines_per_pdf": self._safe_text(getattr(self, "edit_lines_per_pdf", None)),
+                "screening_batch_size": self._safe_text(getattr(self, "edit_batch_size", None)),
+                "screening_include_threshold": self._safe_text(getattr(self, "edit_include_threshold", None)),
+                "screening_resume_interrupted": self._checked_text(getattr(self, "check_resume_runs", None)),
+                "screening_isolate_runs": self._checked_text(getattr(self, "check_isolate_runs", None)),
+                "poppler_status": self._safe_text(getattr(self, "lbl_poppler_status", None)),
+                "last_task_summary": self._last_task_summary_text(),
+                "pdf_source_dir": self._safe_text(getattr(self, "edit_src_folder", None)),
+                "screening_output_dir": self._safe_text(getattr(self, "edit_out_folder", None)),
+                "extract_input_dir": self._safe_text(getattr(self, "edit_ext_src", None)),
+                "extract_result_folder": self._safe_text(getattr(self, "edit_db_path", None)),
+                "extract_db_name": self._extract_db_name(),
+                "extract_db_path": self._resolve_extract_db_path(self._safe_text(getattr(self, "edit_db_path", None))),
+                "multimodal_enabled": "yes" if getattr(self, "check_mllm", None) is not None and self.check_mllm.isChecked() else "no",
+            })
+        return context
 
     def set_theme(self, theme):
         theme = normalize_theme(theme)

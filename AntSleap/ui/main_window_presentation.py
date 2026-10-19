@@ -19,7 +19,7 @@ class MainWindowPresentationMixin:
         file_menu.addAction(tr("Export Legacy JSON", self.current_lang), self.export_current_project_legacy_json)
         file_menu.addAction(tr("Open Migration Report", self.current_lang), self.open_current_sqlite_migration_report)
         file_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
-        file_menu.addAction(tr("Open PDF Evidence Tools", self.current_lang), self.open_pdf_evidence_tools)
+        file_menu.addAction(tr("Open Material Processing Center", self.current_lang), self.open_pdf_evidence_tools)
         file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)
         file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
         workflow_menu = menubar.addMenu(tr("Workflow", self.current_lang))
@@ -230,7 +230,7 @@ class MainWindowPresentationMixin:
             elif widget is self.tif_workbench:
                 self.tabs.setTabText(index, tr("TIF Volume Workbench", self.current_lang))
             elif widget is self.pdf_widget:
-                self.tabs.setTabText(index, tr("PDF Evidence Tools", self.current_lang))
+                self.tabs.setTabText(index, tr("Material Processing Center", self.current_lang))
             elif widget is self.start_center_widget:
                 self.tabs.setTabText(index, tr("Start Center", self.current_lang))
         self._update_start_center_texts()

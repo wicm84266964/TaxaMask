@@ -90,9 +90,9 @@ TIF/CT 体预览最好使用 NVIDIA 独显。如果机器同时有核显和 NVID
    - 训练和推理不是只看当前选中的切片。`Prepare dataset / Train` 会优先收集项目内所有 train-ready 的 part/reslice `manual_truth` 样本；如果没有可训练的 part/reslice，才退回整只体 train-ready 样本。预测 part/reslice 时使用预测目标表中勾选的目标；在整只体视图中预测时使用当前整只体目标，并使用当前选择的模型 manifest。
    - 这一条线目前仍带实验性质，稳定性低于 2D/STL 主路线。当前三维体预览默认采用离屏 GPU 渲染，已降低旧版 TIF OpenGL 画布与内嵌 Ant-Code WebEngine 同窗口冲突的概率；如果仍遇到黑屏或 Qt 图形后端异常，先保存/关闭 TIF 项目或重启程序，不要在未保存编辑时反复切换。
 
-4. **PDF Evidence / 文献证据工作流**
-   - PDF 处理不再作为主界面的第一工作台。
-   - 它更适合作为 Agent skill、起始页右侧快捷栏里的 `PDF evidence workflow`，或 `File -> Open PDF Evidence Tools` 打开的证据工具。
+4. **材料处理中心**
+   - 这是起始页右侧的材料接入入口，不再把整页叫成 PDF 工具。
+   - 目前已经接到工作台的仍是 PDF 文献证据途径。可从右侧「打开材料处理中心」进入，或用「让 Agent 规划材料处理流程」交给助手。菜单项是 `File -> Open Material Processing Center`。
    - PDF 结果是文献证据、候选图像和 provenance，不会自动变成 TIF 的 `manual_truth` 或 2D/STL 的正式训练真值。
 
 5. **模型加载边界**
@@ -158,7 +158,7 @@ TaxaMask 是一个**面向分类学和形态学研究的综合科研工作台**�
 
 | 你手里的数据 | 推荐入口 | 后续动作 |
 |---|---|---|
-| 已有 PDF 或需要先找开放 PDF 文献 | Agent Center 或 PDF Evidence Tools | 合法采集/整理 PDF、筛选、提取 figure、生成 evidence index |
+| 已有 PDF 或需要先找开放 PDF 文献 | Agent Center 或材料处理中心 | 合法采集/整理 PDF、筛选、提取 figure、生成 evidence index |
 | 普通 2D 形态图 | 2D/STL Morphology | 导入图片、画 mask、训练 Locator/SAM/Blink |
 | STL/mesh 已渲染视角图 | 2D/STL Morphology | 按 specimen 注册视角图，进入 Labeling Workbench 标注 |
 | TIF stack / AMIRA 数据 | TIF Volume | 导入体数据、检查材料表/标签方案、切部位/重切片、标注与核验训练真值、训练或推理体分割模型 |
@@ -168,7 +168,7 @@ TaxaMask 是一个**面向分类学和形态学研究的综合科研工作台**�
 
 0. **如果还没有 PDF，先让 Agent 按目标类群合法采集开放 PDF 文献**
 1. **准备 API 设置与筛选逻辑方案**
-2. **在 Agent Center 或 PDF Evidence Tools 里批量筛 PDF**
+2. **在 Agent Center 或材料处理中心的 PDF 途径里批量筛 PDF**
 3. **把通过筛选的 PDF 做数据提取**
 4. **在数据库里检查结果，必要时导出粗 JSONL 或人工筛掉不合适内容**
 5. **按数据类型进入 2D/STL 或 TIF 项目**
@@ -256,7 +256,7 @@ python AntSleap/main.py
    - `Continue last project`：继续上次项目。
    - `Open any project`：打开任意 TaxaMask 项目。
    - `General Settings`：语言、主题、启动行为、自动保存和默认计算设备。
-   - `PDF evidence workflow`：让 Agent 规划 PDF 文献证据流程，或直接打开 PDF 工具。
+   - `材料处理中心`：让 Agent 规划材料处理流程，或直接打开材料处理中心。目前里面接到工作台的是 PDF 文献证据途径。
    - `2D/STL Morphology`：进入普通图片和 STL 渲染视角图标注。
    - `TIF Volume`：进入 TIF/AMIRA 体数据标注。
 
@@ -266,7 +266,7 @@ python AntSleap/main.py
 2. **2D/STL 模式**：显示 `Labeling Workbench`，用于普通形态图像和 STL 渲染视角图；父部位标注和子部位标注都在这个主标注工作台右侧完成。
 3. **TIF 模式**：只显示 `TIF Volume Workbench`，用于连续切片、材料层和体数据后端。
 
-PDF 工具不再默认占据主标签页，需要时从起始页右侧的 PDF evidence 入口、`File -> Open PDF Evidence Tools` 打开，或交给 Agent 按常驻 TaxaMask 工作流协议和 headless 工具调度。
+材料处理中心不再默认占据主标签页。需要时从起始页右侧打开，或通过 `File -> Open Material Processing Center` 打开。里面的 PDF 途径仍交给 Agent 按常驻工作流协议和 headless 工具调度。
 
 同时顶部菜单里有：
 
@@ -277,7 +277,7 @@ PDF 工具不再默认占据主标签页，需要时从起始页右侧的 PDF ev
   - `Open Project`
   - `Save Project`
   - `Import STL Rendered Views to Labeling Workbench`
-  - `Open PDF Evidence Tools`
+  - `Open Material Processing Center`
   - `Export Dataset`
 - `Workflow`
   - `2D/STL Morphology Workflow`
@@ -539,7 +539,7 @@ File -> Check / Relocate Project Images
 
 在进入 PDF Screener 之前，先确认一件事：你已经有一批待筛选 PDF，还是需要先根据目标类群去合法采集开放 PDF。
 
-如果你还没有 PDF，可以从 Agent Center 或 PDF Evidence Tools 点 `Ask Agent / 询问 Agent`，让内嵌 AntCode 先使用统一 skill `taxonomy-paper-finder`：
+如果你还没有 PDF，可以从 Agent Center，或在材料处理中心的「文献筛选」页点「带上当前材料处理状态询问助手」。切到「数据提取」再点同一个按钮时，带去的是提取页的文件夹、数据库和多模态开关，不会把筛选页当成当前任务。没有 PDF 时，助手仍先使用统一 skill `taxonomy-paper-finder`：
 
 - skill 位置：`vendor/ant-code/config/skills/taxonomy-paper-finder/SKILL.md`
 - 作用：做每日新文献推荐、专题检索、证据筛选、精选文献获取或批量开放 PDF 采集
@@ -1216,7 +1216,7 @@ Figure profile 和 Part Description Profile 都可以复制改写。不开多模
 3. 设置 `VLM Batch Scope`：`All imported images` 跑项目所有图片，`Images in selected list group` 只跑左侧图片列表中的某一类。
 4. 如果批量范围选择按分组处理，可以在 `VLM Image Group` 里选择 `Split Crops / Hard-joined Candidates / Original Images / Manual Split Needed`。通常从 PDF 版面图裁剪后，建议优先选择 `Split Crops`；如果要专门检查无白边硬拼接的候选裁剪，再选择 `Hard-joined Candidates`。
 5. 设置 `VLM API Concurrency / VLM API 并发数`。默认是 `1`，适合大多数有速率限制或计费敏感的 API key；只有服务商明确允许并发请求时再调高。几千张图的大任务调高并发会更快，但也更容易触发限速、账单增加或账号风控。
-6. 在 PDF Evidence Tools 里配置 Multimodal LLM API。缺少 API 时，VLM 弹窗里的按钮会直接跳到 API 设置区。
+6. 在材料处理中心配置 Multimodal LLM API。缺少 API 时，VLM 弹窗里的按钮会直接跳到 API 设置区。
 7. 回到标注工作台，点击 `VLM预标注` 只跑当前图，或点击 `VLM批量预标` 按设置的批量范围运行。
 8. 程序会生成自适应轻量网格 VLM 输入图、调用多模态模型、写入橙色 `aibox`，并尽量用 SAM 生成 `Auto-Annotated` 草稿 polygon。程序会把模型给出的网格坐标映射回原始图片坐标；像素框解析只作为兼容旧响应的 fallback。
 
@@ -2729,7 +2729,7 @@ TaxaMask 后面的 PDF evidence 链路会告诉你候选图来自哪篇 PDF、�
 
 **步骤 1：准备 API 与筛选方案**
 
-1. 从启动中心让 Agent 准备 PDF 任务，或通过 `File -> Open PDF Evidence Tools` 打开 PDF 工具
+1. 从启动中心让 Agent 规划材料处理，或通过 `File -> Open Material Processing Center` 打开材料处理中心
 2. 填好 `Text LLM API`
 3. 如果要启用真实多模态验证，再填好 `Multimodal LLM API`
    - 如果你的同一个服务和模型支持图像输入，可以勾选 `Use same provider as Text LLM`

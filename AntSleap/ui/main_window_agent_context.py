@@ -133,6 +133,19 @@ class MainWindowAgentContextMixin:
             "volume_display_scaling",
             "tif_next_requirement",
             "tif_requirement_doc",
+            "workbench_import_allowed",
+            "material_center_label",
+            "intake_pathway_label",
+            "active_material_page",
+            "active_material_page_id",
+            "material_page_instruction",
+            "screening_lines_per_pdf",
+            "screening_batch_size",
+            "screening_include_threshold",
+            "screening_resume_interrupted",
+            "screening_isolate_runs",
+            "poppler_status",
+            "last_task_summary",
             "pdf_acquisition_stage",
             "harvest_skill",
             "harvest_skill_path",
@@ -285,7 +298,7 @@ class MainWindowAgentContextMixin:
         project_hint = self._agent_current_project_label()
         pdf_summary, _pdf_detail = self._start_console_pdf_summary()
         return (
-            "请按 TaxaMask 的 PDF evidence workflow 作为分阶段向导接管一次 PDF 文献处理任务。"
+            "请按 TaxaMask 的材料处理中心接管当前材料接入任务。目前已经接到工作台的是 PDF 文献证据途径，请仍按这条途径作为分阶段向导处理。"
             "这个流程面向各种分类学研究者，不要默认用户研究蚂蚁，也不要默认当前筛选配置或图文提取配置已经合适。\n\n"
             "请先读取并遵守这些本地规则/skill：\n"
             "- ANTCODE.md\n"
@@ -324,13 +337,33 @@ class MainWindowAgentContextMixin:
         if hasattr(self, "agent_panel"):
             self.agent_panel.update_runtime_status(
                 model_status=tr("Local task cards", self.current_lang),
-                workflow=tr("PDF evidence workflow", self.current_lang),
+                workflow=tr("Material processing center", self.current_lang),
                 project=self._agent_current_project_label(),
                 state=tr("Idle", self.current_lang),
             )
             self.agent_panel.set_prompt_text(prompt)
             if not self.agent_panel.is_running():
                 self.agent_panel.start_dashboard()
+
+    def _material_center_workflow_label(self, payload):
+        payload = payload or {}
+        center = str(payload.get("material_center_label") or "").strip()
+        page = str(payload.get("active_material_page") or "").strip()
+        if center and page:
+            return f"{center} · {page}"
+        return center or str(payload.get("source_workbench") or self._agent_current_workflow_label())
+
+    def remember_material_page_context(self, context=None):
+        payload = self._compact_agent_context(dict(context or {}))
+        if not hasattr(self, "agent_panel"):
+            return
+        self.agent_panel.set_context(payload, announce=False)
+        self.agent_panel.update_runtime_status(
+            model_status=tr("Local task cards", self.current_lang),
+            workflow=self._material_center_workflow_label(payload),
+            project=str(payload.get("project_path") or self._agent_current_project_label()),
+            state=tr("Idle", self.current_lang),
+        )
 
     def open_agent_from_context(self, context=None):
         payload = dict(context or {})
@@ -356,7 +389,7 @@ class MainWindowAgentContextMixin:
             self.agent_panel.set_context(payload, announce=True)
             self.agent_panel.update_runtime_status(
                 model_status=tr("Local task cards", self.current_lang),
-                workflow=str(payload.get("source_workbench") or self._agent_current_workflow_label()),
+                workflow=self._material_center_workflow_label(payload),
                 project=str(payload.get("project_path") or self._agent_current_project_label()),
                 state=tr("Idle", self.current_lang),
             )

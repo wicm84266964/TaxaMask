@@ -3074,6 +3074,11 @@ exec "$@"
         if not context:
             return ""
         zh_mapping = [
+            ("workbench_import_allowed", "是否已接到标注工作台"),
+            ("material_center_label", "材料处理中心"),
+            ("intake_pathway_label", "当前接入途径"),
+            ("active_material_page", "当前材料页"),
+            ("material_page_instruction", "当前页该怎么协助"),
             ("source_workbench", "来源工作台"),
             ("project_type", "项目类型"),
             ("project_path", "项目路径"),
@@ -3102,6 +3107,13 @@ exec "$@"
             ("figure_profile", "PDF 图文提取方案"),
             ("part_description_profile", "PDF 部位描述方案"),
             ("screening_mode", "PDF 筛选模式"),
+            ("screening_lines_per_pdf", "每篇提取行数"),
+            ("screening_batch_size", "每批条数"),
+            ("screening_include_threshold", "通过阈值"),
+            ("screening_resume_interrupted", "续跑中断任务"),
+            ("screening_isolate_runs", "每次筛选单独文件夹"),
+            ("poppler_status", "Poppler 状态"),
+            ("last_task_summary", "最近一次任务"),
             ("text_llm_key_configured", "文本 LLM key 已配置"),
             ("text_llm_base_url_configured", "文本 LLM Base URL 已配置"),
             ("text_llm_model", "文本 LLM 模型"),
@@ -3188,6 +3200,10 @@ exec "$@"
             ("tif_next_requirement", "TIF 下一步需求"),
             ("tif_requirement_doc", "TIF 需求文档"),
             ("settings_scope", "设置范围"),
+            ("pdf_acquisition_stage", "PDF 途径当前阶段"),
+            ("harvest_skill", "文献发现 Skill"),
+            ("harvest_outputs", "文献发现产物"),
+            ("harvest_safety_boundary", "文献发现安全边界"),
             ("settings_question_focus", "需要协助的问题"),
             ("language", "语言"),
             ("theme", "主题"),
@@ -3225,6 +3241,11 @@ exec "$@"
             ("recent_log_excerpt", "最近日志"),
         ]
         en_mapping = [
+            ("workbench_import_allowed", "Connected to labeling workbench"),
+            ("material_center_label", "Material processing center"),
+            ("intake_pathway_label", "Connected intake pathway"),
+            ("active_material_page", "Current material page"),
+            ("material_page_instruction", "How to help on this page"),
             ("source_workbench", "Source workbench"),
             ("project_type", "Project type"),
             ("project_path", "Project path"),
@@ -3253,6 +3274,13 @@ exec "$@"
             ("figure_profile", "PDF figure-extraction profile"),
             ("part_description_profile", "PDF part-description profile"),
             ("screening_mode", "PDF screening mode"),
+            ("screening_lines_per_pdf", "Lines per PDF"),
+            ("screening_batch_size", "Batch size"),
+            ("screening_include_threshold", "Include threshold"),
+            ("screening_resume_interrupted", "Resume interrupted run"),
+            ("screening_isolate_runs", "Separate folder per screening run"),
+            ("poppler_status", "Poppler status"),
+            ("last_task_summary", "Latest task"),
             ("text_llm_key_configured", "Text LLM key configured"),
             ("text_llm_base_url_configured", "Text LLM base URL configured"),
             ("text_llm_model", "Text LLM model"),
@@ -3338,6 +3366,10 @@ exec "$@"
             ("volume_display_scaling", "Volume display scaling"),
             ("tif_next_requirement", "TIF next requirement"),
             ("tif_requirement_doc", "TIF requirement document"),
+            ("pdf_acquisition_stage", "PDF pathway stage"),
+            ("harvest_skill", "Literature discovery skill"),
+            ("harvest_outputs", "Literature discovery outputs"),
+            ("harvest_safety_boundary", "Literature discovery safety boundary"),
             ("settings_scope", "Settings scope"),
             ("settings_question_focus", "Question focus"),
             ("language", "Language"),
@@ -3376,12 +3408,31 @@ exec "$@"
             ("recent_log_excerpt", "Recent log excerpt"),
         ]
         if self.lang == "zh":
-            lines = ["这是从 TaxaMask 工作台带回来的现场上下文，请先理解现场，不要立即执行高风险动作。"]
+            if context.get("material_center_label") or str(context.get("source_workbench") or "") in {"pdf_evidence", "material_intake"}:
+                page = str(context.get("active_material_page") or "").strip()
+                page_text = f"「{page}」页" if page else "当前页"
+                if str(context.get("workbench_import_allowed") or "") == "no":
+                    lines = [f"这是从材料处理中心的{page_text}带回来的现场上下文。这条材料接口还没有接到标注工作台。不要把它写成训练真值，也不要沿用 PDF 导入。"]
+                else:
+                    lines = [f"这是从材料处理中心的{page_text}带回来的现场上下文。当前接到工作台的途径仍是 PDF 文献证据。请按这一页的文件夹、方案和最近任务理解现场，不要立即执行高风险动作。"]
+            else:
+                lines = ["这是从 TaxaMask 工作台带回来的现场上下文，请先理解现场，不要立即执行高风险动作。"]
             mapping = zh_mapping
         else:
-            lines = [
-                "This is live context from the TaxaMask workbench. Understand the current research state first; do not take high-risk actions immediately."
-            ]
+            if context.get("material_center_label") or str(context.get("source_workbench") or "") in {"pdf_evidence", "material_intake"}:
+                page = str(context.get("active_material_page") or "the current page").strip()
+                if str(context.get("workbench_import_allowed") or "") == "no":
+                    lines = [
+                        f"This is live context from the Material Processing Center page \"{page}\". This intake is not connected to the labeling workbench. Do not write training truth or reuse PDF import."
+                    ]
+                else:
+                    lines = [
+                        f"This is live context from the Material Processing Center page \"{page}\". The pathway connected to the workbench is still PDF literature evidence. Use this page's folders, profiles, and latest task; do not take high-risk actions immediately."
+                    ]
+            else:
+                lines = [
+                    "This is live context from the TaxaMask workbench. Understand the current research state first; do not take high-risk actions immediately."
+                ]
             mapping = en_mapping
         for key, label in mapping:
             value = context.get(key)

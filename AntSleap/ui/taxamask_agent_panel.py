@@ -213,6 +213,8 @@ class TaxaMaskAgentPanel(QWidget):
             self.ant_code_runtime = "wsl"
             self.node_executable = self._resolve_node_executable()
         self.process = None
+        self._wsl_loopback_proxy = None
+        self._wsl_loopback_proxy_url = ""
         self.dashboard_url = ""
         self.port = None
         self._context = {}
@@ -357,9 +359,28 @@ class TaxaMaskAgentPanel(QWidget):
             return ["--experimental-strip-types", "--disable-warning=ExperimentalWarning"]
         return []
 
+    def _python_environment_node_roots(self):
+        roots = []
+        executable = Path(sys.executable).resolve()
+        roots.append(executable.parent)
+        roots.append(executable.parent / "Scripts")
+        roots.append(executable.parent / "taxamask-node")
+        conda_prefix = os.environ.get("CONDA_PREFIX", "").strip()
+        if conda_prefix:
+            prefix = Path(conda_prefix)
+            roots.extend([
+                prefix,
+                prefix / "Scripts",
+                prefix / "Library" / "bin",
+                prefix / "taxamask-node",
+                prefix / "bin",
+            ])
+        return roots
+
     def _node_executable_candidates(self):
         names = ("node.exe", "node") if sys.platform == "win32" else ("node",)
         roots = [
+            *self._python_environment_node_roots(),
             Path(self.ant_code_root),
             Path(self.workspace_dir),
         ]
@@ -457,8 +478,10 @@ class TaxaMaskAgentPanel(QWidget):
             "env",
             f"LAB_AGENT_PACKAGE_ROOT={ant_code_root}",
             f"LAB_AGENT_CONFIG={config_path}",
-            self.node_executable or "node",
         ]
+        if self._wsl_loopback_proxy_url:
+            inner.append(f"TAXAMASK_WSL_LOOPBACK_PROXY={self._wsl_loopback_proxy_url}")
+        inner.append(self.node_executable or "node")
         inner.extend(self._node_loader_flags(dashboard_entry))
         inner.append(dashboard_entry)
         if self._dashboard_entry_uses_index(dashboard_entry):
@@ -615,6 +638,57 @@ exec "$@"
             rest = text[2:].lstrip("/")
             return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
         return text
+
+    def _windows_address_seen_by_wsl(self):
+        if not self.wsl_executable:
+            return ""
+        command = [self.wsl_executable]
+        if self.wsl_distribution:
+            command.extend(["-d", self.wsl_distribution])
+        command.extend(["--exec", "bash", "-lc", "ip route show default | awk '{print $3}'"])
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+                creationflags=self._creation_flags(),
+            )
+        except Exception:
+            return ""
+        address = str(result.stdout or "").strip().splitlines()
+        return address[-1].strip() if address else ""
+
+    def _start_wsl_loopback_proxy(self):
+        if self.ant_code_runtime != "wsl" or self._wsl_loopback_proxy is not None:
+            return
+        bind_host = self._windows_address_seen_by_wsl()
+        if not bind_host or bind_host == "127.0.0.1":
+            return
+        try:
+            try:
+                from AntSleap.ui.wsl_loopback_proxy import start_wsl_loopback_proxy
+            except ImportError:
+                from wsl_loopback_proxy import start_wsl_loopback_proxy
+            self._wsl_loopback_proxy = start_wsl_loopback_proxy(bind_host)
+            self._wsl_loopback_proxy_url = self._wsl_loopback_proxy.url
+        except Exception:
+            self._wsl_loopback_proxy = None
+            self._wsl_loopback_proxy_url = ""
+
+    def _stop_wsl_loopback_proxy(self):
+        proxy = self._wsl_loopback_proxy
+        self._wsl_loopback_proxy = None
+        self._wsl_loopback_proxy_url = ""
+        if proxy is not None:
+            try:
+                proxy.stop()
+            except Exception:
+                return
 
     def _dashboard_environment(self):
         env = os.environ.copy()
@@ -861,8 +935,14 @@ exec "$@"
             summary_item_background = "#FFFFFF"
             long_control_background = "#FFFFFF"
             scrollbar_track = "#EEF4FA"
-            scrollbar_thumb = c["border_strong"]
-            scrollbar_thumb_hover = "#9FB4C8"
+            scrollbar_thumb = "#7E98B0"
+            scrollbar_thumb_hover = "#5E7C98"
+            scope_border = "#B9CADB"
+            button_fill = "#FFFFFF"
+            button_border = "#7E98B0"
+            button_text = "#102033"
+            button_hover = "#E3F4FC"
+            primary_text = "#FFFFFF"
             live_chip_background = "#F8FBFE"
             live_subagent_background = "#FFFFFF"
             live_chip_border = c["border"]
@@ -918,6 +998,12 @@ exec "$@"
             scrollbar_track = "rgba(7, 12, 22, 0.90)"
             scrollbar_thumb = "rgba(127, 154, 191, 0.55)"
             scrollbar_thumb_hover = "rgba(137, 167, 204, 0.72)"
+            scope_border = soft_border
+            button_fill = "#1E314D"
+            button_border = "rgba(143, 174, 212, 0.55)"
+            button_text = "#F4F8FF"
+            button_hover = "#2B4568"
+            primary_text = "#F4F8FF"
             live_chip_background = "rgba(45, 45, 45, 0.86)"
             live_subagent_background = "rgba(45, 45, 45, 0.72)"
             live_chip_border = "rgba(255, 255, 255, 0.06)"
@@ -975,27 +1061,37 @@ exec "$@"
         overflow: hidden !important;
       }}
       html.taxamask-embed,
-      .taxamask-embed-body {{
+      html.taxamask-embed *,
+      .taxamask-embed-body,
+      .taxamask-embed-body * {{
         scrollbar-color: {scrollbar_thumb} {scrollbar_track} !important;
         scrollbar-width: thin !important;
       }}
       html.taxamask-embed::-webkit-scrollbar,
-      .taxamask-embed-body::-webkit-scrollbar {{
+      html.taxamask-embed *::-webkit-scrollbar,
+      .taxamask-embed-body::-webkit-scrollbar,
+      .taxamask-embed-body *::-webkit-scrollbar {{
         height: 10px !important;
         width: 10px !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-track,
-      .taxamask-embed-body::-webkit-scrollbar-track {{
+      html.taxamask-embed *::-webkit-scrollbar-track,
+      .taxamask-embed-body::-webkit-scrollbar-track,
+      .taxamask-embed-body *::-webkit-scrollbar-track {{
         background: {scrollbar_track} !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-thumb,
-      .taxamask-embed-body::-webkit-scrollbar-thumb {{
+      html.taxamask-embed *::-webkit-scrollbar-thumb,
+      .taxamask-embed-body::-webkit-scrollbar-thumb,
+      .taxamask-embed-body *::-webkit-scrollbar-thumb {{
         background: {scrollbar_thumb} !important;
         border: 2px solid {scrollbar_track} !important;
         border-radius: 999px !important;
       }}
       html.taxamask-embed::-webkit-scrollbar-thumb:hover,
-      .taxamask-embed-body::-webkit-scrollbar-thumb:hover {{
+      html.taxamask-embed *::-webkit-scrollbar-thumb:hover,
+      .taxamask-embed-body::-webkit-scrollbar-thumb:hover,
+      .taxamask-embed-body *::-webkit-scrollbar-thumb:hover {{
         background: {scrollbar_thumb_hover} !important;
       }}
       .taxamask-embed .atmosphere {{
@@ -1562,34 +1658,86 @@ exec "$@"
         background: {header_background} !important;
         border-color: {soft_border} !important;
       }}
-      .taxamask-embed .settings-rail button {{
-        background: {option_background} !important;
-        border-color: {soft_border} !important;
-        color: {text_color} !important;
+      .taxamask-embed .settings-rail button,
+      .taxamask-embed .settings-default-scope-picker button,
+      .taxamask-embed .settings-row-actions button,
+      .taxamask-embed .model-config-actions button,
+      .taxamask-embed .gateway-probe-row > button {{
+        background: {button_fill} !important;
+        border: 1px solid {button_border} !important;
+        color: {button_text} !important;
         box-shadow: none !important;
       }}
       .taxamask-embed .settings-rail button:hover,
-      .taxamask-embed .settings-rail button.active {{
-        background: {option_selected_background} !important;
-        border-color: {accent_color} !important;
-        color: {text_color} !important;
+      .taxamask-embed .settings-rail button.active,
+      .taxamask-embed .settings-default-scope-picker button[aria-pressed="true"],
+      .taxamask-embed .settings-row-actions button:hover:not(:disabled),
+      .taxamask-embed .model-config-actions button:hover:not(:disabled),
+      .taxamask-embed .gateway-probe-row > button:hover:not(:disabled) {{
+        background: {button_hover} !important;
+        border-color: {accent_text_color} !important;
+        color: {button_text} !important;
       }}
       .taxamask-embed .settings-default-scope,
       .taxamask-embed .settings-current-source,
       .taxamask-embed .settings-default-summary {{
         background: {panel_background} !important;
-        border-color: {soft_border} !important;
+        border: 1px solid {scope_border} !important;
+        border-radius: 14px !important;
         color: {text_color} !important;
       }}
-      .taxamask-embed .settings-default-scope-picker button {{
-        background: {option_background} !important;
-        border-color: {soft_border} !important;
-        color: {c['text_soft']} !important;
+      .taxamask-embed .settings-default-scope-picker {{
+        gap: 8px !important;
       }}
-      .taxamask-embed .settings-default-scope-picker button[aria-pressed="true"] {{
-        background: {option_selected_background} !important;
-        border-color: {accent_color} !important;
+      .taxamask-embed .settings-default-scope-picker button:first-of-type,
+      .taxamask-embed .settings-default-scope-picker button:last-of-type {{
+        border-radius: 12px !important;
+        border-left-width: 1px !important;
+      }}
+      .taxamask-embed .agent-model-picker select,
+      .taxamask-embed .model-config-grid select {{
+        color-scheme: {color_scheme} !important;
+      }}
+      .taxamask-embed .agent-model-picker select option,
+      .taxamask-embed .model-config-grid select option {{
+        background: {button_fill} !important;
+        color: {button_text} !important;
+      }}
+      .taxamask-embed .agent-model-picker select optgroup {{
+        background: {header_background} !important;
+        color: {accent_text_color} !important;
+      }}
+      .taxamask-embed .agent-model-choice:hover {{
+        background: {button_hover} !important;
+        box-shadow: none !important;
+        color: {button_text} !important;
+      }}
+      .taxamask-embed .agent-model-choice:focus,
+      .taxamask-embed .agent-model-choice:active,
+      .taxamask-embed .agent-model-choice[aria-current="true"] {{
+        background: transparent !important;
+        box-shadow: none !important;
         color: {text_color} !important;
+      }}
+      .taxamask-embed .agent-model-picker select option:hover,
+      .taxamask-embed .agent-model-picker select option:focus,
+      .taxamask-embed .agent-model-picker select option:active,
+      .taxamask-embed .agent-model-picker select option:checked,
+      .taxamask-embed .model-config-grid select option:hover,
+      .taxamask-embed .model-config-grid select option:focus,
+      .taxamask-embed .model-config-grid select option:active,
+      .taxamask-embed .model-config-grid select option:checked {{
+        background: {button_fill} !important;
+        box-shadow: none !important;
+        outline: none !important;
+        color: {button_text} !important;
+      }}
+      .taxamask-embed .settings-primary-action,
+      .taxamask-embed .settings-form-actions button,
+      .taxamask-embed .model-config-actions button[type="submit"] {{
+        background: {accent_text_color} !important;
+        border-color: {accent_text_color} !important;
+        color: {primary_text} !important;
       }}
       .taxamask-embed .model-config-scope,
       .taxamask-embed .model-config-scope label {{
@@ -1597,15 +1745,105 @@ exec "$@"
         border-color: {soft_border} !important;
         color: {text_color} !important;
       }}
-      .taxamask-embed .settings-primary-action {{
-        background: {send_background} !important;
-        border-color: {accent_color} !important;
-        color: {send_text} !important;
+      .taxamask-embed .settings-row-actions button.danger {{
+        color: {danger_text_color} !important;
       }}
       .taxamask-embed .goal-status-bar {{
         background: {panel_background} !important;
         border-color: {soft_border} !important;
         color: {text_color} !important;
+      }}
+      .taxamask-embed .schedule-section,
+      .taxamask-embed [data-settings-section="schedules"],
+      .taxamask-embed [data-action="detect-reasoning-capabilities"],
+      .taxamask-embed [data-action="select-source-credential"] {{
+        display: none !important;
+      }}
+      .taxamask-embed .attachment-chip,
+      .taxamask-embed .attach-button,
+      .taxamask-embed .workflow-strip,
+      .taxamask-embed .workflow-strip-toggle {{
+        background: {panel_background} !important;
+        border-color: {soft_border} !important;
+        color: {text_color} !important;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .model-panel,
+      .taxamask-embed .model-config-card {{
+        border-radius: 16px !important;
+      }}
+      .taxamask-embed .settings-source-group {{
+        background: transparent !important;
+        border: 0 !important;
+        display: grid !important;
+        gap: 8px !important;
+      }}
+      .taxamask-embed .settings-profile-row,
+      .taxamask-embed .settings-model-row,
+      .taxamask-embed .gateway-profile-option,
+      .taxamask-embed .model-option-row,
+      .taxamask-embed .model-config-scope,
+      .taxamask-embed .model-config-scope label {{
+        background: {panel_background} !important;
+        border: 1px solid {soft_border} !important;
+        border-radius: 14px !important;
+        color: {text_color} !important;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .settings-profile-row,
+      .taxamask-embed .settings-model-row {{
+        margin: 0 0 8px !important;
+        padding: 12px 14px !important;
+      }}
+      .taxamask-embed .settings-profile-row.active,
+      .taxamask-embed .settings-model-row.active,
+      .taxamask-embed .gateway-profile-option.active,
+      .taxamask-embed .model-option-row.active {{
+        border-color: {accent_text_color} !important;
+      }}
+      .taxamask-embed .model-config-grid input,
+      .taxamask-embed .model-config-grid select,
+      .taxamask-embed .settings-field-row input,
+      .taxamask-embed .settings-field-row select,
+      .taxamask-embed .settings-rail button,
+      .taxamask-embed .settings-row-actions button,
+      .taxamask-embed .settings-primary-action,
+      .taxamask-embed .settings-default-scope-picker button,
+      .taxamask-embed .model-config-actions button {{
+        border-radius: 12px !important;
+      }}
+      .taxamask-embed .prompt-rail-mark::before {{
+        background: {accent_text_color} !important;
+        opacity: 0.4;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .prompt-rail-mark[data-state="active"]::before,
+      .taxamask-embed .prompt-rail-mark[data-state="hover"]::before,
+      .taxamask-embed .prompt-rail-mark:focus-visible::before {{
+        background: {accent_text_color} !important;
+        opacity: 0.9;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .prompt-rail-mark[data-state="active"]::after {{
+        background: {accent_text_color} !important;
+        box-shadow: none !important;
+      }}
+      .taxamask-embed .prompt-rail-preview {{
+        background: {panel_background} !important;
+        border: 1px solid {soft_border} !important;
+        border-left: 2px solid {accent_text_color} !important;
+        box-shadow: none !important;
+        color: {text_color} !important;
+      }}
+      .taxamask-embed .prompt-rail-index {{
+        color: {accent_text_color} !important;
+      }}
+      .taxamask-embed .prompt-rail-response {{
+        color: {muted_color} !important;
+      }}
+      .taxamask-embed .message.user.prompt-jump-target {{
+        box-shadow: none !important;
+        outline: 2px solid {accent_text_color} !important;
       }}
     """.rstrip()
 
@@ -1862,6 +2100,7 @@ exec "$@"
             if self._json_health_error:
                 raise RuntimeError(self._json_health_error)
             env = self._dashboard_environment()
+            self._start_wsl_loopback_proxy()
             command = self._dashboard_command()
             self._open_dashboard_log()
             self.process = subprocess.Popen(
@@ -1873,6 +2112,7 @@ exec "$@"
                 creationflags=self._creation_flags(),
             )
         except Exception as exc:
+            self._stop_wsl_loopback_proxy()
             self._close_dashboard_log()
             self.process = None
             self.dashboard_url = ""
@@ -3214,6 +3454,7 @@ exec "$@"
             except Exception:
                 pass
         self.process = None
+        self._stop_wsl_loopback_proxy()
         self._close_dashboard_log(remove=True)
         self._cleanup_owned_dashboard_processes()
         self.dashboard_url = ""

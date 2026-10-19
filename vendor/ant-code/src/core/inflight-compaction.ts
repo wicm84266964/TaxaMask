@@ -24,6 +24,7 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   force?: boolean;
   pruneStale?: boolean;
   currentTurnOnly?: boolean;
+  needsCompaction?: () => boolean;
 } = {}) {
   const maxTokens = positiveInteger(options.maxTokens) ?? null;
   const beforeBytes = estimateMessagesBytes(messages);
@@ -31,7 +32,8 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   const triggerRatio = boundedRatio(options.triggerRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO);
   const triggerTokens = maxTokens ? Math.floor(maxTokens * triggerRatio) : null;
   const pruneStale = options.pruneStale === true;
-  if (!options.force && !pruneStale && triggerTokens && beforeTokens < triggerTokens) {
+  const needsCompaction = options.needsCompaction ?? (() => shouldCompactMore(messages, triggerTokens, options.force === true));
+  if (!needsCompaction()) {
     return result(false, beforeBytes, beforeBytes, beforeTokens, beforeTokens, 0, triggerTokens);
   }
 
@@ -42,29 +44,190 @@ export function compactInFlightToolMessages(messages: Array<Record<string, unkno
   const oversizedRecentChars = positiveInteger(options.oversizedRecentChars) ?? DEFAULT_OVERSIZED_RECENT_CHARS;
   let compactedTools = 0;
 
-  for (let item = 0; item < compactUntil; item += 1) {
-    compactedTools += pruneStale && !options.force
-      ? stubStaleToolMessage(messages[toolIndexes[item]]) ? 1 : 0
-      : compactToolMessage(messages[toolIndexes[item]], maxToolTextChars) ? 1 : 0;
+  for (const index of toolIndexes.slice(0, compactUntil).sort((a, b) => retentionPriority(messages[a]) - retentionPriority(messages[b]) || a - b)) {
+    if (!needsCompaction()) break;
+    compactedTools += compactToolMessage(messages[index], maxToolTextChars) ? 1 : 0;
   }
 
   if (!pruneStale || options.force === true) {
     const oversizedChars = Math.max(maxToolTextChars, oversizedRecentChars);
-    while (shouldCompactMore(messages, triggerTokens, options.force === true)) {
-      const candidate = largestUncompactedTool(messages, toolIndexes, oversizedChars, triggerTokens);
+    const remainingIndexes = [...toolIndexes];
+    while (needsCompaction()) {
+      const candidate = largestUncompactedTool(messages, remainingIndexes, oversizedChars, options.needsCompaction ? 1 : triggerTokens);
       if (candidate == null) {
         break;
       }
-      if (!compactToolMessage(messages[candidate], maxToolTextChars)) {
-        break;
-      }
-      compactedTools += 1;
+      remainingIndexes.splice(remainingIndexes.indexOf(candidate), 1);
+      if (compactToolMessage(messages[candidate], maxToolTextChars)) compactedTools += 1;
     }
   }
 
   const afterBytes = estimateMessagesBytes(messages);
   const afterTokens = estimateTokensFromBytes(afterBytes);
   return result(compactedTools > 0, beforeBytes, afterBytes, beforeTokens, afterTokens, compactedTools, triggerTokens);
+}
+
+/**
+ * After tool text is already reduced, live turns can still overflow from older
+ * assistant thinking, long status text, and earlier tool-call rounds.
+ */
+export function compactInFlightLiveContext(
+  messages: Array<Record<string, unknown>>,
+  options: Parameters<typeof compactInFlightToolMessages>[1] & {
+    toolResults?: Array<{ toolCallId?: string }>;
+  } = {}
+) {
+  const beforeBytes = estimateMessagesBytes(messages);
+  const beforeTokens = estimateTokensFromBytes(beforeBytes);
+  const tools = compactInFlightToolMessages(messages, options);
+  const needsCompaction = options.needsCompaction ?? (() => tools.compacted !== true && options.force === true);
+  let strippedThinking = 0;
+  let truncatedAssistants = 0;
+  let droppedRounds = 0;
+
+  if (needsCompaction()) {
+    strippedThinking = stripOlderAssistantThinking(messages);
+  }
+  if (needsCompaction()) {
+    truncatedAssistants = truncateOlderAssistantText(messages);
+  }
+  while (needsCompaction()) {
+    if (!dropOldestCurrentTurnToolRound(messages, options.toolResults)) {
+      break;
+    }
+    droppedRounds += 1;
+  }
+
+  const compacted = tools.compacted === true || strippedThinking > 0 || truncatedAssistants > 0 || droppedRounds > 0;
+  const afterBytes = estimateMessagesBytes(messages);
+  return {
+    ...tools,
+    compacted,
+    beforeBytes,
+    beforeTokens,
+    afterBytes,
+    afterTokens: estimateTokensFromBytes(afterBytes),
+    strippedThinking,
+    truncatedAssistants,
+    droppedRounds
+  };
+}
+
+export function stripOlderAssistantThinking(messages: Array<Record<string, unknown>>) {
+  let lastAssistant = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistant = index;
+    }
+  }
+  let stripped = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index === lastAssistant || messages[index]?.role !== "assistant") {
+      continue;
+    }
+    const message = messages[index];
+    if (message.thinking != null || typeof message.reasoning_content === "string") {
+      delete message.thinking;
+      delete message.reasoning_content;
+      stripped += 1;
+    }
+  }
+  return stripped;
+}
+
+function truncateOlderAssistantText(messages: Array<Record<string, unknown>>, maxChars = 400) {
+  let lastAssistant = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistant = index;
+    }
+  }
+  let truncated = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index === lastAssistant || messages[index]?.role !== "assistant") {
+      continue;
+    }
+    const text = extractText(messages[index]?.content);
+    if (!text || text.length <= maxChars) {
+      continue;
+    }
+    messages[index].content = [{ type: "text", text: `${text.slice(0, maxChars).trimEnd()}\n...[in-flight compacted]` }];
+    truncated += 1;
+  }
+  return truncated;
+}
+
+export function dropOldestCurrentTurnToolRound(
+  messages: Array<Record<string, unknown>>,
+  toolResults?: Array<{ toolCallId?: string }>
+) {
+  let lastUser = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === "user") {
+      lastUser = index;
+    }
+  }
+  let assistantIndex = -1;
+  for (let index = lastUser + 1; index < messages.length; index += 1) {
+    if (hasAssistantToolCalls(messages[index])) {
+      assistantIndex = index;
+      break;
+    }
+  }
+  if (assistantIndex < 0) {
+    return false;
+  }
+  let end = assistantIndex + 1;
+  while (end < messages.length && messages[end]?.role === "tool") {
+    end += 1;
+  }
+  let laterRound = false;
+  for (let index = end; index < messages.length; index += 1) {
+    if (hasAssistantToolCalls(messages[index])) {
+      laterRound = true;
+      break;
+    }
+  }
+  if (!laterRound) {
+    return false;
+  }
+  const droppedIds = new Set<string>();
+  for (let index = assistantIndex; index < end; index += 1) {
+    if (messages[index]?.role !== "tool") {
+      continue;
+    }
+    const id = String(messages[index].toolCallId ?? messages[index].tool_call_id ?? "").trim();
+    if (id) {
+      droppedIds.add(id);
+    }
+  }
+  messages.splice(assistantIndex, end - assistantIndex);
+  if (Array.isArray(toolResults) && droppedIds.size > 0) {
+    for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+      if (droppedIds.has(String(toolResults[index]?.toolCallId ?? "").trim())) {
+        toolResults.splice(index, 1);
+      }
+    }
+  }
+  return true;
+}
+
+function hasAssistantToolCalls(message: Record<string, unknown> | undefined) {
+  return Boolean(
+    message?.role === "assistant" &&
+    Array.isArray(message.toolCalls) &&
+    message.toolCalls.length > 0
+  );
+}
+
+function retentionPriority(message: Record<string, unknown>) {
+  const text = extractText(message.content);
+  const parsed = parseJson(text);
+  if (parsed?.ok === false || /\bok=false\b|\bexitCode=[1-9]|\berror=/m.test(text)) return 3;
+  if (["write_file", "edit_file", "list_files", "glob", "rg_files"].includes(String(message.name))) return 0;
+  // Successful shell output may contain scientific results, so keep its
+  // evidence alongside source reads rather than treating it all as log noise.
+  return 2;
 }
 
 function collectToolIndexes(messages: Array<Record<string, unknown>>, currentTurnOnly: boolean): number[] {
@@ -101,54 +264,8 @@ function compactToolMessage(message: Record<string, unknown> | undefined, maxToo
   return true;
 }
 
-function stubStaleToolMessage(message: Record<string, unknown> | undefined) {
-  if (!message) {
-    return false;
-  }
-  const text = extractText(message.content);
-  if (!text || isReducedToolText(text)) {
-    return false;
-  }
-  const placeholder = formatStaleToolPlaceholder(message.name, text);
-  if (!placeholder || placeholder.length >= text.length) {
-    return false;
-  }
-  message.content = [{ type: "text", text: placeholder }];
-  return true;
-}
-
 export function isReducedToolText(text: string) {
-  return text.includes(COMPACTED_TOOL_MARKER) || text.includes(STALE_TOOL_MARKER);
-}
-
-function formatStaleToolPlaceholder(toolName: unknown, text: string) {
-  const parsed = parseJson(text);
-  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? parsed as Record<string, unknown>
-    : {};
-  const resultValue = record.result && typeof record.result === "object" && !Array.isArray(record.result)
-    ? record.result as Record<string, unknown>
-    : {};
-  const locators = [
-    resultValue.path ? `path=${cleanInline(resultValue.path)}` : "",
-    resultValue.finalUrl || resultValue.url ? `url=${cleanInline(resultValue.finalUrl ?? resultValue.url)}` : "",
-    Number.isFinite(Number(resultValue.bytes)) ? `bytes=${resultValue.bytes}` : "",
-    Number.isFinite(Number(resultValue.bytesRead)) ? `bytes=${resultValue.bytesRead}` : ""
-  ].filter(Boolean);
-  const header = firstViewHeader(text);
-  const ok = record.ok === true || /\bok=true\b/.test(header);
-  const pathFromHeader = /\bpath=([^\s]+)/.exec(header)?.[1];
-  return [
-    STALE_TOOL_MARKER,
-    `tool=${toolName ?? "unknown"} ok=${ok}`,
-    locators.length ? locators.join(" ") : (pathFromHeader ? `path=${pathFromHeader}` : header),
-    "需要时再读或再跑同一工具。"
-  ].filter(Boolean).join("\n");
-}
-
-function firstViewHeader(text: string) {
-  const first = String(text ?? "").split(/\r?\n/).find((line) => line.trim());
-  return first && first.length <= 240 ? first.trim() : "";
+  return text.includes(COMPACTED_TOOL_MARKER) || text.includes(STALE_TOOL_MARKER) || text.includes("[tool results summary]");
 }
 
 function shouldCompactMore(messages: Array<Record<string, unknown>>, triggerTokens: number | null, force: boolean) {
@@ -177,7 +294,8 @@ function largestUncompactedTool(
     if (triggerTokens && text.length <= oversizedChars && estimateTokensFromBytes(estimateMessagesBytes(messages)) < triggerTokens) {
       continue;
     }
-    if (text.length > bestLength) {
+    if (bestIndex === null || retentionPriority(messages[index]) < retentionPriority(messages[bestIndex]) ||
+        (retentionPriority(messages[index]) === retentionPriority(messages[bestIndex]) && text.length > bestLength)) {
       bestIndex = index;
       bestLength = text.length;
     }

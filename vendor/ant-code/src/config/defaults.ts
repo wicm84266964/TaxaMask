@@ -24,6 +24,7 @@ import {
   GOAL_MAX_AUTO_CONTINUES,
   GOAL_MIN_AUTO_CONTINUES
 } from "../core/goal.ts";
+import { DEFAULT_TRANSCRIPT_RETENTION_DAYS } from "./retention.ts";
 
 export const NETWORK_MODES: readonly string[] = Object.freeze([
   "offline",
@@ -83,7 +84,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   allowedHosts: [] as string[],
   transcript: {
     enabled: true,
-    retentionDays: 30 as number | null,
+    retentionDays: DEFAULT_TRANSCRIPT_RETENTION_DAYS,
     includeToolOutput: "policy" as string,
     encryption: "off" as string
   },
@@ -133,7 +134,7 @@ export const DEFAULT_CONFIG = Object.freeze({
       maxConcurrentBackground: 3,
       defaultWaitFor: "all",
       autoQueueParentPrompt: true,
-      maxWakeSummaryBytes: 12000
+      maxWakeSummaryBytes: 96000
     },
     reviewGate: {
       enabled: true,
@@ -217,6 +218,9 @@ export type LabAgentConfig = Mutable<typeof DEFAULT_CONFIG> & {
   lab: Mutable<typeof DEFAULT_CONFIG.lab> & {
     configPath: string | null;
     gatewayApiKeyDisabled?: boolean;
+    sourceCredentialSelections?: Record<string, string>;
+    resolvedSourceCredentials?: Record<string, string | null>;
+    sourceCredentialSelectionRequired?: boolean;
     activeGatewayProfile?: string;
     gatewayProfiles?: Array<JsonObject>;
     sources?: {

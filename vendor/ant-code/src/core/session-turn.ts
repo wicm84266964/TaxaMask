@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { readToolEvidence } from "./tool-summary.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -57,8 +58,11 @@ import {
   buildUserTurnMessage,
   persistableUserTurnMessage,
   normalizeInputAttachments,
-  attachmentMetadataList
+  attachmentMetadataList,
+  liveModelMessages,
+  mergePersistableImageSummaries
 } from "./session-messages.ts";
+import { ingestComposerDocuments } from "../tools/composer-documents.ts";
 import {
   formatAssistantOutput,
   analyzeAssistantOutputHealth,
@@ -90,10 +94,12 @@ import {
 } from "./session-tools.ts";
 import {
   appendSessionMessages,
+  persistableContextMessages,
   persistSessionMetadata
 } from "./session-persist.ts";
 import {
   finishInterruptedTurn,
+  abortSignalReason,
   createInterruptedDraftCapture,
   captureInterruptedDraftEvent,
   appendFailedGatewayDraft,
@@ -110,7 +116,16 @@ import {
 
 export async function runSessionTurn(session: AgentSession, options: RunSessionTurnOptions) {
   const displayPrompt = typeof options.displayPrompt === "string" ? options.displayPrompt : options.prompt;
-  const attachments = normalizeInputAttachments(options.attachments);
+  const ingested = await ingestComposerDocuments({
+    cwd: session.cwd,
+    attachments: options.attachments,
+    existingImageCount: normalizeInputAttachments(options.attachments).length
+  });
+  const modelPrompt = [options.prompt, ingested.promptAppendix].filter((part) => String(part ?? "").trim()).join("\n\n");
+  const attachments = [
+    ...normalizeInputAttachments(options.attachments),
+    ...ingested.visionImages
+  ].slice(0, 6);
   const thinkingCapture = createThinkingCapture();
   const interruptedDraft = createInterruptedDraftCapture();
   const eventOptions = withAntEventOptions(session, {
@@ -174,6 +189,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     mcpRuntime,
     workflowState: session.workflow,
     visualEvidence: session.visualEvidence,
+    readToolEvidence: (input) => readToolEvidence(session, input, options.env),
     approve: options.approvalCallback,
     askUser: options.userInputCallback,
     parentSessionId: session.id,
@@ -225,7 +241,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "preflight"
+        reason: abortSignalReason(options.signal)
       });
   }
 
@@ -256,6 +272,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     prompt: options.prompt,
     attachments,
     gateway,
+    pdfDocuments: ingested.pdfDocuments,
     signal: options.signal,
     eventOptions,
     metadata
@@ -281,11 +298,11 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
   }
 
-  const userMessage = buildUserTurnMessage(options.prompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
+  const userMessage = buildUserTurnMessage(modelPrompt, session.workflow, visionPreparation.attachments, visionPreparation.analysisText);
   let messages: SessionMessage[] = buildTurnMessages(session, userMessage);
   let toolResults: SessionToolResult[] = [];
-  const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, attachments)];
-  const transcriptTurnMessages: SessionMessage[] = [persistableUserTurnMessage(displayPrompt, attachments)];
+  const turnMessages: SessionMessage[] = [persistableUserTurnMessage(options.prompt, options.attachments ?? attachments)];
+  const transcriptTurnMessages: SessionMessage[] = [persistableUserTurnMessage(displayPrompt, options.attachments ?? attachments)];
   const maxToolRounds = resolveMainToolRounds(session.config);
   const turnChangeTracker = createTurnChangeTracker();
 
@@ -301,7 +318,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "before_gateway_request"
+        reason: abortSignalReason(options.signal)
       });
     }
     if (round > 0) {
@@ -309,7 +326,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     }
     const budgetPreparation = await preparePromptBudgetForGateway({
       session,
-      prompt: options.prompt,
+      prompt: modelPrompt,
       messages,
       toolResults,
       round,
@@ -323,6 +340,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
     });
     messages = budgetPreparation.messages;
     if (budgetPreparation.blocked) {
+      session.messages = persistableContextMessages(mergePersistableImageSummaries(
+        liveModelMessages(messages),
+        turnMessages
+      ));
       finalOutput = contextOverflowMessage(budgetPreparation.estimate, session.contextWindow);
       await persistSessionMetadata(sessionStore, metadata, finalOutput, "context_overflow", session, options);
       await emitEvent(eventOptions, {
@@ -369,6 +390,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       tools: session.context.tools,
       toolResults,
       sessionId: session.id,
+      sessionAffinity: session.gatewaySessionAffinity,
       stream: session.mode === "interactive" || options.stream === true,
       signal: options.signal,
       onEvent: (event: Record<string, unknown>) => emitGatewayStreamEvent(eventOptions, event, round + 1)
@@ -385,7 +407,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "gateway_aborted"
+        reason: abortSignalReason(options.signal)
       });
     }
 
@@ -467,7 +489,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "after_gateway_response"
+        reason: abortSignalReason(options.signal)
       });
     }
 
@@ -503,7 +525,9 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
       metadata.rounds = round + 1;
       finalOutput = formatAssistantOutput(response.data);
       const thinking = thinkingForRound(thinkingCapture, round + 1, response.data);
-      const outputHealth = analyzeAssistantOutputHealth(response.data, finalOutput, thinking);
+      const outputHealth = analyzeAssistantOutputHealth(response.data, finalOutput, thinking, {
+        toolNames: (session.context.tools ?? []).map((tool) => String(tool?.name ?? "")).filter(Boolean)
+      });
       if (OUTPUT_HEALTH_CHECK_ENABLED || outputHealth.mustRetry) {
         recordOutputHealth(metadata, {
           round: round + 1,
@@ -512,6 +536,20 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         });
         if (!outputHealth.ok && shouldRetryOutputHealth(outputHealth, outputHealthRetries)) {
           outputHealthRetries += 1;
+          if (outputHealth.reasons.includes("promised_tool_without_call")) {
+            rotateGatewaySessionAffinity(session);
+            await emitEvent(eventOptions, {
+              type: "output_health_retry",
+              round: round + 1,
+              reasons: outputHealth.reasons,
+              stopReason: response.data.stopReason ?? null,
+              textBytes: Buffer.byteLength(finalOutput, "utf8"),
+              thinkingBytes: thinking?.bytes ?? gatewayThinkingBytes(response.data),
+              retry: outputHealthRetries,
+              gatewaySessionAffinity: session.gatewaySessionAffinity
+            });
+            continue;
+          }
           const retryAssistantMessage: SessionMessage = {
             role: "assistant",
             content: response.data.content.length > 0
@@ -576,8 +614,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         hooksTrusted: options.hooksTrusted,
         eventOptions,
         thinking,
+        thinkingProcess: interruptedDraft.text,
         turnMessages,
-        transcriptMessages: transcriptTurnMessages
+        transcriptMessages: transcriptTurnMessages,
+        modelContextMessages: liveModelMessages(messages)
       });
       await emitEvent(eventOptions, {
         type: "assistant_final",
@@ -663,7 +703,7 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
         env: options.env,
         hooksTrusted: options.hooksTrusted,
         draft: interruptedDraft,
-        reason: "after_tool_execution"
+        reason: abortSignalReason(options.signal)
       });
     }
     for (const result of toolResults) {
@@ -694,6 +734,10 @@ export async function runSessionTurn(session: AgentSession, options: RunSessionT
   } finally {
     mcpRuntime.close();
   }
+}
+
+function rotateGatewaySessionAffinity(session: AgentSession) {
+  session.gatewaySessionAffinity = `retry-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
 /**

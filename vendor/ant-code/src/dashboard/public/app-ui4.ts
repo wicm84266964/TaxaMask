@@ -1,9 +1,11 @@
 import { renderMarkdown } from "./markdown.ts";
+import { preferPrefixedCatalog } from "../../model-gateway/reasoning-capabilities.ts";
+import { modelPickerLabel, providerRouteGroups } from "./model-groups.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
 import type { DashboardConfigSource, DashboardReasoningEffort, DashboardTurnChangeStats, DashboardScopedDefaultSelection, DashboardVisionAgent, DashboardReasoningDiscovery, DashboardReasoningCapabilityCandidate, DashboardGatewayProbeModel, DashboardGatewayProbeResult, DashboardLifecycleActivity, DashboardSettings, DashboardFile, DashboardTableSheet, DashboardTablePreview, DashboardLightboxItem, DashboardQuestionChoice, DashboardPendingQuestion, DashboardApproval, DashboardGatewayTransport, DashboardScopedRequest, DashboardFetchOptions, DashboardModelSource, DashboardSessionStatus, DashboardApiResult, DashboardActivity, DashboardModelOption, DashboardGatewayProfile, DashboardGatewayConfig, DashboardModelSelection, DashboardPendingGuide, DashboardStreamEvent, DashboardUiState , DashboardSessionSummary } from "./app-core.ts";
-import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
+import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, keepInterruptedAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
 export function renderTranscriptWindowMarker(side: unknown) {
   const countKey = side === "newer" ? "unloadedNewer" : "unloadedOlder";
   const nodeKey = side === "newer" ? "newerNode" : "olderNode";
@@ -179,14 +181,70 @@ export function contextBoundaryText(event: Record<string, unknown> = {}) {
   return "聊天内容已压缩，以下回复基于压缩后的上下文继续";
 }
 
+const TURN_ENDING_ACTIVITY_TYPES = new Set([
+  "gateway_error",
+  "gateway_not_configured",
+  "turn_complete",
+  "pdf_vision_error",
+  "turn_interrupted"
+]);
+
+export function isRecoverableToolFailure(activity: DashboardActivity | DashboardStreamEvent | null | undefined) {
+  if (!activity || activity.status !== "failed") {
+    return false;
+  }
+  const rawType = String(activity.rawType ?? "");
+  if (TURN_ENDING_ACTIVITY_TYPES.has(rawType) || activity.source === "gateway") {
+    return false;
+  }
+  if (
+    activity.source === "tool"
+    || rawType === "tool_finish"
+    || rawType === "tool_start"
+    || activity.toolName
+    || activity.toolUseId
+  ) {
+    return true;
+  }
+  return state.running === true && activity.source !== "session";
+}
+
+export function recoverableToolFailureTitle(activity: DashboardActivity) {
+  const raw = String(activity.title ?? "").trim().replace(/失败$/, "未成功");
+  const title = raw || "工具未成功";
+  return title.includes("本轮继续") ? title : `${title}，本轮继续`;
+}
+
 export function handleActivity(activity: DashboardActivity) {
   if (activity.status === "running" || activity.status === "waiting") {
     updateLiveActivity(activity);
     return;
   }
-  const shouldKeep = activity.status === "failed" || activity.status === "blocked" || isMeaningfulCompletedActivity(activity);
   removeLiveActivity(activity);
-  if (shouldKeep) {
+  if (isRecoverableToolFailure(activity)) {
+    appendActivity({
+      ...activity,
+      title: recoverableToolFailureTitle(activity),
+      detail: String(activity.detail ?? ""),
+      severity: "notice",
+      collapsed: true
+    });
+    return;
+  }
+  if (activity.status === "failed") {
+    keepInterruptedAssistantDrafts();
+  }
+  if (activity.status === "failed" || activity.status === "blocked") {
+    appendActivity({
+      ...activity,
+      title: String(activity.title ?? (activity.status === "failed" ? "发生错误" : "任务未完成")),
+      detail: String(activity.detail ?? ""),
+      severity: activity.status === "failed" ? "danger" : "warning",
+      collapsed: false
+    });
+    return;
+  }
+  if (isMeaningfulCompletedActivity(activity)) {
     state.completedActivities.push(activity);
   }
 }
@@ -355,6 +413,10 @@ export function setLiveTitle(title: string) {
 }
 
 export function toggleLiveStatusDetails() {
+  if (state.pendingApproval) {
+    showApproval(state.pendingApproval);
+    return;
+  }
   if (state.backgroundSubagents.size === 0) {
     return;
   }
@@ -368,15 +430,19 @@ export function updateLiveStatus() {
   if (background.length === 0) {
     state.liveStatusExpanded = false;
   }
-  const visible = state.running || active.length > 0 || background.length > 0 || state.liveTitle;
+  const waitingApproval = Boolean(state.pendingApproval);
+  const visible = state.running || active.length > 0 || background.length > 0 || waitingApproval || state.liveTitle;
   els.liveStatus.classList.toggle("hidden", !visible);
   els.liveStatus.classList.toggle("has-background-subagents", background.length > 0);
+  els.liveStatus.classList.toggle("has-pending-approval", waitingApproval);
   els.liveStatus.classList.toggle("expanded", state.liveStatusExpanded && background.length > 0);
-  els.activityToggle.disabled = background.length === 0;
+  els.activityToggle.disabled = background.length === 0 && !waitingApproval;
   els.activityToggle.setAttribute("aria-expanded", String(state.liveStatusExpanded && background.length > 0));
-  els.activityToggle.setAttribute("aria-label", background.length > 0
-    ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情`
-    : "当前活动");
+  els.activityToggle.setAttribute("aria-label", waitingApproval
+    ? "打开权限确认"
+    : background.length > 0
+      ? `${state.liveStatusExpanded ? "收起" : "展开"}后台活动详情`
+      : "当前活动");
   if (!visible) {
     els.liveTitle.textContent = "";
     els.liveSubtasks.innerHTML = "";
@@ -402,6 +468,11 @@ export function updateLiveStatus() {
 }
 
 export function liveStatusTitle(primary: DashboardActivity | undefined, subtasks: DashboardActivity[], background: DashboardActivity[]) {
+  if (state.pendingApproval) {
+    return state.approvalQueue.length > 0
+      ? `等待权限确认 · 还有 ${state.approvalQueue.length} 个排队`
+      : "等待权限确认";
+  }
   if (primary?.rawType === "gateway_retry") {
     return "网关响应异常，正在自动重试";
   }
@@ -525,10 +596,17 @@ export function backgroundSubagentTitle(item: DashboardActivity) {
   return `${profile}子智能体运行中`;
 }
 
+function waitForDisplay(value: unknown) {
+  if (value === "all") return "等待全部完成";
+  if (value === "any") return "等待任一完成";
+  if (value === "none") return "完成后不接续";
+  return value ? String(value) : "";
+}
+
 export function backgroundSubagentMeta(item: DashboardActivity) {
   if (item.kind === "terminal") {
     return [
-      item.taskId ? `task=${item.taskId}` : null,
+      item.taskId ? `任务 ${item.taskId}` : null,
       item.status === "starting" ? "启动中" : null,
       item.status === "cancelling" ? "退出确认中" : null,
       item.runningCount === 1 ? "运行中" : null,
@@ -536,9 +614,9 @@ export function backgroundSubagentMeta(item: DashboardActivity) {
     ].filter(Boolean).join(" · ");
   }
   return [
-    item.groupId ? `group=${item.groupId}` : null,
-    item.taskId ? `task=${item.taskId}` : null,
-    item.waitFor ? `waitFor=${item.waitFor}` : null,
+    item.groupId ? `组 ${item.groupId}` : null,
+    item.taskId ? `任务 ${item.taskId}` : null,
+    waitForDisplay(item.waitFor) || null,
     Number.isFinite(item.runningCount) && Number.isFinite(item.taskCount) ? `${item.runningCount}/${item.taskCount} 运行中` : null,
     item.lastProgressAt ? `进展 ${formatRelativeTime(item.lastProgressAt)}` : null,
     item.heartbeatAt ? `心跳 ${formatRelativeTime(item.heartbeatAt)}` : null,
@@ -676,6 +754,7 @@ export function normalizeChangeStats(stats: DashboardTurnChangeStats | Record<st
 }
 
 export function renderComposerStatus() {
+  setConnectionState(state.connectionState);
   if (!els.modelStatus || !els.contextStatus || !els.changeStatus) {
     return;
   }
@@ -946,30 +1025,30 @@ export function renderModelPanel() {
   }
   const profiles = state.gatewayProfiles ?? [];
   const selection = currentModelSelection();
-  const unresolved = selection.resolved === false;
   const activeProfileId = selection.profile?.id || "";
   const activeModelId = selection.model?.id || "";
-  const models = selection.profile?.models ?? (profiles.length === 0 ? state.models ?? [] : []);
+  const groups = providerRouteGroups(profiles).map((group) => ({
+    ...group,
+    models: preferPrefixedCatalog(group.profiles.flatMap((profile) => (profile.models ?? []).map((model) => ({
+      ...model,
+      switchProfileId: profile.id,
+      switchReady: profile.ready !== false
+    }))))
+  })).filter((group) => group.models.length > 0);
   els.modelPanel.innerHTML = `
     <div class="model-panel-head">
       <div class="model-panel-title">模型</div>
-      <div class="model-panel-subtitle">当前会话</div>
+      <div class="model-panel-subtitle">只切换当前会话，不改子智能体</div>
     </div>
-    <div class="model-switch-fields">
-      <label>
-        <span>模型来源</span>
-        <select data-action="switch-source" ${state.running || state.modelSwitching || profiles.length === 0 ? "disabled" : ""}>
-          ${profiles.length > 0
-            ? `${unresolved ? `<option value="" selected disabled>请选择模型来源</option>` : ""}${profiles.map((profile) => `<option value="${escapeAttribute(profile.id)}"${!unresolved && profile.id === activeProfileId ? " selected" : ""}${profile.ready === false ? " disabled" : ""}>${escapeHtml(profile.label || profile.gatewayUrl || profile.id)}${profile.ready === false ? "（需配置）" : ""}</option>`).join("")}`
-            : `<option value="">${unresolved ? "没有可用模型来源" : escapeHtml(modelSourceLabel(selection.model))}</option>`}
-        </select>
-      </label>
-      <label>
-        <span>模型名称</span>
-        <select data-action="switch-model" ${state.running || state.modelSwitching || unresolved || models.length === 0 ? "disabled" : ""}>
-          ${unresolved ? `<option value="" selected>请先选择模型来源</option>` : models.map((model) => `<option value="${escapeAttribute(model.id)}"${model.id === activeModelId ? " selected" : ""}>${escapeHtml(model.label || model.id)}</option>`).join("") || `<option value="">未配置模型</option>`}
-        </select>
-      </label>
+    <div class="model-source-list">
+      ${groups.map((group) => `
+        <section>
+          <h3>${escapeHtml(group.label)}</h3>
+          <div>
+            ${group.models.map((model) => `<button type="button" data-action="pick-model" data-model-id="${escapeAttribute(model.id)}" data-profile-id="${escapeAttribute(model.switchProfileId)}"${model.id === activeModelId && model.switchProfileId === activeProfileId ? ` class="active" aria-current="true"` : ""}${model.switchReady && !state.running && !state.modelSwitching ? "" : " disabled"}>${escapeHtml(modelPickerLabel(model, group.models))}</button>`).join("")}
+          </div>
+        </section>
+      `).join("") || `<p class="model-panel-empty">尚未读取模型</p>`}
     </div>
   `;
 }

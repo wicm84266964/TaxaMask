@@ -23,7 +23,8 @@ import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-con
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
 import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
-import { compactInFlightToolMessages, DEFAULT_IN_FLIGHT_COMPACT_RATIO, isReducedToolText } from "./inflight-compaction.ts";
+import { compactInFlightLiveContext, DEFAULT_IN_FLIGHT_COMPACT_RATIO, isReducedToolText } from "./inflight-compaction.ts";
+import { summarizeToolBatch, toolSummaryBudget, toolSummaryState } from "./tool-summary.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -53,8 +54,9 @@ import type {
   SessionTurnMetadata
 } from "./session-types.ts";
 import {
-  buildTurnMessages,
-  buildUserTurnMessage
+  buildUserTurnMessage,
+  liveModelMessages,
+  messagesForModelContext
 } from "./session-messages.ts";
 import {
   skippedInterruptedToolResult,
@@ -126,10 +128,50 @@ export function formatAssistantOutput(data: import("../model-gateway/protocol.ts
   return "模型本轮没有返回可展示正文。";
 }
 
+const PROMISED_TOOL_STOP_REASONS = new Set(["", "stop", "end_turn", "completed"]);
+const PROMISED_TOOL_VISIBLE_LIMIT = 160;
 
-export function analyzeAssistantOutputHealth(data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse, finalOutput: unknown, thinking: { text?: string; bytes?: number } | null | undefined) {
+export function looksLikePromisedToolWithoutCall(
+  data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse,
+  visibleText: string,
+  thinkingText: string,
+  toolNames: string[] | undefined
+) {
+  if (data?.toolCalls?.length) {
+    return false;
+  }
+  const stopReason = String(data?.stopReason ?? "").toLowerCase();
+  if (!PROMISED_TOOL_STOP_REASONS.has(stopReason)) {
+    return false;
+  }
+  const text = String(visibleText ?? "").trim();
+  if (text.length > PROMISED_TOOL_VISIBLE_LIMIT) {
+    return false;
+  }
+  const names = (toolNames ?? []).map((name) => String(name ?? "").trim()).filter((name) => name.length >= 3);
+  if (names.length === 0) {
+    return false;
+  }
+  const haystack = `${thinkingText}\n${text}`;
+  const mentioned = names.filter((name) => haystack.includes(name));
+  if (mentioned.length === 0) {
+    return false;
+  }
+  if (/(马上|立刻|现在|补测|随后|然后|调用|let me|i will|i'll|going to)/i.test(haystack)) {
+    return true;
+  }
+  return Boolean(thinkingText) && text.length <= 80;
+}
+
+
+export function analyzeAssistantOutputHealth(
+  data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse,
+  _finalOutput: unknown,
+  thinking: { text?: string; bytes?: number } | null | undefined,
+  options: { toolNames?: string[] } = {}
+) {
   const reasons = [];
-  const text = String(finalOutput ?? "").trim();
+  const text = assistantResponseText(data).trim();
   const stopReason = String(data?.stopReason ?? "").toLowerCase();
   const thinkingText = String(thinking?.text ?? "");
   const thinkingBytes = thinking && Number.isFinite(thinking.bytes) ? Number(thinking.bytes) : gatewayThinkingBytes(data);
@@ -140,11 +182,20 @@ export function analyzeAssistantOutputHealth(data: import("../model-gateway/prot
   if (["length", "max_tokens", "token_limit", "context_length_exceeded"].includes(stopReason)) {
     reasons.push(`stop_reason:${stopReason}`);
   }
-  if (text.length > 0 && data?.toolCalls?.length === 0 && thinkingBytes >= 1024 && dataTextBytes(data) === 0 && ["length", "max_tokens", "token_limit"].includes(stopReason)) {
+  if (data?.toolCalls?.length === 0 && thinkingBytes >= 1024 && dataTextBytes(data) === 0 && ["length", "max_tokens", "token_limit"].includes(stopReason)) {
     reasons.push("reasoning_only_length");
   }
   if (data?.toolCalls?.length === 0 && dataTextBytes(data) === 0 && thinkingBytes >= 4096 && looksLikeRepetitiveThinkingLoop(thinkingText)) {
     reasons.push("repetitive_thinking_loop");
+  }
+  if (
+    data?.toolCalls?.length === 0
+    && thinkingBytes >= 1024
+    && dataTextBytes(data) === 0
+    && !reasons.includes("reasoning_only_length")
+    && !reasons.includes("repetitive_thinking_loop")
+  ) {
+    reasons.push("reasoning_only_empty");
   }
   if (text.length > 0 && text.length <= 8 && thinkingBytes >= 64) {
     reasons.push("too_short_visible_text_after_reasoning");
@@ -157,6 +208,9 @@ export function analyzeAssistantOutputHealth(data: import("../model-gateway/prot
   }
   if (looksLikeTruncatedSentence(text)) {
     reasons.push("truncated_visible_text");
+  }
+  if (looksLikePromisedToolWithoutCall(data, text, thinkingText, options.toolNames)) {
+    reasons.push("promised_tool_without_call");
   }
 
   return {
@@ -261,18 +315,27 @@ export function buildOutputHealthRepairPrompt(health: { reasons?: string[] } | n
     reasoningOnlyLength
       ? "The previous model call exhausted its completion budget in reasoning/thinking without producing visible user-facing text."
       : "",
+    reasons.includes("reasoning_only_empty")
+      ? "The previous model call produced only hidden reasoning/thinking, with no user-visible text and no tool call."
+      : "",
+    reasons.includes("promised_tool_without_call")
+      ? "The previous model call only promised a tool call in a short sentence and did not emit a tool call. Call the tool now; do not answer with another one-line promise."
+      : "",
     repetitiveThinking
       ? "The previous model call repeated internal planning text in a thinking loop. Break the loop and answer directly."
       : "",
     "",
     "Rewrite the final answer for the user now.",
     "Requirements:",
-    "- Return only user-facing answer text.",
+    "- Return only user-facing answer text, or emit a tool call if work remains.",
+    "- Do not put the only reply in thinking/reasoning_content.",
     "- Produce the answer immediately and keep it concise enough to finish.",
     "- Do not expose internal planning, hidden reasoning, scratch notes, or JSON/debug dumps.",
     "- If the prior answer was cut off, continue from the available task context and produce a complete answer.",
     "- Prefer the user's language unless the user explicitly requested otherwise.",
-    "- Do not call tools unless a factual answer is impossible without one.",
+    reasons.includes("reasoning_only_empty")
+      ? "- If the task is unfinished, a tool call is allowed."
+      : "- Do not call tools unless a factual answer is impossible without one.",
     "",
     "Malformed visible response excerpt:",
     excerpt || "[empty]"
@@ -448,15 +511,28 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
     )
   );
 
-  messages = pruneStaleInflightForGateway(input, messages);
   let estimate = estimateOf(messages);
+  const target = await toolSummaryBudget(input.session, estimate.bytes, input.env);
   if (!needsCompaction(estimate)) {
     return { messages, estimate, blocked: false };
   }
 
-  if (input.round !== 0) {
-    messages = await compactInflightForGateway(input, messages, true);
+  const before = estimate;
+  for (let batch = 0; batch < 3 && (estimate.tokens > target.targetTokens || estimate.bytes > target.targetBytes); batch += 1) {
+    const result = await summarizeToolBatch({ ...input, messages,
+      onStart: batch === 0 ? () => emitEvent(input.eventOptions, { type: "tool_results_summarizing", round: input.round + 1 }) : undefined,
+      neededBytes: Math.max(estimate.bytes - target.targetBytes, (estimate.tokens - target.targetTokens) * 4)
+    });
+    if (!result) break;
+    syncCompactedToolResults(input.toolResults, messages);
     estimate = estimateOf(messages);
+  }
+  if (estimate.bytes < before.bytes) {
+    await emitEvent(input.eventOptions, { type: "tool_results_summarized", reason: "automatic_prompt_budget", round: input.round + 1,
+      beforeTokens: before.tokens, afterTokens: estimate.tokens, beforeBytes: before.bytes, afterBytes: estimate.bytes,
+      targetTokens: target.targetTokens, reserveRatio: target.ratio });
+  } else {
+    await emitEvent(input.eventOptions, { type: "tool_summary_skipped", reason: "no_safe_reduction", round: input.round + 1 });
   }
 
   if (needsCompaction(estimate)) {
@@ -464,10 +540,17 @@ export async function preparePromptBudgetForGateway(input: PromptBudgetInput) {
     estimate = estimateOf(messages);
   }
 
-  if (needsCompaction(estimate)) {
+  if (promptEstimateOverBudget(estimate, input.session.contextWindow)) {
     messages = await compactInflightForGateway(input, messages, true);
     estimate = estimateOf(messages);
   }
+
+  const summaryState = await toolSummaryState(input.session, input.env);
+  summaryState.previousBytes = estimate.bytes;
+  summaryState.events.push({ type: "prompt_budget", at: new Date().toISOString(), turn: input.session.turnCount, round: input.round + 1,
+    beforeTokens: before.tokens, afterTokens: estimate.tokens, beforeBytes: before.bytes, afterBytes: estimate.bytes,
+    targetTokens: target.targetTokens, targetBytes: target.targetBytes, reserveRatio: target.ratio });
+  summaryState.events = summaryState.events.slice(-100);
 
   if (promptEstimateOverBudget(estimate, input.session.contextWindow)) {
     await emitEvent(input.eventOptions, {
@@ -489,37 +572,56 @@ async function compactHistoryForGateway(
   messages: SessionMessage[],
   beforeEstimate: ReturnType<typeof estimatePromptPayload>
 ) {
-  const compaction = await compactSessionContextWithModel(input.session, {
-    reason: "automatic_prompt_budget",
-    force: true,
-    gateway: input.gateway,
-    signal: input.signal,
-    env: input.env,
-    hooksTrusted: input.hooksTrusted,
-    onBeforeCompact: (payload: Record<string, unknown>) => emitEvent(input.eventOptions, {
-      type: "context_compacting",
-      reason: "automatic_prompt_budget",
-      beforeMessages: payload.beforeMessages,
-      beforeTokens: beforeEstimate.tokens,
-      beforeBytes: payload.beforeBytes,
-      maxTokens: payload.maxTokens,
-      maxBytes: payload.maxBytes,
-      maxMessages: payload.maxMessages
-    })
-  });
-  if (!compaction.compacted) {
+  const liveHistory = liveModelMessages(messages);
+  const state = await toolSummaryState(input.session, input.env);
+  const fingerprint = liveHistoryFingerprint(liveHistory);
+  if (state.historyFingerprint === fingerprint) {
     return messages;
   }
+  state.historyFingerprint = fingerprint;
+  const previousMessages = input.session.messages;
+  input.session.messages = liveHistory;
+  let compaction;
+  try {
+    compaction = await compactSessionContextWithModel(input.session, {
+      reason: "automatic_prompt_budget",
+      force: true,
+      gateway: input.gateway,
+      signal: input.signal,
+      env: input.env,
+      hooksTrusted: input.hooksTrusted,
+      onBeforeCompact: (payload: Record<string, unknown>) => emitEvent(input.eventOptions, {
+        type: "context_compacting",
+        reason: "automatic_prompt_budget",
+        beforeMessages: payload.beforeMessages,
+        beforeTokens: beforeEstimate.tokens,
+        beforeBytes: payload.beforeBytes,
+        maxTokens: payload.maxTokens,
+        maxBytes: payload.maxBytes,
+        maxMessages: payload.maxMessages
+      })
+    });
+  } catch (error) {
+    input.session.messages = previousMessages;
+    throw error;
+  }
+  if (!compaction.compacted) {
+    input.session.messages = previousMessages;
+    return messages;
+  }
+  state.historyFingerprint = liveHistoryFingerprint(input.session.messages);
+  dropToolResultsNotInMessages(input.toolResults, input.session.messages);
 
-  const rebuilt = buildTurnMessages(input.session, buildUserTurnMessage(
-    input.prompt,
-    input.session.workflow,
-    input.attachments ?? [],
-    input.visionAnalysisText ?? ""
-  ));
-  const nextMessages = input.round === 0
-    ? rebuilt
-    : [...rebuilt, ...continuationAfterLastUser(messages)];
+  let nextMessages = appendCompactContinueMessage(rebuildCompactedGatewayMessages(input.session));
+  if (promptEstimateOverBudget(estimatePromptPayload({
+    model: input.session.model,
+    messages: nextMessages,
+    tools: input.session.context.tools,
+    toolResults: input.toolResults,
+    gatewayProtocol: sessionGatewayProtocol(input.session)
+  }), input.session.contextWindow)) {
+    nextMessages = await compactInflightForGateway(input, nextMessages, true);
+  }
   await emitEvent(input.eventOptions, {
     type: "context_compacted",
     beforeMessages: compaction.beforeMessages,
@@ -541,18 +643,54 @@ async function compactHistoryForGateway(
   return nextMessages;
 }
 
-function pruneStaleInflightForGateway(input: PromptBudgetInput, messages: SessionMessage[]) {
-  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
-    maxTokens: input.session.contextWindow?.maxTokens,
-    keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    pruneStale: true,
-    currentTurnOnly: true
-  });
-  if (!inflight.compacted) {
+function rebuildCompactedGatewayMessages(session: AgentSession) {
+  const compactedContext = buildCompactedContextMessage(session);
+  return [
+    ...buildSystemMessages(session),
+    ...(compactedContext ? [compactedContext] : []),
+    ...messagesForModelContext(session.messages)
+  ];
+}
+
+const COMPACT_CONTINUE_MARKER = "Context was compacted into a handoff summary";
+
+function appendCompactContinueMessage(messages: SessionMessage[]) {
+  const last = messages[messages.length - 1];
+  const lastText = typeof last?.content === "string"
+    ? last.content
+    : JSON.stringify(last?.content ?? "");
+  if (last?.role === "user" && lastText.includes(COMPACT_CONTINUE_MARKER)) {
     return messages;
   }
-  syncCompactedToolResults(input.toolResults, messages);
-  return messages;
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: `${COMPACT_CONTINUE_MARKER} plus recent messages. Continue the unfinished work now. If the task is not done, call tools. If you can answer the user, write visible text. Do not put the only reply in thinking.`
+    }
+  ];
+}
+
+function dropToolResultsNotInMessages(toolResults: SessionToolResult[] | undefined, messages: SessionMessage[]) {
+  if (!Array.isArray(toolResults) || toolResults.length === 0) {
+    return;
+  }
+  const keptIds = new Set(
+    messages
+      .filter((message) => message.role === "tool")
+      .map((message) => String(message.toolCallId ?? message.tool_call_id ?? "").trim())
+      .filter(Boolean)
+  );
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const id = String(toolResults[index]?.toolCallId ?? "").trim();
+    if (id && !keptIds.has(id)) {
+      toolResults.splice(index, 1);
+    }
+  }
+}
+
+function liveHistoryFingerprint(messages: SessionMessage[] | undefined) {
+  return crypto.createHash("sha256").update(JSON.stringify(messages ?? [])).digest("hex");
 }
 
 async function compactInflightForGateway(
@@ -560,11 +698,22 @@ async function compactInflightForGateway(
   messages: SessionMessage[],
   force: boolean
 ) {
-  const inflight = compactInFlightToolMessages(messages as Array<Record<string, unknown>>, {
+  const inflight = compactInFlightLiveContext(messages as Array<Record<string, unknown>>, {
     maxTokens: input.session.contextWindow?.maxTokens,
     triggerRatio: boundedContextRatio(input.session.config.context?.inFlightCompactRatio, DEFAULT_IN_FLIGHT_COMPACT_RATIO),
     keepRecentTools: input.session.config.context?.inFlightKeepRecentTools ?? undefined,
-    force
+    force,
+    toolResults: input.toolResults,
+    needsCompaction: () => {
+      syncCompactedToolResults(input.toolResults, messages);
+      return promptEstimateOverBudget(estimatePromptPayload({
+        model: input.session.model,
+        messages,
+        tools: input.session.context.tools,
+        toolResults: input.toolResults,
+        gatewayProtocol: sessionGatewayProtocol(input.session)
+      }), input.session.contextWindow);
+    }
   });
   if (!inflight.compacted) {
     return messages;
@@ -577,24 +726,14 @@ async function compactInflightForGateway(
     beforeTokens: inflight.beforeTokens,
     afterTokens: inflight.afterTokens,
     compactedTools: inflight.compactedTools,
+    strippedThinking: inflight.strippedThinking,
+    droppedRounds: inflight.droppedRounds,
     strategy: "inflight-tools",
     reason: input.round === 0 ? "automatic_prompt_budget" : "automatic_inflight_tools"
   });
   return messages;
 }
 
-function continuationAfterLastUser(messages: SessionMessage[]) {
-  let lastUser = -1;
-  for (let index = 0; index < messages.length; index += 1) {
-    if (messages[index]?.role === "user") {
-      lastUser = index;
-    }
-  }
-  if (lastUser < 0 || lastUser >= messages.length - 1) {
-    return [];
-  }
-  return messages.slice(lastUser + 1);
-}
 
 function syncCompactedToolResults(toolResults: SessionToolResult[] = [], messages: SessionMessage[] = []) {
   const compacted = new Map<string, string>();

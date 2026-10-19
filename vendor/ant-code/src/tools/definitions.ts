@@ -1,7 +1,17 @@
 export const BUILT_IN_TOOLS = Object.freeze([
   {
+    name: "tool_result_read",
+    description: "Retrieve original tool output referenced by a tool summary in this session. Use item and nextOffset to page; preserved text follows session redaction and retention policy.",
+    risk: "read",
+    supportsAbort: false,
+    inputSchema: { type: "object", required: ["evidenceId"], properties: {
+      evidenceId: { type: "string" }, item: { type: "integer", minimum: 0 },
+      offset: { type: "integer", minimum: 0 }, maxChars: { type: "integer", minimum: 1, maximum: 4000 }
+    } }
+  },
+  {
     name: "read_file",
-    description: "Read a UTF-8 text file inside the active workspace, or an approved/full-access local path. Returns the full file unless maxBytes is explicitly supplied.",
+    description: "Read a UTF-8 text file inside the active workspace, or an approved/full-access local path. Model output is a bounded continuous excerpt. Continue with returned nextStartLine/nextStartColumn as startLine/startColumn; maxLines defaults to 200 for range reads. Reuse retained results unless the file changed or another range is needed.",
     risk: "read",
     supportsAbort: false,
     inputSchema: {
@@ -9,7 +19,10 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["path"],
       properties: {
         path: { type: "string" },
-        maxBytes: { type: "number" }
+        maxBytes: { type: "number" },
+        startLine: { type: "integer", minimum: 1 },
+        startColumn: { type: "integer", minimum: 1, description: "1-based UTF-16 column on startLine; use the returned continuation value for long lines." },
+        maxLines: { type: "integer", minimum: 1 }
       }
     }
   },
@@ -22,7 +35,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       type: "object",
       properties: {
         path: { type: "string" },
-        maxEntries: { type: "number" }
+        maxEntries: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset. Results reflect current directory contents." }
       }
     }
   },
@@ -37,7 +51,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
-        maxMatches: { type: "number" }
+        maxMatches: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset; reruns against current files." }
       }
     }
   },
@@ -52,7 +67,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
-        maxMatches: { type: "number" }
+        maxMatches: { type: "number" },
+        offset: { type: "integer", minimum: 0, description: "Continue with the returned nextOffset; reruns against current files." }
       }
     }
   },
@@ -75,9 +91,10 @@ export const BUILT_IN_TOOLS = Object.freeze([
         multiline: { type: "boolean" },
         hidden: { type: "boolean" },
         noIgnore: { type: "boolean" },
+        offset: { type: "integer", minimum: 0, description: "Skip this many result rows, including context rows. Continue with nextOffset." },
         beforeContext: { type: "number" },
         afterContext: { type: "number" },
-        maxResults: { type: "number" },
+        maxResults: { type: "number", description: "Maximum returned rows, including context rows; default 100." },
         timeoutMs: { type: "number" }
       }
     }
@@ -91,6 +108,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
       type: "object",
       properties: {
         path: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Continue with nextOffset." },
         glob: { type: "array" },
         hidden: { type: "boolean" },
         noIgnore: { type: "boolean" },
@@ -109,6 +127,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["pattern"],
       properties: {
         pattern: { type: "string" },
+        offset: { type: "integer", minimum: 0, description: "Continue with nextOffset." },
         path: { type: "string" },
         glob: { type: "array" },
         ignoreCase: { type: "boolean" },
@@ -522,7 +541,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "web_search",
-    description: "Search the public web through a configured SearXNG endpoint or DuckDuckGo HTML fallback. Results are best-effort and must be cited.",
+    description: "Search the public web through Wikipedia, Bing HTML, and DuckDuckGo HTML, or a configured SearXNG endpoint. Results are best-effort and must be cited.",
     risk: "network",
     supportsAbort: true,
     inputSchema: {
@@ -538,7 +557,7 @@ export const BUILT_IN_TOOLS = Object.freeze([
   },
   {
     name: "document_intake",
-    description: "Extract local text or Markdown from txt/md/html/xml/json/csv and lightweight Office documents inside the workspace, or an approved/full-access local path. Returns full extracted content unless maxBytes is explicitly supplied.",
+    description: "Extract local text from txt/md/html/xml/json/csv, lightweight Office (docx/pptx/xlsx), and the text layer of PDF files inside the workspace, or an approved/full-access local path. PDFs default to a 20-page window; pass pageStart/maxPages to continue. Does not OCR scanned pages. Returns extracted content unless maxBytes is explicitly supplied.",
     risk: "document",
     supportsAbort: false,
     inputSchema: {
@@ -546,7 +565,9 @@ export const BUILT_IN_TOOLS = Object.freeze([
       required: ["path"],
       properties: {
         path: { type: "string" },
-        maxBytes: { type: "number" }
+        maxBytes: { type: "number" },
+        pageStart: { type: "number" },
+        maxPages: { type: "number" }
       }
     }
   },
@@ -606,8 +627,8 @@ export const BUILT_IN_TOOLS = Object.freeze([
         parallel: { type: "boolean" },
         background: { type: "boolean" },
         groupId: { type: "string" },
-        waitForGroup: { type: "string", enum: ["all", "any", "none"] },
-        wakeParent: { type: "boolean" },
+        waitForGroup: { type: "string", enum: ["all", "any", "none"], description: "Group-wide wait condition. Use the same value for every task in a group. Conflicts merge as all > any > none." },
+        wakeParent: { type: "boolean", description: "Group-wide parent wakeup. Use true for every task when the parent will wait for results. Joining a group cannot disable an existing wakeup request." },
         wakeReason: { type: "string" },
         purpose: { type: "string", enum: ["explore", "research", "plan", "execute", "verify", "review", "browser", "visual"] },
         difficulty: { type: "string", enum: ["quick", "standard", "deep"] },

@@ -17,6 +17,7 @@ import { createSessionStore } from "../storage/session-store.ts";
 import { serializeToolResult } from "../tools/result.ts";
 import { countLineChanges } from "../tools/diff.ts";
 import { createToolRuntime } from "../tools/runtime.ts";
+import { serializeExhibitArtifacts } from "../tools/artifacts.ts";
 import { createWorkflowState, formatWorkflowContext, summarizeWorkflow, syncWorkflowCompletionOnFinal, type WorkflowState } from "../tools/workflow-tools.ts";
 import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
@@ -52,7 +53,9 @@ import type {
   SessionTurnMetadata
 } from "./session-types.ts";
 import {
-  imageAttachmentSummaryBlock
+  imageAttachmentSummaryBlock,
+  mergePersistableImageSummaries,
+  persistableAttachmentChips
 } from "./session-messages.ts";
 import {
   isPlainObject
@@ -173,31 +176,55 @@ export function normalizeClientSurfaceValue(value: unknown) {
  */
 export async function appendSessionMessages(session: AgentSession, data: import("../model-gateway/protocol.ts").NormalizedGatewayResponse, fallbackText: string, options: {
   thinking?: unknown;
+  thinkingProcess?: unknown;
   turnMessages?: SessionMessage[];
   transcriptMessages?: SessionMessage[];
+  modelContextMessages?: SessionMessage[];
   gateway?: ReturnType<typeof createLabModelGateway>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   hooksTrusted?: boolean;
   eventOptions?: Record<string, unknown>;
 } = {}) {
-  const assistantContent = data.content.length > 0
-    ? data.content
-    : [{ type: "text", text: fallbackText }];
-  const assistantMessage: SessionMessage = {
-    role: "assistant",
-    content: assistantContent
-  };
   const thinking = normalizeAssistantThinking(options.thinking);
+  const modelContent = Array.isArray(data.content) ? data.content : [];
+  const contextAssistant: SessionMessage = {
+    role: "assistant",
+    content: modelContent
+  };
   if (thinking) {
-    assistantMessage.thinking = thinking;
+    contextAssistant.thinking = thinking;
+  }
+  if (Array.isArray(data.toolCalls) && data.toolCalls.length > 0) {
+    contextAssistant.toolCalls = data.toolCalls;
+  }
+
+  const transcriptAssistant: SessionMessage = {
+    role: "assistant",
+    content: modelContent.length > 0 ? modelContent : [{ type: "text", text: fallbackText }]
+  };
+  if (thinking) {
+    transcriptAssistant.thinking = thinking;
   }
 
   const turnMessages = Array.isArray(options.turnMessages) ? options.turnMessages : [];
   const transcriptMessages = Array.isArray(options.transcriptMessages) ? options.transcriptMessages : turnMessages;
-  session.messages.push(...turnMessages, assistantMessage);
-  appendTranscriptMessages(session, [...transcriptMessages, assistantMessage]);
-  appendModelContextArchiveMessages(session, [...turnMessages, assistantMessage]);
+  const thinkingProcessText = String(options.thinkingProcess ?? "").trim();
+  const thinkingProcessMessage: SessionMessage[] = thinkingProcessText
+    ? [{
+        role: "assistant",
+        thinkingProcess: true,
+        content: [{ type: "text", text: thinkingProcessText }]
+      }]
+    : [];
+  session.messages = Array.isArray(options.modelContextMessages)
+    ? persistableContextMessages(mergePersistableImageSummaries(
+      [...options.modelContextMessages, contextAssistant],
+      turnMessages
+    ))
+    : [...session.messages, ...turnMessages, contextAssistant];
+  appendTranscriptMessages(session, [...transcriptMessages, ...thinkingProcessMessage, transcriptAssistant]);
+  appendModelContextArchiveMessages(session, [...turnMessages, contextAssistant]);
 
   return compactSessionContextWithModel(session, {
     reason: "automatic",
@@ -227,6 +254,63 @@ export async function appendSessionMessages(session: AgentSession, data: import(
  */
 
 
+const VISIBLE_FAILED_TURN_STATUSES = new Set([
+  "blocked",
+  "context_overflow",
+  "error",
+  "failed",
+  "gateway_error",
+  "gateway_not_configured",
+  "tool_limit",
+  "unexpected_loop_end",
+  "vision_error",
+  "vision_unavailable"
+]);
+
+export function ensureVisibleFailedTurnTranscript(session: AgentSession, options: { prompt?: unknown; output?: unknown } = {}) {
+  const userText = String(options.prompt ?? "").trim();
+  const errorText = String(options.output ?? "").trim();
+  if (!userText && !errorText) {
+    return;
+  }
+  const messages = Array.isArray(session.transcriptMessages) ? session.transcriptMessages : [];
+  const lastUser = [...messages].reverse().find((message) => message?.role === "user");
+  const lastText = transcriptMessageText(messages.at(-1));
+  const toAdd: SessionMessage[] = [];
+  if (userText && transcriptMessageText(lastUser) !== userText) {
+    toAdd.push({ role: "user", content: userText });
+  }
+  const trailingText = toAdd.length > 0 ? transcriptMessageText(toAdd.at(-1)) : lastText;
+  if (errorText && trailingText !== errorText) {
+    toAdd.push({ role: "assistant", content: errorText });
+  }
+  if (toAdd.length > 0) {
+    appendTranscriptMessages(session, toAdd);
+  }
+}
+
+function transcriptMessageText(message: SessionMessage | undefined) {
+  if (!message) {
+    return "";
+  }
+  const content = message.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((item) => {
+    if (typeof item === "string") {
+      return item;
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return String(item.text ?? "");
+    }
+    return "";
+  }).filter(Boolean).join("\n").trim();
+}
+
 /**
  * @param {ReturnType<typeof createSessionStore>} store
  * @param {Record<string, any>} metadata
@@ -236,12 +320,19 @@ export async function appendSessionMessages(session: AgentSession, data: import(
  */
 export async function persistSessionMetadata(store: ReturnType<typeof createSessionStore>, metadata: Record<string, unknown>, output: string, status: string, session: AgentSession, options: Record<string, unknown> = {}) {
   metadata.status = status;
+  if (VISIBLE_FAILED_TURN_STATUSES.has(String(status ?? "").trim().toLowerCase())) {
+    ensureVisibleFailedTurnTranscript(session, {
+      prompt: metadata.prompt,
+      output
+    });
+  }
   metadata.finishedAt = new Date().toISOString();
   metadata.outputBytes = Buffer.byteLength(output, "utf8");
   const usage = normalizeProviderUsageAggregate(session.usage);
   metadata.usage = usage;
   metadata.lastProviderUsage = usage.last ?? null;
   metadata.workflow = summarizeWorkflow(session.workflow);
+  metadata.artifacts = serializeExhibitArtifacts(session.cwd, session.workflow?.changes);
   metadata.context = summarizeContextWindow(session);
   metadata.goal = serializeSessionGoal(session.goal);
   metadata.permissionMode = session.permissionMode;
@@ -249,6 +340,10 @@ export async function persistSessionMetadata(store: ReturnType<typeof createSess
   metadata.readonly = session.readonly;
   metadata.allowWrite = session.allowWrite;
   metadata.allowCommand = session.allowCommand;
+  metadata.title = session.title ?? metadata.title ?? null;
+  if (session.titleSource) {
+    metadata.titleSource = session.titleSource;
+  }
   const committed = await commitSessionSnapshot(store, metadata, session);
   Object.assign(metadata, committed.metadata);
   const metadataPath = committed.metadataPath;
@@ -300,6 +395,9 @@ export async function persistSessionSnapshot(session: AgentSession, options: { e
   metadata.mode = session.mode;
   metadata.clientSurface = session.clientSurface;
   metadata.title = session.title ?? null;
+  if (session.titleSource) {
+    metadata.titleSource = session.titleSource;
+  }
   metadata.turnIndex = session.turnCount ?? 0;
   metadata.status = session.goal?.enabled ? session.goal.status : metadata.status;
   metadata.permissionMode = session.permissionMode;
@@ -309,6 +407,7 @@ export async function persistSessionSnapshot(session: AgentSession, options: { e
   metadata.allowCommand = session.allowCommand;
   metadata.context = summarizeContextWindow(session);
   metadata.workflow = summarizeWorkflow(session.workflow);
+  metadata.artifacts = serializeExhibitArtifacts(session.cwd, session.workflow?.changes);
   metadata.goal = serializeSessionGoal(session.goal);
   const committed = await commitSessionSnapshot(store, metadata, session, {
     requireExisting: options.requireExisting !== false
@@ -326,6 +425,7 @@ export function persistableTranscriptMessages(messages: unknown, session: AgentS
   return persistableMessagesWithOptions(messages, {
     includeThinking: true,
     includeToolCalls: false,
+    includeAttachments: true,
     stripGoalStatus: session?.goal?.enabled === true
   });
 }
@@ -345,7 +445,7 @@ export function persistableMessagesWithOptions(messages: unknown, options: Recor
   }
   return messages
     .map((message) => persistableMessage(message, options))
-    .filter(Boolean);
+    .filter((message): message is SessionMessage => Boolean(message));
 }
 
 
@@ -489,6 +589,7 @@ export async function commitSessionSnapshot(store: ReturnType<typeof createSessi
         messages: persistableTranscriptMessages(transcriptMessagesForPersistence(session), session),
         contextMessages: persistableContextMessages(limitResumeContextMessages(session.messages, session.config.context)),
         contextWindow: persistableContextWindow(session.contextWindow),
+        toolSummaries: session.toolSummaries,
         archive: persistableTranscriptArchive(transcriptArchive),
         modelArchive: persistableTranscriptArchive(modelArchive)
       }
@@ -523,7 +624,10 @@ export function refreshSessionModelSelection(session: AgentSession) {
 /** @param {AgentSession} session @returns {Record<string, any>} */
 export function sessionModelMetadata(session: AgentSession): Record<string, unknown> {
   const selection = refreshSessionModelSelection(session);
-  if (selection) return patchSessionModelSelectionMetadata({}, selection as Record<string, unknown>);
+  const routing = typeof session.gatewaySessionAffinity === "string" && session.gatewaySessionAffinity.trim()
+    ? { gatewaySessionAffinity: session.gatewaySessionAffinity.trim() }
+    : {};
+  if (selection) return patchSessionModelSelectionMetadata(routing, selection as Record<string, unknown>);
   if (session.config?.configV2?.enabled === true) {
     throw new SessionModelSelectionUnresolvedError({
       reason: "invalid-runtime-selection",
@@ -532,6 +636,7 @@ export function sessionModelMetadata(session: AgentSession): Record<string, unkn
     });
   }
   return {
+    ...routing,
     metadataVersion: 1,
     model: String(session.model ?? ""),
     reasoningEffort: typeof session.config?.reasoningEffort === "string"
@@ -681,6 +786,9 @@ export function persistableMessage(message: unknown, options: Record<string, unk
   if (message.interruptedDraft === true) {
     persisted.interruptedDraft = true;
   }
+  if (message.thinkingProcess === true) {
+    persisted.thinkingProcess = true;
+  }
   const thinking = options.includeThinking === false ? null : role === "assistant" ? persistableThinking(message.thinking) : null;
   if (thinking) {
     persisted.thinking = thinking;
@@ -698,6 +806,12 @@ export function persistableMessage(message: unknown, options: Record<string, unk
     }
     if (typeof message.name === "string" && message.name) {
       persisted.name = message.name;
+    }
+  }
+  if (options.includeAttachments === true && role === "user") {
+    const chips = persistableAttachmentChips(message.attachments);
+    if (chips && chips.length > 0) {
+      persisted.attachments = chips;
     }
   }
   return persisted;

@@ -1,6 +1,6 @@
 {
   "name": "@ant-code/cli",
-  "version": "2.0.5-taxamask.1",
+  "version": "2.0.24-taxamask.1",
   "description": "First-party Ant-Code Agent Center runtime embedded by TaxaMask.",
   "type": "module",
   "private": true,
@@ -37,18 +37,20 @@
     "node": ">=22.18"
   },
   "dependencies": {
+    "@napi-rs/canvas": "1.0.9",
     "@vscode/ripgrep": "1.18.0",
     "ink": "^6.8.0",
     "katex": "^0.16.46",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.17.2",
     "react": "^19.2.5",
     "typescript": "6.0.3",
+    "unpdf": "^1.8.1",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "20.19.43",
     "axe-core": "4.12.1",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.2",
     "playwright-core": "1.61.1",
     "postject": "^1.0.0-alpha.6"
   }

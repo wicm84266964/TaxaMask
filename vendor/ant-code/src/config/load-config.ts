@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { applySourceCredentials } from "./source-credentials.ts";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -209,6 +210,7 @@ export async function loadConfig(options: { cwd?: string; env?: NodeJS.ProcessEn
     gatewayMaxResponseBytes: parseOptionalInteger(env.LAB_MODEL_GATEWAY_MAX_RESPONSE_BYTES, integerOr(hardenedLab.gatewayMaxResponseBytes, DEFAULT_GATEWAY_MAX_RESPONSE_BYTES)),
     activeGatewayProfile: activeProfile?.id ?? "",
     gatewayProfiles: resolvedProfiles,
+    sourceCredentialSelections: isPlainObject(hardenedLab.sourceCredentialSelections) ? hardenedLab.sourceCredentialSelections : {},
     configPath: lab ? labConfigReadPath : explicitLabConfigPath ? labConfigPath : null
   };
   validateLabConfig(finalLab);
@@ -256,7 +258,7 @@ export async function loadConfig(options: { cwd?: string; env?: NodeJS.ProcessEn
       provenance: undefined,
       resolved: null
     }) as LabAgentConfig["configV2"];
-  return {
+  return applySourceCredentials({
     ...hardened,
     lab: labWithSources,
     defaultModelAlias: typeof hardened.modelAlias === "string" ? hardened.modelAlias : "",
@@ -266,7 +268,7 @@ export async function loadConfig(options: { cwd?: string; env?: NodeJS.ProcessEn
     globalConfigPath: labConfigPath,
     configSources,
     configV2: configV2State
-  } as LabAgentConfig;
+  } as LabAgentConfig);
 }
 
 /**
@@ -432,6 +434,12 @@ export async function loadConfigV2Runtime({ cwd, env, readGlobal }: { cwd: strin
     ? projectionLab.gatewayProfiles.filter(isPlainObject)
     : [];
   await Promise.all(profiles.map(async (profile) => {
+    if (profile.gatewayCredentialMode === "ambient") {
+      const { officialSourceApiKey } = await import("../model-gateway/official-sources.ts");
+      const secret = officialSourceApiKey(String(profile.id ?? ""), env);
+      if (secret) profile.gatewayApiKey = secret;
+      return;
+    }
     if (profile.gatewayCredentialMode !== "credential" || typeof profile.gatewayCredentialRef !== "string") return;
     const secret = await credentialStore.resolve(profile.gatewayCredentialRef);
     if (secret) profile.gatewayApiKey = secret;

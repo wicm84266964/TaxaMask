@@ -6,7 +6,7 @@ Ant-Code is part of the TaxaMask source release, not a third-party dependency. T
 
 ## Versioning
 
-The embedded runtime version label follows the Ant-Code formal release line. This copy tracks standalone Ant Code 2.0 TypeScript (`2.0.5-taxamask.1`): the upstream version plus TaxaMask host adaptations. An unmodified synchronization uses the upstream version directly, such as `2.0.5`. If TaxaMask carries embedded-only adaptations on top of that release line, it uses `<upstream version>-taxamask.<N>`. The suffix counts only TaxaMask-specific changes and resets to `.1` when the upstream release label changes. Version-label updates and source synchronization are separate reviewed operations; the label alone must not be treated as proof that every upstream bug fix is present. The embedded version is independent of the TaxaMask application version. Node.js 22.18+ is required. The CLI entry is `src/cli/index.ts`.
+The embedded runtime version label follows the Ant-Code formal release line. This copy tracks standalone Ant Code 2.0 TypeScript (`2.0.24-taxamask.1`): the upstream version plus TaxaMask host adaptations. An unmodified synchronization uses the upstream version directly, such as `2.0.5`. If TaxaMask carries embedded-only adaptations on top of that release line, it uses `<upstream version>-taxamask.<N>`. The suffix counts only TaxaMask-specific changes and resets to `.1` when the upstream release label changes. Version-label updates and source synchronization are separate reviewed operations; the label alone must not be treated as proof that every upstream bug fix is present. The embedded version is independent of the TaxaMask application version. Node.js 22.18+ is required. The CLI entry is `src/cli/index.ts`.
 
 
 ## What Is Included

@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
-import { realpathSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { parseDocumentBufferAsync } from "../tools/document-tools.ts";
+import { COMPOSER_UPLOAD_DIR } from "../tools/composer-documents.ts";
+import { extractCandidatePaths } from "../tools/artifacts.ts";
 
 const DATA_EXTENSIONS = new Set([".json", ".csv", ".tsv", ".yaml", ".yml"]);
 const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".csv", ".tsv", ".md", ".markdown", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".yaml", ".yml", ".py", ".ps1", ".cmd", ".sh", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".php", ".rb", ".sql", ".toml", ".ini"]);
@@ -9,6 +11,11 @@ const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const PREVIEWABLE_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS;
 const OFFICE_EXTENSIONS = new Set([".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]);
 const PREVIEWABLE_OFFICE_EXTENSIONS = new Set([".docx", ".xlsx", ".pptx"]);
+const SYSTEM_OPEN_EXTENSIONS = new Set([
+  ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
+  ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".html",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp"
+]);
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_RAW_BYTES = 20 * 1024 * 1024;
 const MAX_OFFICE_BYTES = 10 * 1024 * 1024;
@@ -17,7 +24,7 @@ const MAX_TABLE_ROWS = 500;
 const MAX_TABLE_COLUMNS = 80;
 const MAX_TABLE_TEXT_BYTES = 1024 * 1024;
 
-type WorkspaceFailure = { ok: false; status: number; error: string };
+type WorkspaceFailure = { ok: false; status: number; error: string; code?: string };
 type WorkspaceResolved = { ok: true; path: string; root: string };
 type WorkspaceOpened = {
   ok: true;
@@ -311,7 +318,7 @@ export async function readRawFile(cwd: string, requestedPath: string) {
  * @param {Record<string, any>} session
  * @param {string} finalOutput
  */
-export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown } = {}, finalOutput: string = "") {
+export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown; artifacts?: unknown } = {}, finalOutput: string = "") {
   const cwd = typeof session?.cwd === "string" ? session.cwd : process.cwd();
   const items: SessionFileItem[] = [];
   const workflow = session?.workflow && typeof session.workflow === "object" ? session.workflow as { changes?: unknown } : {};
@@ -323,10 +330,56 @@ export function collectSessionFiles(session: { cwd?: unknown; workflow?: unknown
       toolName: record.toolName ?? null
     });
   }
+  const persisted = Array.isArray(session?.artifacts) ? session.artifacts : [];
+  for (const artifact of persisted) {
+    const record = isRecord(artifact) ? artifact : {};
+    addFile(items, cwd, record.relativePath ?? record.path, {
+      source: typeof record.source === "string" ? record.source : "created"
+    });
+  }
   for (const candidate of extractPaths(finalOutput)) {
     addFile(items, cwd, candidate, { source: "mentioned" });
   }
+  addComposerUploads(items, cwd);
   return dedupeFiles(items);
+}
+
+function addComposerUploads(items: SessionFileItem[], cwd: string) {
+  const dir = path.join(path.resolve(cwd), COMPOSER_UPLOAD_DIR);
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    addFile(items, cwd, path.join(COMPOSER_UPLOAD_DIR, name), { source: "attached" });
+  }
+}
+
+/**
+ * @param {string} cwd
+ * @param {string} requestedPath
+ */
+export async function resolveSystemOpenFile(cwd: string, requestedPath: string): Promise<WorkspaceFailure | WorkspaceResolved> {
+  const resolved = resolveWorkspaceFile(cwd, requestedPath);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  let stat;
+  try {
+    stat = await fs.stat(resolved.path);
+  } catch {
+    return { ok: false, status: 404, error: "文件不存在或无法读取" };
+  }
+  if (!stat.isFile()) {
+    return { ok: false, status: 404, error: "文件不存在或不是普通文件" };
+  }
+  const ext = path.extname(resolved.path).toLowerCase();
+  if (!SYSTEM_OPEN_EXTENSIONS.has(ext)) {
+    return { ok: false, status: 403, code: "FILE_OPEN_NOT_ALLOWED", error: "此类型不能用系统应用打开" };
+  }
+  return resolved;
 }
 
 /**
@@ -481,8 +534,7 @@ function fileKindForTextExtension(ext: string) {
 }
 
 function extractPaths(text: string) {
-  const matches = String(text ?? "").match(/(?:[A-Za-z]:[\\/][^\s"'<>|]+|(?:\.{1,2}[\\/])?[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})/g);
-  return matches ?? [];
+  return extractCandidatePaths(text);
 }
 
 function addFile(items: SessionFileItem[], cwd: string, target: unknown, meta: Partial<SessionFileItem> = {}) {

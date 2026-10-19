@@ -61,6 +61,8 @@ export type TuiRunPromptInput = string | {
 };
 
 export type TuiRuntimeEvent = {
+  beforeTokens?: number;
+  afterTokens?: number;
   type?: string;
   kind?: string;
   turnIndex?: number;
@@ -95,6 +97,8 @@ export type TuiRuntimeEvent = {
   truncated?: boolean;
   error?: TuiGatewayError;
   stage?: string;
+  pageEnd?: number;
+  totalPages?: number;
   attempt?: number;
   maxAttempts?: number;
   delayMs?: number;

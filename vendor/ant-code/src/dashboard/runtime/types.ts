@@ -83,8 +83,11 @@ export const TURN_REQUEST_TTL_MS = 5 * 60 * 1000;
 export const MAX_TURN_REQUESTS = 1_000;
 export const MAX_PROMPT_BYTES = 256 * 1024;
 export const MAX_TURN_IMAGES = 6;
+export const MAX_TURN_DOCUMENTS = 4;
+export const MAX_TURN_ATTACHMENTS = 10;
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
+export const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
 export const RETENTION_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const SENSITIVE_GATEWAY_QUERY_KEYS = new Set(["access_token", "api_key", "key", "token", "authorization"]);
 export const INVALID_REASONING_EFFORT_PROBE = "antcode_invalid_effort_probe";
@@ -204,6 +207,7 @@ export type DashboardActiveSessionState = {
   currentAttachmentBytes: number;
   currentTranscriptStart: number;
   currentPermissionMode: string;
+  unattendedSchedule?: boolean;
   turnEnv: NodeJS.ProcessEnv | null;
   turnChangeStats: DashboardChangeStats;
   queuedPrompts: DashboardQueueItem[];
@@ -215,10 +219,12 @@ export type DashboardActiveSessionState = {
   pendingApprovals: Map<unknown, DashboardPendingApproval>;
   pendingQuestions: Map<unknown, DashboardPendingQuestion>;
   finalOutput: string;
+  lastArtifactFingerprint: string;
   backgroundSnapshotTimer: ReturnType<typeof setInterval> | NodeJS.Timeout | null;
   backgroundSnapshotDirty: boolean;
   backgroundSnapshotPromise: Promise<unknown> | null;
   hooksTrusted: boolean;
+  sessionTitleGeneration?: AbortController;
 };
 
 export class ActiveSessionMap extends Map<string, DashboardActiveSessionState> {
@@ -541,6 +547,7 @@ export type ReasoningProbeInput = {
   warnings?: unknown;
   negativeControl?: unknown;
   efforts?: unknown;
+  supportsReasoning?: boolean | null;
   failure?: { message?: string; kind?: string };
 };
 

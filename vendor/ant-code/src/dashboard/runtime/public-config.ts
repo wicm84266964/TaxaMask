@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
+import { sourceCredentialState } from "../../config/source-credentials.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -42,7 +44,8 @@ import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEffor
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
-  reasoningProbeEffortIds
+  reasoningProbeEffortIds,
+  selectableReasoningEffortIds
 } from "../../model-gateway/reasoning-capabilities.ts";
 import { resolveWorkspaceTrust, trustWorkspace as saveWorkspaceTrust } from "../../permissions/workspace-trust.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
@@ -104,7 +107,7 @@ export function modelOptions(config: LabAgentConfig) {
 
 /** @param {Record<string, any>} model @param {string} currentModelId @param {string} defaultModelId @param {Record<string, any>} sources @param {Record<string, any>} options */
 export function publicModelOption(model: LabModel, currentModelId: string = "", defaultModelId: string = "", sources: { modelAlias?: unknown; models?: unknown } = {}, options: { reasoningEffort?: unknown; source?: unknown } = {}) {
-  const reasoningEfforts = normalizeReasoningEfforts(model.reasoningEfforts);
+  const reasoningEfforts = normalizeReasoningEfforts(selectableReasoningEffortIds(model.id, model.reasoningEfforts));
   const selectedReasoningEffort = resolveReasoningEffortSelection(
     { ...model, reasoningEfforts },
     options.reasoningEffort,
@@ -177,9 +180,7 @@ export function publicDashboardSettings(config: LabAgentConfig, env: NodeJS.Proc
   return {
     transcript: {
       enabled: transcript.enabled !== false,
-      retentionDays: transcript.retentionDays === null
-        ? null
-        : Number.isFinite(transcript.retentionDays) ? transcript.retentionDays : 30,
+      retentionDays: resolveTranscriptRetentionDays(transcript.retentionDays),
       encryption: ["off", "optional", "required"].includes(transcript.encryption) ? transcript.encryption : "off",
       encryptionKeyConfigured: Boolean(String(env.LAB_AGENT_TRANSCRIPT_KEY ?? "").trim())
     },
@@ -218,7 +219,13 @@ export function publicDashboardSettings(config: LabAgentConfig, env: NodeJS.Proc
 
 export function publicGatewayProfiles(config: LabAgentConfig) {
   const active = activeGatewayProfileId(config);
+  // Compare credentials only on the server. Expose a representative profile
+  // ID, never the credential or a credential-derived fingerprint.
+  const groups = new Map<string, string>();
+  const credentialSelections = sourceCredentialState(config);
   return gatewayProfilesFromConfig(config).map((profile) => {
+    const connection = String(profile.gatewayUrl || profile.id);
+    if (!groups.has(connection)) groups.set(connection, profile.id);
     const owner = gatewayProfileOwner(config, profile.id);
     const ownerScope = String(owner?.type ?? "").trim();
     const profileConfig = {
@@ -238,6 +245,9 @@ export function publicGatewayProfiles(config: LabAgentConfig) {
     ));
     return {
       id: profile.id,
+      connectionGroupId: groups.get(connection),
+      activeCredentialProfileId: credentialSelections[profile.gatewayUrl] ?? "",
+      credentialSelectionRequired: !credentialSelections[profile.gatewayUrl],
       label: profile.label || profile.id,
       gatewayUrl: publicGatewayUrl(profile.gatewayUrl),
       gatewayHealthUrl: publicGatewayUrl(profile.gatewayHealthUrl),
@@ -325,6 +335,25 @@ export function publicGatewaySource(profile: Record<string, unknown> | null | un
 
 export function publicAgentModelTiers(config: LabAgentConfig) {
   return normalizeAgentModelTiers(config.agents?.modelTiers);
+}
+
+export function publicAgentRouting(config: LabAgentConfig) {
+  const agents = config.agents as { modelSelections?: Record<string, unknown>; vision?: { selection?: unknown } } | undefined;
+  const selections = agents?.modelSelections ?? {};
+  return {
+    cheap: agentRoute(selections.cheap),
+    default: agentRoute(selections.default),
+    strong: agentRoute(selections.strong),
+    vision: agentRoute(agents?.vision?.selection)
+  };
+}
+
+function agentRoute(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const record = value as { provider?: unknown; model?: unknown };
+  const provider = String(record.provider ?? "").trim();
+  const model = String(record.model ?? "").trim();
+  return provider && model ? { provider, model } : null;
 }
 
 

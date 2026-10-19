@@ -1,3 +1,4 @@
+import { resetPromptRail } from "./prompt-rail.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
@@ -68,6 +69,68 @@ export function renderShutdownActivity() {
   els.shutdownConfirm.textContent = activity.total > 0 ? "取消任务并关闭" : "确认关闭";
 }
 
+const EXHIBIT_FILE_KINDS = new Set([
+  "image",
+  "pdf",
+  "office-preview",
+  "office",
+  "markdown",
+  "table-preview",
+  "data"
+]);
+const EXHIBIT_TEXT_EXTENSIONS = new Set(["txt", "log", "html", "htm"]);
+
+export function isExhibitFile(file: DashboardFile | null | undefined) {
+  if (!file?.relativePath) {
+    return false;
+  }
+  const kind = String(file.kind ?? "");
+  if (EXHIBIT_FILE_KINDS.has(kind)) {
+    return true;
+  }
+  if (kind !== "text") {
+    return false;
+  }
+  const name = String(file.relativePath ?? file.name ?? "");
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  return EXHIBIT_TEXT_EXTENSIONS.has(ext);
+}
+
+export function pickExhibitFile(
+  files: DashboardFile[] | null | undefined,
+  options: { previousPaths?: Array<string | null | undefined>; force?: boolean } = {}
+) {
+  const previous = new Set(
+    (options.previousPaths ?? []).map((value) => String(value ?? "").replace(/\\/g, "/").toLowerCase()).filter(Boolean)
+  );
+  const items = (Array.isArray(files) ? files : []).filter(isExhibitFile);
+  const fresh = items.filter((file) => !previous.has(String(file.relativePath ?? "").replace(/\\/g, "/").toLowerCase()));
+  const pool = fresh.length > 0 ? fresh : (options.force === true ? items : []);
+  return pool.at(-1) ?? null;
+}
+
+export function applySessionFiles(files: DashboardFile[] | null | undefined, options: { exhibit?: boolean; force?: boolean } = {}) {
+  const previousPaths = state.files.map((file) => file.relativePath);
+  state.files = Array.isArray(files) ? files : [];
+  renderFiles();
+  if (options.exhibit === false) {
+    return;
+  }
+  const next = pickExhibitFile(state.files, {
+    previousPaths,
+    force: options.force === true || !state.previewPath
+  });
+  if (next?.relativePath && next.relativePath !== state.previewPath) {
+    void openFile(next.relativePath);
+    return;
+  }
+  if (!state.previewPath) {
+    resetPreview();
+    return;
+  }
+  syncFileListSelection();
+}
+
 export function renderFiles() {
   els.fileList.innerHTML = "";
   if (state.files.length === 0) {
@@ -81,13 +144,24 @@ export function renderFiles() {
     const item = document.createElement("button");
     item.type = "button";
     item.className = "file-item";
+    item.dataset.file = file.relativePath ?? "";
     item.innerHTML = `
       <div class="file-name">${escapeHtml(file.name)}</div>
       <div class="file-meta">${escapeHtml(file.kind)} · ${escapeHtml(file.source ?? "file")}</div>
     `;
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
     item.addEventListener("click", () => openFile(file.relativePath));
     els.fileList.append(item);
   }
+}
+
+export function syncFileListSelection() {
+  els.fileList.querySelectorAll(".file-item").forEach((item) => {
+    if (!(item instanceof HTMLElement)) {
+      return;
+    }
+    item.classList.toggle("active", Boolean(state.previewPath) && item.dataset.file === state.previewPath);
+  });
 }
 
 export function currentImageFiles() {
@@ -102,6 +176,8 @@ export function currentImageFiles() {
 
 export async function openFile(filePath: string | null | undefined) {
   if (!filePath) return;
+  state.previewPath = filePath;
+  syncFileListSelection();
   const sessionId = state.currentSessionId;
   const request = beginScopedRequest("file", `${sessionId ?? "new"}:${filePath}`);
   els.previewBody.className = "preview-body";
@@ -133,14 +209,28 @@ export async function openFile(filePath: string | null | undefined) {
       showImageLightbox(file, images.length ? images : [file], index);
     });
   } else if (file.kind === "pdf") {
-    els.previewBody.innerHTML = `<iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>`;
+    els.previewBody.classList.add("document-preview-body");
+    els.previewBody.innerHTML = `
+      <div class="pdf-preview">
+        <header class="office-preview-header">
+          <div>
+            <strong>${escapeHtml(file.name)}</strong>
+            <span>PDF 预览</span>
+          </div>
+          ${localOpenButtonHtml(file.relativePath)}
+        </header>
+        <iframe class="preview-frame" title="${escapeHtml(file.name)}" src="${file.rawUrl}"></iframe>
+      </div>
+    `;
   } else if (file.kind === "office-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderOfficePreview(file));
   } else if (file.kind === "table-preview") {
     els.previewBody.classList.add("document-preview-body");
     els.previewBody.replaceChildren(renderTablePreview(file));
-  } else if (file.kind === "office" || file.kind === "binary" || file.kind === "download") {
+  } else if (file.kind === "office") {
+    els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p>${localOpenButtonHtml(file.relativePath)}</div>`;
+  } else if (file.kind === "binary" || file.kind === "download") {
     const download = file.downloadOnly ? ` download="${escapeHtml(file.name)}"` : "";
     const target = file.downloadOnly ? "" : ` target="_blank"`;
     els.previewBody.innerHTML = `<div class="office-card"><strong>${escapeHtml(file.name)}</strong><p>${escapeHtml(file.message ?? "此文件第一版不直接预览。")}</p><p>${escapeHtml(file.relativePath)}</p><a class="open-file" href="${file.rawUrl}"${download}${target} rel="noopener noreferrer">${file.downloadOnly ? "下载文件" : "打开文件"}</a></div>`;
@@ -166,6 +256,50 @@ export async function openFile(filePath: string | null | undefined) {
   }
 }
 
+export function localOpenButtonHtml(relativePath: string | null | undefined) {
+  return `<button type="button" class="open-file" data-open-local="${escapeAttribute(relativePath ?? "")}" title="用系统应用打开">打开</button>`;
+}
+
+export function handleLocalFileOpenClick(event: Event) {
+  const button = eventTargetOf(event).closest("[data-open-local]");
+  if (!(button instanceof HTMLElement)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  void openLocalFile(button.getAttribute("data-open-local") ?? "", button);
+}
+
+export async function openLocalFile(filePath: string, button: HTMLElement | null = null) {
+  const relativePath = String(filePath ?? "").trim();
+  if (!relativePath) {
+    showError("没有可打开的本地文件路径");
+    return;
+  }
+  const label = button?.textContent ?? "打开";
+  if (button) {
+    button.setAttribute("disabled", "true");
+    button.textContent = "正在打开…";
+  }
+  try {
+    const result = await postJson("/api/files/open", {
+      path: relativePath,
+      sessionId: state.currentSessionId ?? ""
+    }).catch((error: unknown): DashboardApiResult => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    }));
+    if (!result.ok) {
+      showError(result.error ?? "无法打开本地文件");
+    }
+  } finally {
+    if (button) {
+      button.removeAttribute("disabled");
+      button.textContent = label;
+    }
+  }
+}
+
 export function renderOfficePreview(file: DashboardFile) {
   if (file.table) {
     return renderTablePreview(file);
@@ -175,14 +309,13 @@ export function renderOfficePreview(file: DashboardFile) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 轻量预览`);
   const meta = officePreviewMeta(file);
-  const openHref = file.rawUrl ?? rawFileUrl(file.relativePath);
   article.innerHTML = `
     <header class="office-preview-header">
       <div>
         <strong>${escapeHtml(file.name)}</strong>
         <span>${escapeHtml(meta)}</span>
       </div>
-      <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+      ${localOpenButtonHtml(file.relativePath)}
     </header>
     ${officePreviewBodyHtml(file)}
     ${file.truncated ? `<div class="office-preview-note">仅显示前 ${formatNumber(file.content?.length ?? 0)} 字符，完整内容请打开文件。</div>` : ""}
@@ -211,7 +344,6 @@ export function renderTablePreview(file: DashboardFile) {
   article.tabIndex = 0;
   article.setAttribute("aria-label", `${file.name} 表格预览`);
   const table = normalizeTablePreview(file.table);
-  const openHref = file.rawUrl ?? rawFileUrl(file.relativePath);
   const meta = tablePreviewMeta(file, table);
   article.innerHTML = `
     <header class="office-preview-header">
@@ -221,7 +353,7 @@ export function renderTablePreview(file: DashboardFile) {
       </div>
       <div class="office-preview-actions">
         <button class="open-file table-expand-button" type="button">放大</button>
-        <a class="open-file" href="${openHref}" target="_blank" rel="noreferrer">打开</a>
+        ${localOpenButtonHtml(file.relativePath)}
       </div>
     </header>
     <div class="table-preview-button" role="button" tabindex="0" aria-label="放大查看 ${escapeHtml(file.name)}">
@@ -386,8 +518,10 @@ export function renderSheetCellHtml(line: unknown) {
 }
 
 export function resetPreview(message: string = "任务产物会显示在这里") {
+  state.previewPath = "";
   els.previewBody.className = "preview-body";
   els.previewBody.innerHTML = `<div class="preview-placeholder">${escapeHtml(message)}</div>`;
+  syncFileListSelection();
 }
 
 export function fencedDataForFile(file: DashboardFile) {
@@ -511,6 +645,7 @@ export function setPermissionMode(mode: string | undefined) {
 
 export function clearTranscript() {
   cancelTranscriptAnimationFrames();
+  resetPromptRail();
   resetTranscriptWindow();
   els.transcript.innerHTML = "";
   state.transcriptHistoryNode = null;
@@ -572,8 +707,43 @@ export function showNotice(message: string, detail: unknown = "本地配置已�
   });
 }
 
+const PROJECT_PATH_PLACEHOLDERS = new Set(["", "加载中", "正在连接", "配置错误", "服务异常", "连接失败"]);
+
+export function setProjectPath(text: string) {
+  const value = String(text ?? "");
+  if (els.projectPath) {
+    els.projectPath.textContent = value;
+    els.projectPath.title = value;
+  }
+  const button = els.copyProjectPath;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const copyable = value.trim().length > 0 && !PROJECT_PATH_PLACEHOLDERS.has(value.trim());
+  button.disabled = !copyable;
+  button.dataset.path = copyable ? value : "";
+  if (button.textContent === "已复制" || button.textContent === "复制失败") {
+    button.textContent = "复制";
+  }
+}
+
+export async function copyProjectPath() {
+  const button = els.copyProjectPath;
+  const pathText = button instanceof HTMLButtonElement ? button.dataset.path ?? "" : "";
+  if (!pathText) return;
+  try {
+    await navigator.clipboard.writeText(pathText);
+    if (button instanceof HTMLButtonElement) button.textContent = "已复制";
+    announceStatus("项目路径已复制");
+    window.setTimeout(() => {
+      if (button instanceof HTMLButtonElement && button.textContent === "已复制") button.textContent = "复制";
+    }, 1600);
+  } catch {
+    if (button instanceof HTMLButtonElement) button.textContent = "复制失败";
+    announceStatus("复制项目路径失败");
+  }
+}
+
 export function renderBootstrapLoading() {
-  els.projectPath.textContent = "正在连接";
+  setProjectPath("正在连接");
   els.runStatus.textContent = "连接中";
   els.sendButton.disabled = true;
   setConnectionState("connecting");
@@ -582,7 +752,7 @@ export function renderBootstrapLoading() {
 export function renderBootstrapFailure(error: unknown) {
   const failure = bootstrapFailurePresentation(error, navigator.onLine !== false);
   setConnectionState(failure.connectionState);
-  els.projectPath.textContent = failure.projectLabel;
+  setProjectPath(failure.projectLabel);
   els.runStatus.textContent = "初始化失败";
   els.sendButton.disabled = true;
   cancelTranscriptAnimationFrames();
@@ -888,8 +1058,10 @@ export function messageDisplayText(content: unknown) {
 
 export function userMessageDisplayText(text: string | null | undefined, attachments: unknown = []) {
   const lines = [String(text ?? "").trim()].filter(Boolean);
-  const imageLines = normalizeAttachmentMetadata(attachments).map(imageAttachmentLine);
-  return [...lines, ...imageLines].join("\n");
+  const meta = normalizeAttachmentMetadata(attachments);
+  const imageLines = meta.filter((item) => item.type === "image").map(imageAttachmentLine);
+  const documentLines = meta.filter((item) => item.type === "document").map(documentAttachmentLine);
+  return [...lines, ...documentLines, ...imageLines].join("\n");
 }
 
 export function normalizeAttachmentMetadata(attachments: unknown) {
@@ -897,13 +1069,84 @@ export function normalizeAttachmentMetadata(attachments: unknown) {
     return [];
   }
   return attachments
-    .filter((item) => item && typeof item === "object" && item.type === "image")
+    .filter((item) => item && typeof item === "object" && (item.type === "image" || item.type === "document"))
     .map((item) => ({
-      type: "image",
-      name: String(item.name ?? "image"),
-      mimeType: String(item.mimeType ?? item.mime_type ?? "image"),
-      size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0)
+      type: item.type === "document" ? "document" : "image",
+      name: String(item.name ?? (item.type === "document" ? "document" : "image")),
+      mimeType: String(item.mimeType ?? item.mime_type ?? (item.type === "document" ? "document" : "image")),
+      size: Number.isFinite(Number(item.size)) ? Number(item.size) : Number(item.bytes ?? item.sizeBytes ?? 0),
+      path: String(item.path ?? "").trim()
     }));
+}
+
+export function transcriptMessageAttachments(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const stored = normalizeAttachmentMetadata(record.attachments);
+  if (stored.length > 0) {
+    return stored;
+  }
+  return attachmentsFromPlaceholderText(messageDisplayText(record.content));
+}
+
+export function userTranscriptDisplayText(content: unknown, attachments: unknown = []) {
+  const chips = normalizeAttachmentMetadata(attachments);
+  if (chips.length === 0) {
+    return messageDisplayText(content);
+  }
+  if (typeof content === "string") {
+    return stripAttachmentPlaceholders(content);
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.map((item) => {
+    if (typeof item === "string") {
+      return stripAttachmentPlaceholders(item);
+    }
+    if (item && typeof item === "object" && "text" in item) {
+      return stripAttachmentPlaceholders(String(item.text ?? ""));
+    }
+    return "";
+  }).filter(Boolean).join("\n");
+}
+
+function attachmentsFromPlaceholderText(text: string) {
+  const items: Array<{ type: string; name: string; mimeType: string; size: number; path: string }> = [];
+  const pattern = /\[(文档附件|图片附件)：([^\]]+)\]/g;
+  let match = pattern.exec(text);
+  while (match) {
+    const name = String(match[2] ?? "").split(" · ")[0].trim();
+    if (name) {
+      items.push({
+        type: match[1] === "图片附件" ? "image" : "document",
+        name,
+        mimeType: "",
+        size: 0,
+        path: ""
+      });
+    }
+    match = pattern.exec(text);
+  }
+  return items;
+}
+
+function stripAttachmentPlaceholders(text: string) {
+  return String(text ?? "")
+    .split(/\n/)
+    .filter((line) => {
+      const value = line.trim();
+      return !value.startsWith("[文档附件：") && !value.startsWith("[图片附件：");
+    })
+    .join("\n")
+    .trim();
+}
+
+export function documentAttachmentLine(item: Record<string, unknown>) {
+  const parts = [
+    item.name ? String(item.name) : "document",
+    Number.isFinite(Number(item.size)) && Number(item.size) > 0 ? formatBytes(item.size) : ""
+  ].filter(Boolean);
+  return `[文档附件：${parts.join(" · ")}]`;
 }
 
 export function imageAttachmentLine(item: Record<string, unknown>) {

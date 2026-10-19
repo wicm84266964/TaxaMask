@@ -123,6 +123,15 @@ set "__GLX_VENDOR_LIBRARY_NAME=nvidia"
 if not defined TAXAMASK_QTWEBENGINE_RENDERING set "TAXAMASK_QTWEBENGINE_RENDERING=auto"
 if not defined TAXAMASK_ENABLE_TIF_WORKFLOW set "TAXAMASK_ENABLE_TIF_WORKFLOW=1"
 
+echo Preparing Agent Center Node.js in the Python environment...
+"%PYTHON_EXE%" "%~dp0scripts\ensure_agent_node.py"
+if errorlevel 1 (
+    echo.
+    echo Agent Center Node.js was not prepared. The workbench can still open,
+    echo but the embedded agent needs Node.js 22.18 or newer inside this Python environment.
+    echo.
+)
+
 echo Starting TaxaMask with:
 echo %PYTHON_EXE%
 if defined PYTHON_SOURCE echo Source: %PYTHON_SOURCE%

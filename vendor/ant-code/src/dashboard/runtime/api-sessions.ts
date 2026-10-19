@@ -129,6 +129,7 @@ import {
   deleteDashboardSession,
   hasTranscriptCursor,
   mergeActiveTranscriptPage,
+  includeInterruptedDraftsFromEvents,
   persistedSessionFailure,
   publicBackgroundSnapshot,
   readStoredTranscriptPage,
@@ -197,7 +198,8 @@ export async function runtimeTrustWorkspace(ctx: DashboardFactoryState) {
 export async function runtimeListSessionRecords(ctx: DashboardFactoryState) {
   const configEnv = await ctx.resolveConfigEnv();
   const config = await loadConfig({ cwd: ctx.cwd, env: configEnv });
-  await ctx.maintainSessionRetention(config);
+  // Same cleanup as /api/status: run in the background so session list can render.
+  void ctx.maintainSessionRetention(config);
   const store = createSessionStore({ cwd: ctx.cwd, transcript: config.transcript, env: ctx.runtimeEnv });
   const records = await store.listSessionRecords();
   const persisted = records.map((record) => ({
@@ -247,7 +249,7 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
   const transcriptPage = activeState
     ? mergeActiveTranscriptPage(storedPage, activeState)
     : storedPage;
-  const transcript = transcriptPage.messages;
+  const transcript = includeInterruptedDraftsFromEvents(transcriptPage.messages, activeState);
   const finalText = activeState?.finalOutput || assistantTranscriptText(transcript);
   const snapshotState = activeState ?? createSnapshotReadState(metadata, ctx.cwd);
   const backgroundSnapshot = snapshotState ? await buildBackgroundSubagentSnapshot(snapshotState) : null;
@@ -277,7 +279,8 @@ export async function runtimeReadSession(ctx: DashboardFactoryState, selector: u
       failure: persistedSessionFailure(metadata),
       files: collectSessionFiles({
         cwd: session?.cwd ?? metadata.cwd ?? ctx.cwd,
-        workflow: session?.workflow ?? metadata.workflow ?? null
+        workflow: session?.workflow ?? metadata.workflow ?? null,
+        artifacts: metadata.artifacts ?? session?.artifacts ?? null
       }, finalText),
       workflow: session?.workflow ?? metadata.workflow ?? null,
       backgroundSnapshot: backgroundSnapshot ? publicBackgroundSnapshot(backgroundSnapshot) : null,

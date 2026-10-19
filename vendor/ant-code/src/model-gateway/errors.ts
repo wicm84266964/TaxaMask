@@ -9,7 +9,7 @@ const LABELED_GATEWAY_CREDENTIAL_PATTERN = new RegExp(
  * @param {unknown} error
  * @param {{ code?: string; message?: string; status?: number; details?: Record<string, any>; protocol?: string }} context
  */
-export function normalizeGatewayError(error: unknown, context: { code?: string; message?: string; status?: number; details?: Record<string, unknown>; protocol?: string } = {}) {
+export function normalizeGatewayError(error: unknown, context: { code?: string; message?: string; status?: number; details?: Record<string, unknown>; protocol?: string; canSwitchSourceCredential?: boolean } = {}) {
   const code = context.code ?? inferCode(error);
   const details = redactDetails(context.details ?? {});
   const providerMessage = extractProviderErrorMessage(details);
@@ -19,7 +19,10 @@ export function normalizeGatewayError(error: unknown, context: { code?: string; 
     status: context.status ?? null,
     details,
     providerMessage,
-    diagnostics: gatewayTroubleshootingHints(code, context.status ?? null, context.protocol, { providerMessage }),
+    diagnostics: gatewayTroubleshootingHints(code, context.status ?? null, context.protocol, {
+      providerMessage,
+      canSwitchSourceCredential: context.canSwitchSourceCredential === true
+    }),
     redacted: true
   };
 }
@@ -77,7 +80,7 @@ export function formatGatewayError(error: unknown) {
  * @param {string | undefined} protocol
  * @param {{ providerMessage?: string }} options
  */
-export function gatewayTroubleshootingHints(code: string, status: number | null = null, protocol: string | undefined = undefined, options: { providerMessage?: string } = {}) {
+export function gatewayTroubleshootingHints(code: string, status: number | null = null, protocol: string | undefined = undefined, options: { providerMessage?: string; canSwitchSourceCredential?: boolean } = {}) {
   if (code === "GATEWAY_NOT_CONFIGURED") {
     return [
       "Set LAB_MODEL_GATEWAY_URL to the lab gateway chat endpoint.",
@@ -93,12 +96,14 @@ export function gatewayTroubleshootingHints(code: string, status: number | null 
   if (code === "GATEWAY_HTTP_ERROR") {
     if (isImageUnsupportedMessage(options.providerMessage)) {
       return [
-        "The configured model route rejected image input; this endpoint does not currently expose a vision-capable backend.",
-        "Remove image attachments for this turn, or switch LAB_AGENT_MODEL/modelAlias and LAB_MODEL_GATEWAY_URL to a route that supports image input."
+        "当前主模型不支持视觉。上游拒绝了图片输入。",
+        "可以在这个渠道里配置视觉子智能体，或换成支持看图的主模型后再发送图片。"
       ];
     }
     if (status === 401 || status === 403) {
-      return ["Check lab gateway authentication and user authorization at the gateway service."];
+      return [options.canSwitchSourceCredential === true
+        ? "当前生效凭据不能用。请打开设置，为这个来源切换生效凭据后再试。"
+        : "当前生效凭据不能用。请到设置页检查这份凭据。"];
     }
     if (status === 404) {
       return [

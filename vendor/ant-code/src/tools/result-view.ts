@@ -1,15 +1,13 @@
-import { capToolResultText, DEFAULT_TOOL_RESULT_MAX_BYTES, type SerializedToolResult, type ToolResultValue } from "./result.ts";
+import { capToolResultText, DEFAULT_AGENT_HANDOFF_MAX_BYTES, DEFAULT_TOOL_RESULT_MAX_BYTES, utf8Truncate, type SerializedToolResult, type ToolResultValue } from "./result.ts";
 
-const READ_FILE_VIEW_CHARS = 12_000;
 const SEARCH_VIEW_MATCHES = 40;
 const SEARCH_LINE_CHARS = 200;
-const LIST_VIEW_ENTRIES = 40;
 const SHELL_HEAD_CHARS = 4_000;
 const SHELL_TAIL_CHARS = 4_000;
 const FETCH_EXCERPT_CHARS = 8_000;
 const GIT_EXCERPT_CHARS = 8_000;
 const GENERIC_EXCERPT_CHARS = 8_000;
-const AGENT_OUTPUT_CHARS = 8_000;
+
 const WEB_SEARCH_RESULTS = 8;
 const DIFF_PREVIEW_LINES = 24;
 
@@ -23,9 +21,11 @@ export function formatToolResultForModel(
   execution: ToolResultValue,
   options: { maxBytes?: number; evidence?: Array<{ id?: string; name?: string; bytes?: number }> } = {}
 ): SerializedToolResult {
-  const view = renderToolResultView(String(name ?? "unknown"), execution, options.evidence);
+  const toolName = String(name ?? "unknown");
+  const maxBytes = options.maxBytes ?? (toolName === "agent_run" ? DEFAULT_AGENT_HANDOFF_MAX_BYTES : DEFAULT_TOOL_RESULT_MAX_BYTES);
+  const view = renderToolResultView(toolName, execution, options.evidence, maxBytes);
   return capToolResultText(view.text, {
-    maxBytes: options.maxBytes ?? DEFAULT_TOOL_RESULT_MAX_BYTES,
+    maxBytes,
     truncated: view.truncated
   });
 }
@@ -33,20 +33,33 @@ export function formatToolResultForModel(
 export function renderToolResultView(
   name: string,
   execution: ToolResultValue,
-  evidence: Array<{ id?: string; name?: string; bytes?: number }> = []
+  evidence: Array<{ id?: string; name?: string; bytes?: number }> = [],
+  maxBytes?: number
 ): ViewDraft {
+  const toolName = String(name ?? "unknown");
+  const budget = Number.isInteger(maxBytes) && Number(maxBytes) > 0
+    ? Number(maxBytes)
+    : (toolName === "agent_run" ? DEFAULT_AGENT_HANDOFF_MAX_BYTES : DEFAULT_TOOL_RESULT_MAX_BYTES);
   const result = asRecord(execution?.result);
   const lines = [
-    ...statusLines(name, execution),
-    ...locatorLines(name, execution, result),
+    ...statusLines(toolName, execution),
+    ...locatorLines(toolName, execution, result),
     ...evidenceLines(evidence)
   ];
-  const body = bodyForTool(name, execution, result);
+  const bodyBudget = Math.max(0, budget - Buffer.byteLength(lines.join("\n"), "utf8") - 512 - Buffer.byteLength(stringField(result.systemReminder), "utf8"));
+  const body = bodyForTool(toolName, execution, result, bodyBudget);
   if (body.text) {
     lines.push(body.text);
   }
   if (body.truncated) {
-    lines.push("需要更多内容时再调用同一工具并缩小范围。");
+    if (toolName === "agent_run") {
+      const taskId = stringField(result.taskId) || stringField(execution.taskId);
+      lines.push(taskId
+        ? `完整交接报告在 .lab-agent/tasks/${taskId}.json 的 output 字段。`
+        : "完整交接报告在对应任务记录的 output 字段。");
+    } else {
+      lines.push("需要更多内容时再调用同一工具并缩小范围。");
+    }
   }
   const reminder = stringField(result.systemReminder);
   if (reminder) {
@@ -58,21 +71,30 @@ export function renderToolResultView(
   };
 }
 
-function bodyForTool(name: string, execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
+function bodyForTool(name: string, execution: ToolResultValue, result: Record<string, unknown>, budget: number): ViewDraft {
+  if (name === "tool_result_read" && execution.ok === true) {
+    const content = String(result.content ?? "");
+    const excerpt = new TextDecoder("utf-8").decode(Buffer.from(content).subarray(0, Math.max(0, budget - 180)), { stream: true });
+    const nextOffset = excerpt.length < content.length ? Number(result.offset || 0) + excerpt.length : result.nextOffset;
+    return { text: [
+      `offset=${result.offset ?? 0}${nextOffset != null && excerpt ? ` nextOffset=${nextOffset}` : ""}`,
+      excerpt || (content ? "No content fits; increase maxToolResultBytes before retrying." : "End of tool evidence.")
+    ].join("\n"), truncated: nextOffset != null };
+  }
   if (name === "read_file") {
-    return formatReadFile(result);
+    return formatReadFile(result, budget);
   }
   if (name === "grep" || name === "rg_search" || name === "rg_files_with_matches") {
-    return formatSearch(result);
+    return formatSearch(result, budget);
   }
   if (name === "rg_count") {
     return formatRgCount(result);
   }
   if (name === "glob" || name === "rg_files") {
-    return formatPathList(result, "matches", SEARCH_VIEW_MATCHES);
+    return formatPathList(result, "matches", budget);
   }
   if (name === "list_files") {
-    return formatListFiles(result);
+    return formatListFiles(result, budget);
   }
   if (name === "powershell" || name === "bash") {
     return formatShell(result);
@@ -90,7 +112,7 @@ function bodyForTool(name: string, execution: ToolResultValue, result: Record<st
     return formatWrite(result);
   }
   if (name === "agent_run") {
-    return formatAgent(execution, result);
+    return formatAgent(execution, result, budget);
   }
   if (name === "mcp_call" || name === "mcp_list") {
     return formatMcpList(name, execution, result);
@@ -186,18 +208,45 @@ function evidenceLines(evidence: Array<{ id?: string; name?: string; bytes?: num
   ));
 }
 
-function formatReadFile(result: Record<string, unknown>): ViewDraft {
+function formatReadFile(result: Record<string, unknown>, budget: number): ViewDraft {
   const content = String(result.content ?? "");
   const bytes = Number.isFinite(Number(result.bytesRead))
     ? Number(result.bytesRead)
     : Buffer.byteLength(content, "utf8");
-  const excerpt = headTail(numberLines(content), READ_FILE_VIEW_CHARS / 2, READ_FILE_VIEW_CHARS / 2);
+  const startLine = Math.max(1, Number(result.startLine) || 1);
+  const startColumn = Math.max(1, Number(result.startColumn) || 1);
+  const sourceLines = content ? content.split(/\r\n|\n|\r/) : [];
+  const shown: string[] = [];
+  let remaining = Math.max(0, budget - 180);
+  let nextStartLine: number | null = null;
+  let nextStartColumn: number | null = null;
+  for (const [index, line] of sourceLines.entries()) {
+    const prefix = `${startLine + index}: `;
+    const column = index === 0 ? startColumn : 1;
+    const lineBudget = Math.max(0, remaining - Buffer.byteLength(prefix) - 1);
+    const excerpt = new TextDecoder("utf-8").decode(Buffer.from(line).subarray(0, lineBudget), { stream: true });
+    if (remaining < Buffer.byteLength(prefix) + 1 || excerpt.length < line.length) {
+      if (excerpt) shown.push(prefix + excerpt);
+      nextStartLine = startLine + index;
+      nextStartColumn = column + excerpt.length;
+      break;
+    }
+    shown.push(prefix + line);
+    remaining -= Buffer.byteLength(prefix + line) + 1;
+  }
+  if (nextStartLine === null && result.truncated === true) {
+    nextStartLine = Number(result.nextStartLine) || startLine + Math.max(0, sourceLines.length - 1);
+    nextStartColumn = Number(result.nextStartColumn) || (sourceLines.at(-1)?.length ?? 0) + (sourceLines.length <= 1 ? startColumn : 1);
+  }
+  const truncated = nextStartLine !== null;
   return {
     text: [
-      `bytes=${bytes}${result.truncated === true || excerpt.truncated ? " truncated=true" : ""}`,
-      excerpt.text
+      `bytes=${bytes} startLine=${startLine} startColumn=${startColumn}${truncated ? " truncated=true" : ""}`,
+      truncated && shown.length ? `nextStartLine=${nextStartLine} nextStartColumn=${nextStartColumn}` : "",
+      truncated && !shown.length ? "No content fits the model output budget; increase maxToolResultBytes. Repeating this range will not advance." : "",
+      shown.join("\n")
     ].filter(Boolean).join("\n"),
-    truncated: excerpt.truncated || result.truncated === true
+    truncated
   };
 }
 
@@ -211,22 +260,6 @@ function formatRgCount(result: Record<string, unknown>): ViewDraft {
     ].join("\n"),
     truncated: result.truncated === true
   };
-}
-
-function formatTodoList(execution: ToolResultValue): ViewDraft {
-  const todos = Array.isArray(execution.result) ? execution.result : asArray(asRecord(execution.result).todos);
-  const shown = todos.slice(0, SEARCH_VIEW_MATCHES);
-  const truncated = todos.length > shown.length;
-  const lines = [
-    `todos=${todos.length}${truncated ? " truncated=true" : ""}`,
-    ...shown.map((item) => {
-      const todo = asRecord(item);
-      const status = stringField(todo.status) || "unknown";
-      const content = stringField(todo.content) || stringField(todo.id) || "?";
-      return `- [${status}] ${truncateClean(content, SEARCH_LINE_CHARS)}`;
-    })
-  ];
-  return { text: lines.join("\n"), truncated };
 }
 
 function formatSkillList(execution: ToolResultValue): ViewDraft {
@@ -245,20 +278,30 @@ function formatSkillList(execution: ToolResultValue): ViewDraft {
   return { text: lines.join("\n"), truncated };
 }
 
-function formatSearch(result: Record<string, unknown>): ViewDraft {
-  const matches = asArray(result.matches);
-  const shown = matches.slice(0, SEARCH_VIEW_MATCHES);
-  const truncated = result.truncated === true || matches.length > shown.length;
+function formatTodoList(execution: ToolResultValue): ViewDraft {
+  const todos = Array.isArray(execution.result) ? execution.result : asArray(asRecord(execution.result).todos);
+  const shown = todos.slice(0, SEARCH_VIEW_MATCHES);
+  const truncated = todos.length > shown.length;
   const lines = [
-    `matches=${matches.length}${truncated ? " truncated=true" : ""}`,
-    ...shown.map((item) => formatSearchMatch(item))
+    `todos=${todos.length}${truncated ? " truncated=true" : ""}`,
+    ...shown.map((item) => {
+      const todo = asRecord(item);
+      const status = stringField(todo.status) || "unknown";
+      const content = stringField(todo.content) || stringField(todo.id) || "?";
+      return `- [${status}] ${truncateClean(content, SEARCH_LINE_CHARS)}`;
+    })
   ];
   return { text: lines.join("\n"), truncated };
 }
 
+function formatSearch(result: Record<string, unknown>, budget: number): ViewDraft {
+  const matches = asArray(result.matches ?? result.files);
+  return formatPage(result, matches.map(formatSearchMatch), "matches", budget);
+}
+
 function formatSearchMatch(item: unknown): string {
   if (typeof item === "string") {
-    return `- ${truncateClean(item, SEARCH_LINE_CHARS)}`;
+    return `- ${item}`;
   }
   const record = asRecord(item);
   const pathValue = stringField(record.path) || stringField(record.file);
@@ -267,34 +310,42 @@ function formatSearchMatch(item: unknown): string {
   return `- ${pathValue || "?"}${line != null ? `:${line}` : ""}${text ? ` ${truncateClean(text, SEARCH_LINE_CHARS)}` : ""}`;
 }
 
-function formatPathList(result: Record<string, unknown>, key: string, limit: number): ViewDraft {
+function formatPathList(result: Record<string, unknown>, key: string, budget: number): ViewDraft {
   const matches = asArray(result[key] ?? result.files ?? result.matches).map((item) => (
     typeof item === "string" ? item : stringField(asRecord(item).path) || JSON.stringify(item)
   ));
-  const shown = matches.slice(0, limit);
-  const truncated = result.truncated === true || matches.length > shown.length;
-  return {
-    text: [
-      `${key}=${matches.length}${truncated ? " truncated=true" : ""}`,
-      ...shown.map((item) => `- ${truncateClean(item, SEARCH_LINE_CHARS)}`)
-    ].join("\n"),
-    truncated
-  };
+  return formatPage(result, matches.map((item) => `- ${item}`), key, budget);
 }
 
-function formatListFiles(result: Record<string, unknown>): ViewDraft {
+function formatListFiles(result: Record<string, unknown>, budget: number): ViewDraft {
   const entries = asArray(result.entries);
-  const shown = entries.slice(0, LIST_VIEW_ENTRIES);
-  const truncated = result.truncated === true || entries.length > shown.length;
-  const total = Number.isFinite(Number(result.total)) ? Number(result.total) : entries.length;
+  return formatPage(result, entries.map((item) => {
+    const record = asRecord(item);
+    return `- ${record.type ?? "file"} ${stringField(record.name) || "?"}`;
+  }), "entries", budget);
+}
+
+function formatPage(result: Record<string, unknown>, rows: string[], label: string, budget: number): ViewDraft {
+  const shown: string[] = [];
+  let used = 0;
+  for (const row of rows) {
+    const bytes = Buffer.byteLength(row) + 1;
+    if (used + bytes > Math.max(0, budget - 180)) break;
+    shown.push(row);
+    used += bytes;
+  }
+  const offset = Number(result.offset) || 0;
+  const truncated = shown.length < rows.length || result.truncated === true;
+  const nextOffset = shown.length === 0 && rows.length > 0 ? null : shown.length < rows.length ? offset + shown.length : result.nextOffset;
   return {
     text: [
-      `entries=${shown.length}/${total}${truncated ? " truncated=true" : ""}`,
-      ...shown.map((item) => {
-        const record = asRecord(item);
-        return `- ${record.type ?? "file"} ${stringField(record.name) || "?"}`;
-      })
-    ].join("\n"),
+      `${label}=${rows.length} shown=${shown.length} offset=${offset}${truncated ? " truncated=true" : ""}`,
+      result.total !== undefined ? `total=${result.total}` : "",
+      nextOffset != null ? `nextOffset=${nextOffset}` : "",
+      shown.length === 0 && rows.length > 0 ? "No row fits the output budget; increase maxToolResultBytes or narrow the scope. Repeating this offset will not advance." : "",
+      truncated && nextOffset == null ? "Source output incomplete; narrow the search scope." : "",
+      ...shown
+    ].filter(Boolean).join("\n"),
     truncated
   };
 }
@@ -361,7 +412,7 @@ function formatGit(result: Record<string, unknown>): ViewDraft {
 function formatWrite(result: Record<string, unknown>): ViewDraft {
   const stats = asRecord(result.changeStats);
   const lines = [
-    result.created === true ? "created=true" : result.edited === false ? "edited=false" : "edited=true",
+    writeOutcomeLine(result),
     Number.isFinite(Number(result.bytesWritten)) ? `bytesWritten=${Number(result.bytesWritten)}` : "",
     Number.isFinite(Number(stats.additions)) ? `additions=${Number(stats.additions)} deletions=${Number(stats.deletions ?? 0)}` : ""
   ].filter(Boolean);
@@ -375,12 +426,27 @@ function formatWrite(result: Record<string, unknown>): ViewDraft {
   return { text: lines.join("\n"), truncated: result.diffTruncated === true };
 }
 
-function formatAgent(execution: ToolResultValue, result: Record<string, unknown>): ViewDraft {
-  const output = String(result.outputSummary ?? result.output ?? execution.outputSummary ?? execution.output ?? "").trim();
-  const excerpt = headTail(output, AGENT_OUTPUT_CHARS / 2, AGENT_OUTPUT_CHARS / 2);
+function writeOutcomeLine(result: Record<string, unknown>): string {
+  if (result.created === true) {
+    return "created=true";
+  }
+  if (result.edited === false) {
+    return "edited=false";
+  }
+  if (result.edited === true || result.created === false) {
+    return "edited=true";
+  }
+  return "";
+}
+
+function formatAgent(execution: ToolResultValue, result: Record<string, unknown>, budget: number): ViewDraft {
+  const output = String(result.output ?? execution.output ?? result.outputSummary ?? execution.outputSummary ?? "").trim();
+  const limit = Math.max(0, Number.isInteger(budget) ? budget : DEFAULT_AGENT_HANDOFF_MAX_BYTES);
+  const text = utf8Truncate(output, limit);
+  const truncated = text !== output || result.outputTruncated === true;
   return {
-    text: excerpt.text || "no output",
-    truncated: excerpt.truncated || result.outputTruncated === true
+    text: text || "no output",
+    truncated
   };
 }
 
@@ -479,13 +545,6 @@ function isImageLike(value: Record<string, unknown>): boolean {
   }
   const data = String(value.data ?? "");
   return data.length > 200 && /^[A-Za-z0-9+/=\s]+$/.test(data) && Boolean(value.width || value.height || value.mimeType);
-}
-
-function numberLines(content: string): string {
-  if (!content) {
-    return "";
-  }
-  return content.split(/\r?\n/).map((line, index) => `${index + 1}: ${line}`).join("\n");
 }
 
 function headTail(text: string, headChars: number, tailChars: number): ViewDraft {

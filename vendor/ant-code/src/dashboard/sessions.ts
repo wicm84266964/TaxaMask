@@ -2,10 +2,13 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { persistSessionSnapshot, runSessionTurn, SessionModelSelectionUnresolvedError } from "../core/session.ts";
 import { GATEWAY_PROTOCOLS, globalConfigPath, loadConfig, localProjectConfigPath, type LabAgentConfig } from "../config/load-config.ts";
+import { resolveTranscriptRetentionDays } from "../config/retention.ts";
 import { listConfiguredModels, normalizeReasoningEfforts, resolveModelSelection } from "../model-gateway/models.ts";
 import { createSessionStore } from "../storage/session-store.ts";
 import { collectSessionFiles } from "./files.ts";
 import { applyPermissionMode, normalizePermissionMode, permissionModeSummary } from "./permissions.ts";
+import { createDashboardSchedule, deleteDashboardSchedule, listDashboardSchedules, pauseDashboardSchedule, resumeDashboardSchedule, SCHEDULE_TICK_MS, tickDashboardSchedules } from "./runtime/schedules.ts";
+import { runtimeImportModelSource, runtimeSaveAgentRouting, runtimeSaveProviderAgentModels } from "./runtime/source-import.ts";
 import {
   publicV2ConfigState,
   saveV2DefaultModel,
@@ -32,6 +35,7 @@ import {
   runtimeSaveModelConfig,
   runtimeProbeGateway,
   runtimeProbeModelCapabilities,
+  runtimeProbeVisionCapability,
   runtimeDeleteModelConfig,
   runtimeDeleteGatewayProfile,
   runtimeSwitchGatewayProfile,
@@ -45,6 +49,7 @@ import {
   runtimeReadTranscriptPage,
   runtimeDeleteSession
 } from "./runtime/api-sessions.ts";
+import { runtimeSearchSessionContent } from "./runtime/session-search.ts";
 import {
   runtimeStartTurn,
   runtimeApplyGoal,
@@ -299,18 +304,16 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
       return Promise.resolve({ ok: true, deleted: [], skipped: "throttled" });
     }
     lastRetentionMaintenanceAt = requestedAt;
-    const retentionDays = config.transcript?.retentionDays === null
-      ? null
-      : Number.isFinite(config.transcript?.retentionDays) ? config.transcript.retentionDays : 30;
+    const retentionDays = resolveTranscriptRetentionDays(config.transcript?.retentionDays);
     const run = retentionMaintenanceTail.then(async () => {
       try {
-        return await withKeyedMutation(activeCapacityLocks, "active-capacity", async () => {
-          const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
-          const result = await store.cleanupExpiredSessions(retentionDays, {
-            excludeSessionIds: [...active.keys()]
-          });
-          return { ok: true, deleted: result.deleted };
+        // Do not take active-capacity: new turns need that lock, and cleanup can
+        // exceed the 15s Dashboard request timeout.
+        const store = createSessionStore({ cwd: options.cwd, transcript: config.transcript, env: runtimeEnv });
+        const result = await store.cleanupExpiredSessions(retentionDays, {
+          excludeSessionIds: () => [...active.keys()]
         });
+        return { ok: true, deleted: result.deleted };
       } catch (error) {
         return {
           ok: false,
@@ -345,6 +348,15 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     });
   }, activePolicy.sweepIntervalMs);
   activeSweepTimer.unref?.();
+  let scheduleTickPromise: Promise<unknown> | null = null;
+  let scheduleRuntime: DashboardFactoryState["runtime"] | null = null;
+  const scheduleTickTimer = setInterval(() => {
+    // TaxaMask embed does not fire unattended full-access schedules.
+    void scheduleTickPromise;
+    void scheduleRuntime;
+    void SCHEDULE_TICK_MS;
+  }, SCHEDULE_TICK_MS);
+  scheduleTickTimer.unref?.();
 
   const rerunWithSessionConfigLock = (input: DashboardRequestInput, rerun: (lockedInput: DashboardRequestInput) => Promise<unknown>) => {
     const sessionId = String(input?.sessionId ?? "").trim();
@@ -381,7 +393,8 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     maintainSessionRetention,
     rerunWithSessionConfigLock,
     runtime: null as unknown as DashboardRuntimeApi,
-    activeSweepTimer
+    activeSweepTimer,
+    scheduleTickTimer
   };
   const runtime = {
     cwd: ctx.cwd,
@@ -395,6 +408,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     saveModelConfig: (input: DashboardRequestInput = {}) => runtimeSaveModelConfig(ctx, input),
     probeGateway: (input: DashboardRequestInput = {}) => runtimeProbeGateway(ctx, input),
     probeModelCapabilities: (input: DashboardRequestInput = {}, request: { signal?: AbortSignal } = {}) => runtimeProbeModelCapabilities(ctx, input, request),
+    probeVisionCapability: (input: DashboardRequestInput = {}, request: { signal?: AbortSignal } = {}) => runtimeProbeVisionCapability(ctx, input, request),
     deleteModelConfig: (input: DashboardRequestInput = {}) => runtimeDeleteModelConfig(ctx, input),
     deleteGatewayProfile: (input: DashboardRequestInput = {}) => runtimeDeleteGatewayProfile(ctx, input),
     switchGatewayProfile: (input: DashboardRequestInput = {}) => runtimeSwitchGatewayProfile(ctx, input),
@@ -402,6 +416,7 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     trustStatus: () => runtimeTrustStatus(ctx),
     trustWorkspace: () => runtimeTrustWorkspace(ctx),
     listSessionRecords: () => runtimeListSessionRecords(ctx),
+    searchSessionContent: (query: unknown) => runtimeSearchSessionContent(ctx, query),
     readSession: (selector: unknown) => runtimeReadSession(ctx, selector),
     readTranscriptPage: (input: DashboardRequestInput = {}) => runtimeReadTranscriptPage(ctx, input),
     deleteSession: (input: DashboardRequestInput = {}) => runtimeDeleteSession(ctx, input),
@@ -422,9 +437,18 @@ export function createDashboardRuntime(options: CreateDashboardRuntimeOptions) {
     lifecycleStatus: () => runtimeLifecycleStatus(ctx),
     sweepIdleSessions: () => runtimeSweepIdleSessions(ctx),
     shutdown: (input: DashboardRequestInput = {}) => runtimeShutdown(ctx, input),
-    sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId)
+    sessionFiles: (sessionId: string) => runtimeSessionFiles(ctx, sessionId),
+    importModelSource: (input: DashboardRequestInput = {}) => runtimeImportModelSource(ctx, input),
+    saveAgentRouting: (input: DashboardRequestInput = {}) => runtimeSaveAgentRouting(ctx, input),
+    saveProviderAgentModels: (input: DashboardRequestInput = {}) => runtimeSaveProviderAgentModels(ctx, input),
+    listSchedules: () => listDashboardSchedules(ctx.cwd),
+    createSchedule: (input: DashboardRequestInput = {}) => createDashboardSchedule(ctx.cwd, input),
+    pauseSchedule: (id: string) => pauseDashboardSchedule(ctx.cwd, id),
+    resumeSchedule: (id: string) => resumeDashboardSchedule(ctx.cwd, id),
+    deleteSchedule: (id: string) => deleteDashboardSchedule(ctx.cwd, id)
   };
   ctx.runtime = runtime;
+  scheduleRuntime = runtime;
   Object.defineProperty(ctx, "processTrusted", { get() { return processTrusted; }, set(v) { processTrusted = v; } });
   Object.defineProperty(ctx, "selectedModelId", { get() { return selectedModelId; }, set(v) { selectedModelId = v; } });
   Object.defineProperty(ctx, "selectedProviderId", { get() { return selectedProviderId; }, set(v) { selectedProviderId = v; } });

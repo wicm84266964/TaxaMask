@@ -1,9 +1,9 @@
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
-import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
+import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_TURN_START_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_DOCUMENT_ATTACHMENTS, MAX_DOCUMENT_ATTACHMENT_BYTES, DOCUMENT_EXTENSIONS, IMAGE_EXTENSIONS, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
 import type { DashboardConfigSource, DashboardReasoningEffort, DashboardTurnChangeStats, DashboardScopedDefaultSelection, DashboardVisionAgent, DashboardReasoningDiscovery, DashboardReasoningCapabilityCandidate, DashboardGatewayProbeModel, DashboardGatewayProbeResult, DashboardLifecycleActivity, DashboardSettings, DashboardFile, DashboardTableSheet, DashboardTablePreview, DashboardLightboxItem, DashboardQuestionChoice, DashboardPendingQuestion, DashboardApproval, DashboardGatewayTransport, DashboardScopedRequest, DashboardFetchOptions, DashboardModelSource, DashboardSessionStatus, DashboardApiResult, DashboardActivity, DashboardModelOption, DashboardGatewayProfile, DashboardGatewayConfig, DashboardModelSelection, DashboardPendingGuide, DashboardStreamEvent, DashboardUiState , DashboardSessionSummary } from "./app-core.ts";
-import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
+import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, sourceLabel, formatContextUsage, firstFiniteNumber, formatTokenCount, trimNumber, nonNegativeInteger, collapseCompletedActivities, clearAssistantDrafts, collapseAssistantDrafts, isMeaningfulCompletedActivity, isDuplicateDraftText, normalizeComparableText, showApproval, resolveApproval, hideApproval, showQuestion, revealInteractionPanel, renderQuestionPanel, reviewQuestionConversation, returnToQuestion, activateQuestionReviewBackground, deactivateQuestionReviewBackground, questionChoiceButton, toggleQuestionChoice, submitQuestion, cancelQuestion, finishQuestionSubmission, hideQuestion, showTrustPanel, renderTrustPanel, confirmTrust, renderQueuePanel, renderQueueItem, setPendingGuide, clearPendingGuide, syncPendingGuideFromQueue, renderGuideFeedback, guideCopy, guideSource, guideTurnFromQueue, guideButtonText, guideButtonDisabled, guideButtonVisible, syncGuideButton, shouldKeepGuideFeedback, isInterruptError, updateSendButton, showContextConfirm, hideContextConfirm, runContextAction, contextActionRequestOptions, contextSummaryLine, compactResultLine, rememberQuestionDraft, questionResolutionText, showShutdownPanel, hideShutdownPanel, shutdownDashboard, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, applySessionFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
 export function activateModal(modal: HTMLElement | null | undefined, options: { initialFocus?: string; returnFocus?: Element | null } = {}) {
   if (!modal) return;
   if (state.modalContext?.modal === modal) {
@@ -187,10 +187,11 @@ export async function restoreInitialSession() {
     return;
   }
   const sessionId = initialSessionId() || latestBackgroundSessionId();
-  if (!sessionId || !state.sessions.some((session) => session.id === sessionId)) {
+  if (!sessionId) {
     return;
   }
-  await openSession(sessionId);
+  const listed = state.sessions.some((session) => session.id === sessionId);
+  await openSession(sessionId, { restore: !listed });
 }
 
 export function latestBackgroundSessionId() {
@@ -224,14 +225,24 @@ export function renderSessions() {
   const threadList = els.threadList;
   if (!threadList) return;
   threadList.innerHTML = "";
+  const visibleSessions = state.sessions.filter((session) => sessionMatchesQuery(session, state.sessionSearchQuery));
   if (state.sessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "thread-meta";
     empty.textContent = "暂无历史任务";
     threadList.append(empty);
+    syncThreadScrollbar();
     return;
   }
-  for (const session of state.sessions) {
+  if (visibleSessions.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "thread-meta";
+    empty.textContent = "没有匹配的会话";
+    threadList.append(empty);
+    syncThreadScrollbar();
+    return;
+  }
+  for (const session of visibleSessions) {
     const status = sessionStatusView(session);
     const title = session.title || "未命名任务";
     const meta = sessionMeta(session, status);
@@ -273,6 +284,241 @@ export function renderSessions() {
     });
     threadList.append(item);
   }
+  syncThreadScrollbar();
+}
+
+export function bindThreadScrollbar() {
+  const list = els.threadList;
+  const bar = els.threadScrollbar;
+  const thumb = els.threadScrollbarThumb;
+  if (!(list instanceof HTMLElement) || !(bar instanceof HTMLElement) || !(thumb instanceof HTMLElement)) return;
+  if (bar.dataset.bound === "true") return;
+  bar.dataset.bound = "true";
+  list.addEventListener("scroll", syncThreadScrollbar, { passive: true });
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(() => syncThreadScrollbar());
+    observer.observe(list);
+    if (els.threadScroller instanceof HTMLElement) observer.observe(els.threadScroller);
+  }
+  thumb.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    thumb.setPointerCapture(event.pointerId);
+    bar.classList.add("is-dragging");
+    bar.dataset.dragPointer = String(event.pointerId);
+    bar.dataset.dragStartY = String(event.clientY);
+    bar.dataset.dragStartScroll = String(list.scrollTop);
+  });
+  thumb.addEventListener("pointermove", (event: PointerEvent) => {
+    if (bar.dataset.dragPointer !== String(event.pointerId)) return;
+    const overflow = Math.max(0, list.scrollHeight - list.clientHeight);
+    const maxTop = Math.max(1, bar.clientHeight - thumb.offsetHeight);
+    const delta = event.clientY - Number(bar.dataset.dragStartY);
+    list.scrollTop = Number(bar.dataset.dragStartScroll) + (delta / maxTop) * overflow;
+  });
+  const endDrag = (event: PointerEvent) => {
+    if (bar.dataset.dragPointer !== String(event.pointerId)) return;
+    delete bar.dataset.dragPointer;
+    bar.classList.remove("is-dragging");
+  };
+  thumb.addEventListener("pointerup", endDrag);
+  thumb.addEventListener("pointercancel", endDrag);
+  bar.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (event.button !== 0 || event.target === thumb) return;
+    const rect = bar.getBoundingClientRect();
+    const ratio = rect.height <= 0 ? 0 : (event.clientY - rect.top) / rect.height;
+    list.scrollTop = ratio * Math.max(0, list.scrollHeight - list.clientHeight);
+  });
+  bar.addEventListener("keydown", (event: KeyboardEvent) => {
+    const page = Math.max(48, Math.round(list.clientHeight * 0.85));
+    if (event.key === "ArrowDown") list.scrollTop += 48;
+    else if (event.key === "ArrowUp") list.scrollTop -= 48;
+    else if (event.key === "PageDown") list.scrollTop += page;
+    else if (event.key === "PageUp") list.scrollTop -= page;
+    else if (event.key === "Home") list.scrollTop = 0;
+    else if (event.key === "End") list.scrollTop = list.scrollHeight;
+    else return;
+    event.preventDefault();
+  });
+  syncThreadScrollbar();
+}
+
+export function syncThreadScrollbar() {
+  const list = els.threadList;
+  const bar = els.threadScrollbar;
+  const thumb = els.threadScrollbarThumb;
+  const scroller = els.threadScroller;
+  if (!(list instanceof HTMLElement) || !(bar instanceof HTMLElement) || !(thumb instanceof HTMLElement)) return;
+  const overflow = list.scrollHeight - list.clientHeight;
+  const needed = overflow > 1;
+  bar.hidden = !needed;
+  bar.setAttribute("aria-hidden", needed ? "false" : "true");
+  if (scroller instanceof HTMLElement) scroller.classList.toggle("has-overflow", needed);
+  if (!needed) return;
+  const track = bar.clientHeight;
+  const thumbHeight = Math.max(28, Math.min(track, Math.round((list.clientHeight / list.scrollHeight) * track)));
+  const maxTop = Math.max(0, track - thumbHeight);
+  const top = maxTop === 0 ? 0 : Math.round((list.scrollTop / overflow) * maxTop);
+  thumb.style.height = `${thumbHeight}px`;
+  thumb.style.transform = `translateY(${top}px)`;
+  bar.setAttribute("aria-valuemax", String(Math.round(overflow)));
+  bar.setAttribute("aria-valuenow", String(Math.round(list.scrollTop)));
+}
+
+export function clearContentSearch() {
+  state.contentSearch = {
+    query: "",
+    status: "idle",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: state.contentSearch.pendingJump
+  };
+  renderContentSearchResults();
+}
+
+export async function searchSessionContent() {
+  const query = String(els.sessionSearch?.value ?? "").trim();
+  state.sessionSearchQuery = query;
+  renderSessions();
+  if (!query) {
+    clearContentSearch();
+    return;
+  }
+  const request = beginScopedRequest("content-search", query);
+  state.contentSearch = {
+    query,
+    status: "loading",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: null
+  };
+  renderContentSearchResults();
+  const result = await getJson(`/api/sessions/search?${new URLSearchParams({ q: query })}`, { signal: request.signal })
+    .catch((error: unknown): DashboardApiResult => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      aborted: isAbortError(error)
+    }));
+  if (!isCurrentScopedRequest(request)) return;
+  finishScopedRequest(request);
+  if (result.aborted) return;
+  if (!result.ok) {
+    state.contentSearch.status = "error";
+    state.contentSearch.error = String(result.error ?? "搜索记录失败");
+    renderContentSearchResults();
+    return;
+  }
+  state.contentSearch = {
+    query,
+    status: "done",
+    hits: Array.isArray(result.hits) ? result.hits : [],
+    unreadable: Number(result.unreadable) || 0,
+    truncated: result.truncated === true,
+    error: "",
+    pendingJump: null
+  };
+  renderContentSearchResults();
+}
+
+export function renderContentSearchResults() {
+  const root = els.contentSearchResults;
+  if (!(root instanceof HTMLElement)) return;
+  const search = state.contentSearch;
+  if (search.status === "idle") {
+    root.classList.add("hidden");
+    root.replaceChildren();
+    return;
+  }
+  root.classList.remove("hidden");
+  root.replaceChildren();
+  const status = document.createElement("div");
+  status.className = "content-search-status";
+  if (search.status === "loading") {
+    status.textContent = "正在搜索记录…";
+    root.append(status);
+    return;
+  }
+  if (search.status === "error") {
+    status.textContent = search.error || "搜索记录失败";
+    root.append(status);
+    return;
+  }
+  const notes = [];
+  notes.push(search.hits.length > 0 ? `记录里找到 ${search.hits.length} 处` : "记录里没有找到");
+  if (search.unreadable > 0) notes.push(`${search.unreadable} 个会话无法读取`);
+  if (search.truncated) notes.push("结果已截断");
+  status.textContent = notes.join(" · ");
+  root.append(status);
+  for (const hit of search.hits) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "content-search-hit";
+    button.innerHTML = `
+      <span class="content-search-title">${escapeHtml(hit.title || "未命名任务")}</span>
+      <span class="content-search-excerpt">${escapeHtml(`${hit.role === "assistant" ? "Ant Code" : "你"} · ${hit.excerpt}`)}</span>
+    `;
+    button.addEventListener("click", () => {
+      void openContentSearchHit(hit);
+    });
+    root.append(button);
+  }
+}
+
+export async function openContentSearchHit(hit: { sessionId: string; excerpt: string; position: number; role: "user" | "assistant" }) {
+  state.contentSearch.pendingJump = hit;
+  if (state.currentSessionId === hit.sessionId && revealContentSearchNode(hit)) {
+    state.contentSearch.pendingJump = null;
+    return;
+  }
+  await openSession(hit.sessionId);
+}
+
+export async function revealContentSearchHit() {
+  const hit = state.contentSearch.pendingJump;
+  if (!hit || state.currentSessionId !== hit.sessionId) return;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    if (revealContentSearchNode(hit)) {
+      state.contentSearch.pendingJump = null;
+      return;
+    }
+    if (!state.transcriptPaging.hasMore) break;
+    await loadOlderTranscript();
+  }
+  state.contentSearch.pendingJump = null;
+  announceStatus("这条记录不在当前已载入的页面里");
+}
+
+function revealContentSearchNode(hit: { excerpt: string; role: "user" | "assistant" }) {
+  const transcript = els.transcript;
+  if (!(transcript instanceof HTMLElement)) return false;
+  const core = hit.excerpt.replace(/^…/, "").replace(/…$/, "").trim();
+  const selector = hit.role === "assistant" ? ".message.assistant" : ".message.user";
+  const node = Array.from(transcript.querySelectorAll(selector)).find((item) => {
+    const text = item.textContent?.replace(/\s+/g, " ") ?? "";
+    return core ? text.includes(core) : false;
+  });
+  if (!(node instanceof HTMLElement)) return false;
+  const delta = node.getBoundingClientRect().top - transcript.getBoundingClientRect().top;
+  transcript.scrollTo({ top: Math.max(0, transcript.scrollTop + delta - 24), behavior: "auto" });
+  transcript.querySelectorAll(".prompt-jump-target").forEach((item) => item.classList.remove("prompt-jump-target"));
+  node.classList.add("prompt-jump-target");
+  state.transcriptFollowing = false;
+  updateTranscriptJump();
+  return true;
+}
+
+export function sessionMatchesQuery(session: DashboardSessionSummary, query: unknown) {
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  return [session.title, session.id, session.model, session.status]
+    .some((value) => String(value ?? "").toLowerCase().includes(needle));
 }
 
 export function sessionMeta(session: DashboardSessionSummary, status: { label: string; tone: string; detail?: string } = sessionStatusView(session)) {
@@ -300,7 +546,7 @@ export function sessionStatusView(session: DashboardSessionSummary) {
     }
     return { label: "子智能体后台", tone: "background", detail: Number(session.backgroundCount ?? 0) > 1 ? `${session.backgroundCount} 个任务` : "" };
   }
-  if (raw.includes("引导")) {
+  if (raw === "guided" || raw.includes("引导")) {
     return { label: "引导中", tone: "running", detail: "" };
   }
   if (Number(session.queueLength ?? 0) > 0) {
@@ -383,7 +629,7 @@ export function handleSessionAction(action: unknown, sessionId: string) {
   }
 }
 
-export async function openSession(id: string) {
+export async function openSession(id: string, options: { restore?: boolean } = {}) {
   state.turnRequest = null;
   const request = beginScopedRequest("session", id);
   cancelScopedRequest("transcript");
@@ -393,7 +639,7 @@ export async function openSession(id: string) {
   try {
     result = await getJson(`/api/sessions/${encodeURIComponent(id)}`, { signal: request.signal });
   } catch (error) {
-    if (!isAbortError(error) && isCurrentScopedRequest(request)) {
+    if (!isAbortError(error) && isCurrentScopedRequest(request) && options.restore !== true) {
       showError(errorMessageOf(error) || "无法读取会话");
     }
     finishScopedRequest(request);
@@ -402,12 +648,16 @@ export async function openSession(id: string) {
   if (!isCurrentScopedRequest(request)) return;
   finishScopedRequest(request);
   if (!result.ok) {
-    showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    if (options.restore !== true) {
+      showError(typeof result.error === "string" ? result.error : result.error ?? "无法读取会话");
+    }
     return;
   }
   const loadedSession = result.session;
   if (!loadedSession) {
-    showError("无法读取会话");
+    if (options.restore !== true) {
+      showError("无法读取会话");
+    }
     return;
   }
   state.currentSessionId = id;
@@ -436,14 +686,17 @@ export async function openSession(id: string) {
   });
   updateSendButton();
   resetTurnChangeStats();
-  state.files = Array.isArray(loadedSession.files) ? loadedSession.files : [];
-  renderFiles();
-  resetPreview();
+  state.previewPath = "";
+  applySessionFiles(Array.isArray(loadedSession.files) ? loadedSession.files : [], { force: true });
   els.runStatus.textContent = loadedSession.status || "历史";
   setTranscriptPaging(loadedSession.transcriptPage);
   renderTranscriptMessages(loadedSession.transcript ?? []);
   renderSessionFailure(loadedSession.failure);
-  scrollTranscript({ force: true });
+  if (state.contentSearch.pendingJump?.sessionId === id) {
+    await revealContentSearchHit();
+  } else {
+    scrollTranscript({ force: true });
+  }
   const hasBackground = restoreBackgroundSnapshot(loadedSession.backgroundSnapshot);
   if (loadedSession.active && loadedSession.running) {
     rememberEventCursor(loadedSession.eventCursor);
@@ -548,6 +801,7 @@ export function newTask() {
   hideContextConfirm();
   clearTranscript();
   state.files = [];
+  state.previewPath = "";
   state.queue = [];
   state.queueCancelling.clear();
   state.backgroundCancelling.clear();
@@ -618,32 +872,67 @@ export async function refreshNewTaskModelState() {
 }
 
 export async function addAttachmentFiles(files: ArrayLike<unknown> | unknown[] | FileList | null | undefined) {
-  const list = Array.from(files ?? []);
-  const images = list.filter((file): file is File => file instanceof File && String(file.type ?? "").startsWith("image/"));
-  if (images.length === 0) {
+  const list = Array.from(files ?? []).filter((file): file is File => file instanceof File);
+  if (list.length === 0) {
     return;
   }
-  const slots = Math.max(0, MAX_IMAGE_ATTACHMENTS - state.attachments.length);
-  if (slots <= 0) {
-    showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片`);
-    return;
-  }
-  for (const file of images.slice(0, slots)) {
-    if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-      showError(`${file.name || "图片"} 超过 8MB，暂不发送`);
+  let ignoredUnknown = 0;
+  for (const file of list) {
+    const kind = classifyComposerFile(file);
+    if (kind === "image") {
+      const imageCount = state.attachments.filter((item: { type?: string }) => item.type !== "document").length;
+      if (imageCount >= MAX_IMAGE_ATTACHMENTS) {
+        showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        showError(`${file.name || "图片"} 超过 8MB，暂不发送`);
+        continue;
+      }
+      try {
+        state.attachments.push(await readImageAttachment(file));
+      } catch (error) {
+        showError(errorMessageOf(error) || "读取图片失败");
+      }
       continue;
     }
-    try {
-      state.attachments.push(await readImageAttachment(file));
-    } catch (error) {
-      showError(errorMessageOf(error) || "读取图片失败");
+    if (kind === "document") {
+      const documentCount = state.attachments.filter((item: { type?: string }) => item.type === "document").length;
+      if (documentCount >= MAX_DOCUMENT_ATTACHMENTS) {
+        showError(`最多可附加 ${MAX_DOCUMENT_ATTACHMENTS} 个文档`);
+        continue;
+      }
+      if (file.size > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+        showError(`${file.name || "文档"} 超过 40MB，暂不发送`);
+        continue;
+      }
+      try {
+        state.attachments.push(await readDocumentAttachment(file));
+      } catch (error) {
+        showError(errorMessageOf(error) || "读取文档失败");
+      }
+      continue;
     }
+    ignoredUnknown += 1;
   }
-  if (images.length > slots) {
-    showError(`最多可附加 ${MAX_IMAGE_ATTACHMENTS} 张图片，已忽略多余图片`);
+  if (ignoredUnknown > 0) {
+    showError("回形针只接收图片和 PDF / Word / Excel / PPT / 文本，不支持旧版 .doc .xls .ppt");
   }
   renderAttachmentStrip();
   updateSendButton();
+}
+
+export function classifyComposerFile(file: File) {
+  const name = String(file.name ?? "");
+  const ext = name.includes(".") ? `.${name.split(".").pop()?.toLowerCase() ?? ""}` : "";
+  const mime = String(file.type ?? "").toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext) || mime === "image/png" || mime === "image/jpeg" || mime === "image/gif" || mime === "image/webp") {
+    return "image";
+  }
+  if (DOCUMENT_EXTENSIONS.has(ext) || mime === "application/pdf") {
+    return "document";
+  }
+  return "unsupported";
 }
 
 export function readImageAttachment(file: File) {
@@ -669,10 +958,43 @@ export function readImageAttachment(file: File) {
         id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         type: "image",
         name: file.name || "image",
-        mimeType: match[1] || file.type || "image/png",
+        mimeType: /^(image\/(png|jpeg|gif|webp))$/i.test(match[1]) ? match[1].toLowerCase() : imageMimeFromName(file.name),
         size: file.size,
         data: match[2],
         previewUrl: dataUrl
+      });
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+export function readDocumentAttachment(file: File) {
+  return new Promise<{
+    id: string;
+    type: "document";
+    name: string;
+    mimeType: string;
+    size: number;
+    data: string;
+    previewUrl: string;
+  }>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () => reject(new Error("读取文档失败")));
+    reader.addEventListener("load", () => {
+      const dataUrl = String(reader.result ?? "");
+      const match = dataUrl.match(/^data:([^;,]+);base64,([\s\S]+)$/);
+      if (!match) {
+        reject(new Error("文档格式无法作为附件发送"));
+        return;
+      }
+      resolve({
+        id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        type: "document",
+        name: file.name || "document",
+        mimeType: match[1] || file.type || "application/octet-stream",
+        size: file.size,
+        data: match[2],
+        previewUrl: ""
       });
     });
     reader.readAsDataURL(file);
@@ -688,27 +1010,73 @@ export function renderAttachmentStrip() {
   for (const attachment of state.attachments) {
     const item = document.createElement("div");
     item.className = "attachment-chip";
+    const isDocument = attachment.type === "document";
+    const label = attachment.name || (isDocument ? "文档" : "图片");
+    const preview = isDocument || !attachment.previewUrl
+      ? `<span class="attachment-chip-file">${escapeHtml(documentChipLabel(attachment.name))}</span>`
+      : `<img alt="" src="${attachment.previewUrl}" />`;
     item.innerHTML = `
-      <img alt="" src="${attachment.previewUrl}" />
-      <span>${escapeHtml(attachment.name || "图片")}</span>
-      <button type="button" aria-label="移除 ${escapeHtml(attachment.name || "图片")}">×</button>
+      ${preview}
+      <span>${escapeHtml(label)}</span>
+      <button type="button" aria-label="移除 ${escapeHtml(label)}">×</button>
     `;
     item.querySelector("button").addEventListener("click", () => {
       state.attachments = state.attachments.filter((candidate: { id?: string }) => candidate.id !== attachment.id);
       renderAttachmentStrip();
       updateSendButton();
     });
+    if (isDocument && /\.pdf$/i.test(label)) {
+      const range = document.createElement("div");
+      range.className = "attachment-page-range";
+      const hint = document.createElement("p");
+      hint.className = "attachment-page-range-hint";
+      hint.textContent = "不填则扫描件只识别前几页；全量视觉请填写结束页";
+      range.append(hint);
+      for (const [key, labelText, placeholder] of [["pageStart", "起始页", "1"], ["pageEnd", "结束页", "末页"]] as const) {
+        const field = document.createElement("label");
+        field.className = "attachment-page-field";
+        const caption = document.createElement("span");
+        caption.textContent = labelText;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "1";
+        input.step = "1";
+        input.placeholder = placeholder;
+        input.title = key === "pageEnd"
+          ? "扫描件不填则只视觉识别前几页；全量视觉请填写结束页"
+          : "不填则从第 1 页开始";
+        input.setAttribute("aria-label", `${label} ${labelText}`);
+        input.value = attachment[key] === undefined ? "" : String(attachment[key]);
+        input.addEventListener("input", () => { attachment[key] = input.value ? Number(input.value) : undefined; });
+        field.append(caption);
+        field.append(input as unknown as Node);
+        range.append(field as unknown as Node);
+      }
+      item.append(range);
+    }
     els.attachmentStrip.append(item);
   }
 }
 
-export function attachmentPayload(attachment: { name?: string; mimeType?: string; size?: number; data?: string }) {
+export function documentChipLabel(name: unknown) {
+  const ext = String(name ?? "").split(".").pop()?.toUpperCase() ?? "FILE";
+  return ext.slice(0, 4);
+}
+
+export function imageMimeFromName(name: string) {
+  const extension = name.split(".").pop()?.toLowerCase();
+  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" } as Record<string, string>)[extension ?? ""] || "application/octet-stream";
+}
+
+export function attachmentPayload(attachment: { type?: string; name?: string; mimeType?: string; size?: number; data?: string; pageStart?: number; pageEnd?: number }) {
   return {
-    type: "image",
+    type: attachment.type === "document" ? "document" : "image",
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
-    data: attachment.data
+    data: attachment.data,
+    pageStart: attachment.pageStart,
+    pageEnd: attachment.pageEnd
   };
 }
 
@@ -718,6 +1086,14 @@ export function clearAttachments() {
     els.attachmentInput.value = "";
   }
   renderAttachmentStrip();
+}
+
+export function attachmentSignature(attachments: Array<{ id?: string; name?: string; mimeType?: string; size?: number; pageStart?: number; pageEnd?: number }> = []) {
+  return JSON.stringify(attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd]));
+}
+
+export function composerHasOutboundContent() {
+  return Boolean(els.promptInput?.value?.trim()) || state.attachments.length > 0;
 }
 
 export async function sendPrompt() {
@@ -737,6 +1113,9 @@ export async function sendPrompt() {
     showTrustPanel();
     return;
   }
+  const submittedSessionId = state.currentSessionId ?? null;
+  const submittedPrompt = prompt;
+  const submittedAttachments = attachmentSignature(attachments);
   state.turnSubmitting = true;
   updateSendButton();
   els.runStatus.textContent = state.running ? "已排队" : "启动中";
@@ -747,18 +1126,24 @@ export async function sendPrompt() {
       requestId: turnRequest.id,
       prompt,
       attachments: attachments.map(attachmentPayload),
-      sessionId: state.currentSessionId,
-      clientId: state.currentSessionId ? undefined : dashboardClientId(),
+      sessionId: submittedSessionId,
+      clientId: submittedSessionId ? undefined : dashboardClientId(),
       permissionMode: state.permissionMode,
       goalMode: state.goal.enabled === true,
       goalText: state.goal.enabled ? state.goal.text : undefined,
       clientPreviousPermissionMode: state.goal.enabled ? state.goal.previousPermissionMode : undefined
-    });
+    }, { timeoutMs: DASHBOARD_TURN_START_TIMEOUT_MS });
   } catch (error) {
     result = { ok: false, error: errorMessageOf(error) };
   } finally {
     state.turnSubmitting = false;
     updateSendButton();
+  }
+  const sessionChanged = (state.currentSessionId ?? null) !== submittedSessionId;
+  const draftUnchanged = els.promptInput.value.trim() === submittedPrompt
+    && attachmentSignature(state.attachments) === submittedAttachments;
+  if (sessionChanged) {
+    return;
   }
   if (!result.ok) {
     if (Number.isFinite(Number(result.status))) {
@@ -774,9 +1159,11 @@ export async function sendPrompt() {
     return;
   }
   state.turnRequest = null;
-  els.promptInput.value = "";
-  resizePromptInput();
-  clearAttachments();
+  if (draftUnchanged) {
+    els.promptInput.value = "";
+    resizePromptInput();
+    clearAttachments();
+  }
   state.queue = result.queue ?? state.queue;
   state.running = result.running === true || state.running;
   applyGoalSnapshot(result.goal ?? state.goal, { permissionMode: result.permission?.mode ?? state.permissionMode });
@@ -801,12 +1188,12 @@ export async function sendPrompt() {
   await loadSessions();
 }
 
-export function stableTurnRequest(prompt: string, attachments: Array<{ id?: string; name?: string; mimeType?: string; size?: number }>) {
+export function stableTurnRequest(prompt: string, attachments: Array<{ id?: string; name?: string; mimeType?: string; size?: number; pageStart?: number; pageEnd?: number }>) {
   const signature = JSON.stringify({
     prompt,
     sessionId: state.currentSessionId,
     permissionMode: state.permissionMode,
-    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size])
+    attachments: attachments.map((item) => [item.id, item.name, item.mimeType, item.size, item.pageStart, item.pageEnd])
   });
   if (state.turnRequest?.signature === signature) {
     return state.turnRequest;

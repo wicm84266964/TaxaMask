@@ -17,7 +17,7 @@ Install prerequisites first:
 - Git, or the ability to download and extract the GitHub ZIP archive.
 - Conda or another Python environment manager.
 - Python 3.12 for the recommended public source setup.
-- Node.js 22.18 or newer with npm for the embedded Agent Center / Ant-Code dashboard.
+- Node.js 22.18 or newer with npm for the embedded Agent Center / Ant-Code dashboard. Do not rely on an older `node.exe` that happens to be first on PATH.
 
 Clone the source repository and enter it before installing dependencies:
 
@@ -51,13 +51,13 @@ Linux CUDA users should check the official PyTorch install command for the insta
 
 macOS users should not install the CUDA requirements file. Use a CPU-compatible PyTorch installation for this first compatibility target. Advanced users may experiment with their own PyTorch/SAM stack, but MPS acceleration is not a supported TaxaMask runtime device yet.
 
-Install the bundled Agent Center dependencies after cloning:
+Prepare Agent Center Node.js inside the active Python environment, then install its packages:
 
 ```bash
-cd vendor/ant-code
-npm ci
-cd ../..
+python scripts/ensure_agent_node.py --npm-ci
 ```
+
+This copies or downloads Node.js 22.22.2 into the environment that launches TaxaMask. On Windows the runtime file is `node.exe` beside `python.exe`. `启动TaxaMask.bat` and `启动TaxaMask.sh` run the same preparation on startup, without downloading again once a qualified `node` is already in that environment. A machine without WSL still uses this Windows or Linux Node. WSL is only a fallback when no qualified Node can be prepared.
 
 The source release does not include `node_modules`. Without this step, the main Python GUI may still open, but the embedded Agent Center, browser dashboard, and `启动AntCode修复面板.bat` recovery panel cannot be expected to work.
 

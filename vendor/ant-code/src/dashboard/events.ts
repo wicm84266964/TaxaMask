@@ -1,24 +1,4 @@
-const TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  read_file: "读取文件",
-  list_files: "列出文件",
-  glob: "查找文件",
-  grep: "搜索文本",
-  git_status: "检查 Git 状态",
-  git_diff: "查看 Git 差异",
-  write_file: "写入文件",
-  edit_file: "编辑文件",
-  powershell: "运行 PowerShell",
-  bash: "运行 Shell",
-  background_shell: "启动后台终端",
-  web_fetch: "访问网页",
-  web_search: "搜索网页",
-  document_intake: "读取文档",
-  mcp_call: "调用 MCP 工具",
-  mcp_list: "列出 MCP 能力",
-  agent_run: "启动子智能体",
-  todo_write: "更新任务清单",
-  plan_update: "更新计划"
-});
+import { TOOL_LABELS, toolLabel } from "../tools/labels.ts";
 
 const SEVERITY_BY_STATUS: Readonly<Record<string, string>> = Object.freeze({
   running: "info",
@@ -37,6 +17,10 @@ function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
+function isSteerInterruptReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
 const BLOCKED_TURN_STATUSES = new Set(["gateway_not_configured", "tool_limit", "vision_unavailable", "context_overflow"]);
 const INTERRUPTED_TURN_STATUSES = new Set(["interrupted", "cancelled"]);
 const FAILED_BACKGROUND_STATUSES = new Set(["failed", "error", "lost"]);
@@ -53,6 +37,13 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   const type = String(event.type ?? "");
   if (type === "turn_start") {
     return [activity("turn-start", "开始任务", "正在准备本轮请求", "running", "session", event, { coalesceKey: "turn" })];
+  }
+  if (type === "pdf_vision_progress") {
+    const detail = `${String(event.name ?? "PDF")}${event.pageEnd ? ` · ${event.pageStart}-${event.pageEnd} / ${event.totalPages}` : ""}`;
+    return [activity("pdf-vision", event.stage === "completed" ? "PDF 页面识别完成" : event.stage === "rendering" ? "正在渲染 PDF" : "正在识别 PDF 页面", detail, "running", "gateway", event, { coalesceKey: "pdf-vision" })];
+  }
+  if (type === "pdf_vision_error") {
+    return [activity("pdf-vision", event.interrupted ? "PDF 识别已取消" : "PDF 识别失败", String(event.output ?? ""), event.interrupted ? "interrupted" : "failed", "gateway", event, { coalesceKey: "pdf-vision" })];
   }
   if (type === "gateway_request_start") {
     return [activity("gateway-request", "正在请求模型", roundDetail(event), "running", "gateway", event, { coalesceKey: "gateway" })];
@@ -114,7 +105,7 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
     })];
   }
   if (type === "workflow_updated") {
-    return [activity("workflow-updated", "任务状态已同步", `已完成 ${event.todosCompleted ?? 0} 个待办、${event.planStepsCompleted ?? 0} 个计划步骤`, "completed", "session", event, { coalesceKey: "workflow" })];
+    return [];
   }
   if (type === "subagent_group_started") {
     return [backgroundSubagentActivity(event, {
@@ -160,6 +151,14 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
       wakePromptBytes: Buffer.byteLength(String(event.wakePrompt ?? ""), "utf8")
     })];
   }
+  if (type === "assistant_interrupted_draft") {
+    return [{
+      type: "assistant_interrupted_draft",
+      reason: event.reason ?? null,
+      text: String(event.text ?? ""),
+      bytes: event.outputBytes ?? event.bytes ?? Buffer.byteLength(String(event.text ?? ""), "utf8")
+    }];
+  }
   if (type === "assistant_final") {
     return [{
       type: "assistant_final",
@@ -175,10 +174,13 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
     })];
   }
   if (type === "gateway_error" || type === "gateway_not_configured") {
-    return [activity("gateway-error", "模型请求失败", asRecord(event.error).message ?? "网关未配置或请求失败", "failed", "gateway", event, { coalesceKey: "gateway" })];
+    return [activity("gateway-error", "模型请求失败", gatewayErrorDetail(event.error), "failed", "gateway", event, { coalesceKey: "gateway" })];
   }
   if (type === "turn_interrupted") {
-    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event)];
+    if (isSteerInterruptReason(event.reason)) {
+      return [activity("turn-guided", "引导已接管", "上一轮已收束，按你的引导继续", "running", "session", event, { coalesceKey: "turn", reason: "guided" })];
+    }
+    return [activity("turn-interrupted", "任务已中断", event.reason ?? "用户中断", "interrupted", "session", event, { reason: event.reason ?? "user" })];
   }
   if (type === "context_overflow") {
     return [activity(
@@ -193,6 +195,15 @@ export function mapSessionEventToDashboard(event: Record<string, unknown>) {
   }
   if (type === "context_compacting") {
     return [activity("context-compacting", "正在压缩上下文", contextCompactionStartDetail(event), "running", "session", event, { coalesceKey: "context-compaction" })];
+  }
+  if (type === "tool_results_summarized") {
+    return [activity("tool-results-summarized", "工具结果已摘要", contextCompactionDetail(event), "completed", "session", event, { coalesceKey: "tool-summary" })];
+  }
+  if (type === "tool_results_summarizing") {
+    return [activity("tool-results-summarizing", "正在生成工具摘要", "", "running", "session", event, { coalesceKey: "tool-summary" })];
+  }
+  if (type === "tool_summary_skipped") {
+    return [activity("tool-summary-skipped", "工具原文已保留", "未获得可安全替换的摘要", "completed", "session", event, { coalesceKey: "tool-summary" })];
   }
   if (type === "context_compacted") {
     return [
@@ -220,6 +231,9 @@ function turnCompletionView(value: unknown) {
   const terminalStatus = String(value ?? "completed").trim().toLowerCase() || "completed";
   if (terminalStatus === "completed") {
     return { title: "任务已完成", detail: "状态：completed", status: "completed", terminalStatus };
+  }
+  if (terminalStatus === "guided" || isSteerInterruptReason(terminalStatus)) {
+    return { title: "引导已接管", detail: "上一轮已收束，按你的引导继续", status: "running", terminalStatus };
   }
   if (INTERRUPTED_TURN_STATUSES.has(terminalStatus)) {
     return { title: "任务已中断", detail: `状态：${terminalStatus}`, status: "interrupted", terminalStatus };
@@ -253,6 +267,18 @@ function backgroundProgressTitle(status: string) {
   if (status === "interrupted") return "子任务组已中断";
   if (status === "blocked") return "子任务组未全部完成";
   return "子任务组执行失败";
+}
+
+function gatewayErrorDetail(error: unknown) {
+  const record = asRecord(error);
+  const message = String(record.message ?? "").trim() || "网关未配置或请求失败";
+  const hint = Array.isArray(record.diagnostics)
+    ? record.diagnostics.map((item) => String(item ?? "").trim()).find((item) => item.includes("生效凭据"))
+    : "";
+  if (!hint || message.includes("生效凭据")) {
+    return message;
+  }
+  return `${message} ${hint}`;
 }
 
 /**
@@ -310,7 +336,7 @@ function backgroundSubagentActivity(event: Record<string, unknown>, options: Bac
 
 function roundDetail(event: Record<string, unknown>) {
   const parts = [
-    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.round) ? `第 ${event.round} 轮` : null,
     Number.isFinite(event.messageCount) ? `${event.messageCount} 条消息` : null,
     Number.isFinite(event.toolSchemaCount) ? `${event.toolSchemaCount} 个工具定义` : null
   ].filter(Boolean);
@@ -319,7 +345,7 @@ function roundDetail(event: Record<string, unknown>) {
 
 function gatewayRetryDetail(event: Record<string, unknown>) {
   const parts = [
-    Number.isFinite(event.round) ? `round ${event.round}` : null,
+    Number.isFinite(event.round) ? `第 ${event.round} 轮` : null,
     Number.isFinite(event.attempt) && Number.isFinite(event.maxAttempts) ? `第 ${event.attempt}/${event.maxAttempts} 次` : null,
     asRecord(event.error).code ? String(asRecord(event.error).code) : null,
     event.stage ? `阶段 ${event.stage}` : null,
@@ -328,11 +354,18 @@ function gatewayRetryDetail(event: Record<string, unknown>) {
   return parts.join(" · ") || "网关响应异常，正在自动重试";
 }
 
+function waitForLabel(value: unknown) {
+  if (value === "all") return "等待全部完成";
+  if (value === "any") return "等待任一完成";
+  if (value === "none") return "完成后不接续";
+  return value ? String(value) : "";
+}
+
 function backgroundSubagentStartedDetail(event: Record<string, unknown>) {
   const parts = [
-    event.profile ? `profile=${event.profile}` : null,
-    event.groupId ? `group=${event.groupId}` : null,
-    event.waitFor ? `waitFor=${event.waitFor}` : null,
+    event.profile ? String(event.profile) : null,
+    event.groupId ? `组 ${event.groupId}` : null,
+    waitForLabel(event.waitFor) || null,
     event.wakeParent === false ? "完成后仅记录结果" : "完成后自动唤醒主控"
   ].filter(Boolean);
   return parts.join(" · ");
@@ -390,9 +423,7 @@ function toolCallNames(toolCalls: unknown) {
   return toolCalls.map((call) => toolLabel(asRecord(call).name)).join("、");
 }
 
-export function toolLabel(name: unknown) {
-  return (typeof name === "string" ? TOOL_LABELS[name] : undefined) ?? String(name ?? "工具");
-}
+export { TOOL_LABELS, toolLabel };
 
 function toolDetail(event: Record<string, unknown>) {
   const keys = Array.isArray(event.inputKeys) && event.inputKeys.length > 0

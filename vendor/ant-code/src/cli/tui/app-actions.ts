@@ -602,9 +602,9 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
   const interruptCurrentTurn = useCallback((stopReason: string) => {
     const controller = currentTurnAbortRef.current;
     if (controller && !controller.signal.aborted) {
-      controller.abort();
+      controller.abort(stopReason);
     }
-    setStream(initialStream({ phase: "interrupted", stopReason }));
+    setStream(initialStream({ phase: stopReason === "guided" ? "idle" : "interrupted", stopReason }));
   }, []);
 
   const interruptPendingGuideAtGatewayBoundary = useCallback(() => {
@@ -811,9 +811,9 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       `详情：/agents task ${taskId}`
     ].join("\n");
     if (stateRef.current.entries?.some((entry) => entry.id === entryId)) {
-      updateEntryById(entryId, { kind: "agent", title: "子任务已启动", body, taskId, profile, taskStatus: "running" });
+      updateEntryById(entryId, { kind: "agent", title: "子任务后台运行中", body, taskId, profile, taskStatus: "running" });
     } else {
-      addEntry("agent", "子任务已启动", body, { id: entryId, taskId, profile, taskStatus: "running" });
+      addEntry("agent", "子任务后台运行中", body, { id: entryId, taskId, profile, taskStatus: "running" });
     }
     setSideView("tasks");
     setSideOffset(0);
@@ -1051,6 +1051,8 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
         void loadTaskRecords();
         setSideView("tasks");
       }
+    } else if (event.type === "pdf_vision_progress") {
+      setActivity((current) => ({ ...current, status: `PDF ${event.pageEnd ?? ""}/${event.totalPages ?? ""} ${event.stage === "completed" ? "已识别" : "识别中"}`, lastTool: "PDF vision" }));
     } else if (event.type === "subagent_group_started") {
       const body = [
         `group=${event.groupId}`,
@@ -1101,13 +1103,14 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       setStreamOffset(0);
       setStream(initialStream());
     } else if (event.type === "turn_interrupted") {
-      lastTurnStatusRef.current = "interrupted";
+      const steered = String(event.reason ?? "").trim() === "guided";
+      lastTurnStatusRef.current = steered ? "guided" : "interrupted";
       flushStreamDeltasNow();
       const draftText = String(event.draftText ?? "");
       const draftThinkingPreview = limitThinkingPreview(String(event.draftThinking ?? ""));
       const draftThinking = draftThinkingPreview.text;
       if (draftText.trim()) {
-        addEntry("assistant", "中断草稿", draftText, draftThinking
+        addEntry("assistant", steered ? "引导前草稿" : "中断草稿", draftText, draftThinking
           ? {
             thinking: draftThinking,
             thinkingBytes: event.draftThinkingBytes ?? Buffer.byteLength(draftThinking, "utf8"),
@@ -1116,10 +1119,10 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
           }
           : undefined);
       }
-      setStream(initialStream({ phase: "interrupted", stopReason: event.reason ?? "user" }));
-      addEntry("turn", "已中断", draftText.trim()
-        ? "轮次已中断，已保留上方中断草稿，可直接继续纠偏。"
-        : "轮次已在本地中断。尚未收到可保存的助手草稿。");
+      setStream(initialStream({ phase: steered ? "idle" : "interrupted", stopReason: event.reason ?? "user" }));
+      addEntry(steered ? "guide" : "turn", steered ? "引导已接管" : "已中断", draftText.trim()
+        ? (steered ? "上一轮已收束，草稿已保留，正在按引导继续。" : "轮次已中断，已保留上方中断草稿，可直接继续纠偏。")
+        : (steered ? "上一轮已收束，正在按引导继续。" : "轮次已在本地中断。尚未收到可保存的助手草稿。"));
     } else if (event.type === "gateway_error") {
       flushStreamDeltasNow();
       setStream((current) => ({ ...current, active: true, phase: "failed" }));
@@ -1130,6 +1133,8 @@ export function useTuiAppActions(s: ReturnType<typeof useTuiAppPanels>) {
       const body = "设置 LAB_MODEL_GATEWAY_URL 后才能启用模型轮次。";
       addEntry("gateway", "未配置", body);
       pushInspector(makeInspector("网关", "未配置", body, "gateway"), { focus: true });
+    } else if (event.type === "tool_results_summarized") {
+      addEntry("context", "工具结果已摘要", `${event.beforeTokens} -> ${event.afterTokens} tokens`);
     } else if (event.type === "context_compacted") {
       const strategy = event.strategy === "agent:compaction" ? "内部压缩 agent" : event.strategy === "model" ? "模型摘要" : event.strategy === "local" ? "本地摘要" : "未知方式";
       addEntry("context", "compacted", `${event.beforeMessages} -> ${event.afterMessages}; summary bytes=${event.summaryBytes}; ${strategy}${event.fallbackReason ? `; fallback=${event.fallbackReason}` : ""}`);

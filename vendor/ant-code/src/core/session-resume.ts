@@ -22,7 +22,7 @@ import { getAgentProfile } from "../agents/profiles.ts";
 import { resolveMaxParallelReadonlyAgentRuns } from "../agents/orchestration-config.ts";
 import { appendDelegationReminderToExecution, createDelegationGuard } from "../agents/delegation-guard.ts";
 import { createReviewGate } from "../agents/review-policy.ts";
-import { buildCompactedContextMessage, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
+import { buildCompactedContextMessage, compactSessionContext, compactSessionContextWithModel, createContextWindow, estimatePromptPayload, summarizeContextWindow } from "./context-window.ts";
 import { buildGoalSystemPromptAppendix, normalizeSessionGoal, serializeSessionGoal, stripGoalStatusFromContent, stripGoalStatusMarkers } from "./goal.ts";
 import { createAntEventNormalizer } from "./events.ts";
 import { accumulateProviderUsage, normalizeProviderUsageAggregate, sanitizeProviderUsage, type ProviderUsageAggregate } from "./provider-usage.ts";
@@ -56,7 +56,7 @@ import {
 } from "./session-messages.ts";
 import {
   isPlainObject,
-  promptEstimateNeedsCompaction
+  promptEstimateOverBudget
 } from "./session-health.ts";
 import {
   persistSessionMetadata,
@@ -143,12 +143,6 @@ export function limitRestoredContextToPromptBudget(restoredContext: RestoredCont
   const fallbackMessages = Array.isArray(restoredContext.persistedMessages)
     ? restoredContext.persistedMessages
     : [];
-  if (!hasPersistedCompaction(options.contextWindow as ReturnType<typeof createContextWindow> | null | undefined) || fallbackMessages.length === 0) {
-    return {
-      ...restoredContext,
-      clearPersistedSummary: options.clearPersistedSummary === true
-    };
-  }
   const contextWindow = createContextWindow(options.config ?? {});
   const estimate = estimatePromptPayload({
     model: String(options.model ?? options.config?.modelAlias ?? ""),
@@ -157,16 +151,32 @@ export function limitRestoredContextToPromptBudget(restoredContext: RestoredCont
     toolResults: [],
     gatewayProtocol: options.config?.lab?.gatewayProtocol
   });
-  if (!promptEstimateNeedsCompaction(estimate, contextWindow, options.config?.context?.promptCompactRatio)) {
+  if (!promptEstimateOverBudget(estimate, contextWindow)) {
     return {
       ...restoredContext,
       clearPersistedSummary: options.clearPersistedSummary === true
     };
   }
+  if (hasPersistedCompaction(options.contextWindow as ReturnType<typeof createContextWindow> | null | undefined) && fallbackMessages.length > 0) {
+    return {
+      ...restoredContext,
+      messages: fallbackMessages,
+      fromArchive: false,
+      limited: true,
+      limitReason: "restored_full_context_over_budget",
+      clearPersistedSummary: false
+    };
+  }
+  const temp = {
+    config: options.config,
+    messages: restoredContext.messages.slice(),
+    contextWindow: createContextWindow(options.config ?? {})
+  };
+  compactSessionContext(temp, { force: true, reason: "resume_prompt_budget" });
   return {
     ...restoredContext,
-    messages: fallbackMessages,
-    fromArchive: false,
+    messages: temp.messages,
+    fromArchive: true,
     limited: true,
     limitReason: "restored_full_context_over_budget",
     clearPersistedSummary: false
@@ -269,19 +279,43 @@ export async function restoreArchivedContextMessages(store: ReturnType<typeof cr
   }
   const contextRecord = context && typeof context === "object" ? context as Record<string, unknown> : {};
   const maxMessages = positiveInteger(contextRecord.resumeMaxMessages, DEFAULT_RESUME_CONTEXT_MESSAGES) ?? DEFAULT_RESUME_CONTEXT_MESSAGES;
-  const chunkCount = Math.max(1, Math.ceil(maxMessages / normalized.chunkSize));
-  const chunks = normalized.chunks.slice(-chunkCount);
+  const maxBytes = positiveInteger(contextRecord.resumeMaxBytes, DEFAULT_RESUME_CONTEXT_BYTES) ?? DEFAULT_RESUME_CONTEXT_BYTES;
+  const chunks = selectResumeArchiveChunks(normalized.chunks, { maxMessages, maxBytes });
+  const results = await Promise.all(chunks.map((chunk) => store.readTranscriptChunk(normalized, chunk.index)));
   const messages = [];
-  for (const chunk of chunks) {
-    const result = await store.readTranscriptChunk(normalized, chunk.index);
+  for (const result of results) {
     if (!result.ok) {
-      const error = new Error(result.error?.message ?? `Unable to read transcript chunk '${chunk.index}'`);
+      const error = new Error(result.error?.message ?? "Unable to read transcript chunk");
       Object.assign(error, { code: result.error?.code ?? "TRANSCRIPT_CHUNK_READ_ERROR" });
       throw error;
     }
     messages.push(...(Array.isArray(result.messages) ? result.messages : []));
   }
   return repairDanglingToolCallMessages(restorePersistedMessages(limitResumeContextMessages(messages, context)));
+}
+
+
+export function selectResumeArchiveChunks<T extends { index: number; messages?: number; bytes?: number }>(
+  chunks: T[],
+  limits: { maxMessages: number; maxBytes: number }
+): T[] {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return [];
+  }
+  const selected = [];
+  let messages = 0;
+  let bytes = 0;
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    const chunk = chunks[index];
+    selected.push(chunk);
+    messages += Math.max(0, Number(chunk?.messages) || 0);
+    bytes += Math.max(0, Number(chunk?.bytes) || 0);
+    if (messages >= limits.maxMessages || bytes >= limits.maxBytes) {
+      break;
+    }
+  }
+  selected.reverse();
+  return selected;
 }
 
 
@@ -293,15 +327,28 @@ export function limitResumeContextMessages(messages: unknown, context: unknown =
   const maxMessages = positiveInteger(record.resumeMaxMessages, DEFAULT_RESUME_CONTEXT_MESSAGES) ?? DEFAULT_RESUME_CONTEXT_MESSAGES;
   const maxTokens = positiveInteger(record.resumeMaxTokens, DEFAULT_RESUME_CONTEXT_TOKENS) ?? DEFAULT_RESUME_CONTEXT_TOKENS;
   const maxBytes = positiveInteger(record.resumeMaxBytes, DEFAULT_RESUME_CONTEXT_BYTES) ?? DEFAULT_RESUME_CONTEXT_BYTES;
-  let kept = messages.filter(Boolean).slice(-maxMessages);
-  while (kept.length > 1) {
-    const bytes = estimatePersistedMessagesBytes(kept);
-    if (bytes <= maxBytes && estimateTokensFromBytesLocal(bytes) <= maxTokens) {
-      break;
-    }
-    kept = kept.slice(1);
+  const kept = messages.filter(Boolean).slice(-maxMessages);
+  if (kept.length <= 1) {
+    return alignContextStartToUser(kept);
   }
-  return alignContextStartToUser(kept);
+  const fits = (slice: unknown[]) => {
+    const bytes = estimatePersistedMessagesBytes(slice);
+    return bytes <= maxBytes && estimateTokensFromBytesLocal(bytes) <= maxTokens;
+  };
+  if (fits(kept)) {
+    return alignContextStartToUser(kept);
+  }
+  let lo = 1;
+  let hi = kept.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (fits(kept.slice(mid))) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return alignContextStartToUser(kept.slice(lo));
 }
 
 
@@ -456,16 +503,35 @@ export function nonNegativeInteger(value: unknown, fallback: number | null = 0):
 /**
  * @param {{ session: AgentSession; sessionStore: ReturnType<typeof createSessionStore>; metadata: Record<string, any>; eventOptions: Record<string, any>; prompt?: string; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; reason: string; draft?: ReturnType<typeof createInterruptedDraftCapture> }} options
  */
+export function abortSignalReason(signal: AbortSignal | undefined, fallback = "user") {
+  if (!signal?.aborted) {
+    return fallback;
+  }
+  const reason = signal.reason;
+  if (typeof reason === "string" && reason.trim()) {
+    return reason.trim();
+  }
+  return fallback;
+}
+
+export function isSteerInterruptReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
 export async function finishInterruptedTurn(options: { session: AgentSession; sessionStore: ReturnType<typeof createSessionStore>; metadata: Record<string, unknown>; eventOptions: Record<string, unknown>; prompt?: string; displayPrompt?: string; env?: NodeJS.ProcessEnv; hooksTrusted?: boolean; reason: string; draft?: ReturnType<typeof createInterruptedDraftCapture> }) {
   const draft = normalizeInterruptedDraft(options.draft);
+  const steered = isSteerInterruptReason(options.reason);
+  const persistStatus = steered ? "guided" : "interrupted";
   const finalOutput = draft
     ? [
-      "Turn interrupted by the local user.",
+      steered ? "Turn redirected to user guidance." : "Turn interrupted by the local user.",
       "",
-      "Interrupted assistant draft saved:",
+      steered ? "Saved assistant draft:" : "Interrupted assistant draft saved:",
       draft.text
     ].join("\n")
-    : "Turn interrupted by the local user.";
+    : steered
+      ? "Turn redirected to user guidance."
+      : "Turn interrupted by the local user.";
   if (draft) {
     options.metadata.interruptedDraft = {
       textBytes: draft.bytes,
@@ -491,19 +557,22 @@ export async function finishInterruptedTurn(options: { session: AgentSession; se
     draftThinkingBytes: draft?.thinkingBytes ?? 0,
     outputBytes: Buffer.byteLength(finalOutput, "utf8")
   });
-  await persistSessionMetadata(options.sessionStore, options.metadata, finalOutput, "interrupted", options.session, {
+  await persistSessionMetadata(options.sessionStore, options.metadata, finalOutput, persistStatus, options.session, {
     env: options.env,
     hooksTrusted: options.hooksTrusted
   });
   await emitEvent(options.eventOptions, {
     type: "turn_complete",
-    status: "interrupted",
+    status: persistStatus,
+    reason: options.reason,
     outputBytes: Buffer.byteLength(finalOutput, "utf8")
   });
   return {
     session: options.session,
     output: finalOutput,
-    interrupted: true
+    interrupted: !steered,
+    steered,
+    interruptReason: options.reason
   };
 }
 
@@ -521,7 +590,7 @@ export function captureInterruptedDraftEvent(capture: { text: string; thinking: 
   if (!capture || !event || typeof event !== "object") {
     return;
   }
-  if (event.type === "assistant_delta") {
+  if (event.type === "assistant_delta" || event.type === "assistant_text_delta") {
     capture.text += String(event.text ?? "");
     return;
   }
@@ -540,7 +609,7 @@ export function normalizeInterruptedDraft(draft: { text?: unknown; thinking?: un
   const thinkingBytes = Number.isFinite(Number(draft?.thinkingBytes))
     ? Number(draft?.thinkingBytes)
     : thinkingPreview.bytes;
-  if (!text.trim()) {
+  if (!text.trim() && !thinkingPreview.text.trim() && thinkingBytes <= 0) {
     return null;
   }
   return {
@@ -580,35 +649,43 @@ export function appendFailedGatewayDraft(options: {
 
 
 export function appendInterruptedDraftMessages(session: AgentSession, prompt: string, displayPrompt: unknown, draft: { text?: unknown; thinking?: unknown; thinkingBytes?: unknown }, reason: string) {
-  const note = [
-    "[中断草稿，非最终回复]",
+  const visibleText = String(draft.text ?? "").trim();
+  const steered = isSteerInterruptReason(reason);
+  const transcriptNote = [
+    steered ? "[引导接管前的草稿，非最终回复]" : "[中断草稿，非最终回复]",
     `原因：${reason}`,
-    "",
-    String(draft.text ?? "")
-  ].join("\n");
-  const assistantMessage: SessionMessage = {
-    role: "assistant",
-    content: [{ type: "text", text: note }],
-    interruptedDraft: true
-  };
+    visibleText ? "" : (steered ? "本轮在给出可见正文前被引导接管。" : "本轮在给出可见正文前被上游断开。"),
+    visibleText
+  ].filter((line) => line !== "").join("\n");
   const thinking = normalizeAssistantThinking({
     text: draft.thinking,
     bytes: draft.thinkingBytes,
     source: "gateway-interrupted"
   });
+  const transcriptAssistant: SessionMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: transcriptNote }],
+    interruptedDraft: true
+  };
+  const contextAssistant: SessionMessage = {
+    role: "assistant",
+    content: visibleText ? [{ type: "text", text: transcriptNote }] : [],
+    interruptedDraft: true
+  };
   if (thinking) {
-    assistantMessage.thinking = thinking;
+    transcriptAssistant.thinking = thinking;
+    contextAssistant.thinking = thinking;
   }
   if (typeof prompt === "string" && prompt.trim()) {
     const userMessage = persistableUserTurnMessage(prompt);
     session.messages.push(userMessage);
     appendModelContextArchiveMessages(session, [userMessage]);
   }
-  session.messages.push(assistantMessage);
-  appendModelContextArchiveMessages(session, [assistantMessage]);
+  session.messages.push(contextAssistant);
+  appendModelContextArchiveMessages(session, [contextAssistant]);
   appendTranscriptMessages(session, [
     ...(typeof displayPrompt === "string" && displayPrompt.trim() ? [{ role: "user", content: displayPrompt }] : []),
-    assistantMessage
+    transcriptAssistant
   ]);
 }
 

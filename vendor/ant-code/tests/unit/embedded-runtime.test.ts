@@ -35,7 +35,7 @@ function fakeClassList() {
 
 test("package version and engines match the TaxaMask 2.0 TypeScript embed", async () => {
   const pkg = JSON.parse(await fs.readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.version, "2.0.5-taxamask.1");
+  assert.equal(pkg.version, "2.0.24-taxamask.1");
   assert.equal(pkg.engines.node, ">=22.18");
   assert.equal(pkg.bin["ant-code"], "./src/cli/index.ts");
 });
@@ -95,6 +95,8 @@ test("standalone git write tools are on the built-in tool list", () => {
   for (const name of ["git_status", "git_diff", "git_commit", "git_add", "git_branch", "git_stash"]) {
     assert.equal(names.includes(name), true, `missing ${name}`);
   }
+  assert.equal(names.includes("schedule_create"), false);
+  assert.equal(names.includes("schedule_list"), false);
 });
 
 test("embed stylesheet covers 2.0 settings and reasoning controls", async () => {
@@ -105,6 +107,16 @@ test("embed stylesheet covers 2.0 settings and reasoning controls", async () => 
   assert.equal(css.includes(".taxamask-embed .atmosphere"), true);
   assert.equal(css.includes("html.taxamask-embed-light"), true);
   assert.equal(css.includes("html.taxamask-embed-light .composer"), true);
+  assert.equal(css.includes("html.taxamask-embed-light .prompt-rail-preview"), true);
+  assert.equal(css.includes("html.taxamask-embed-dark .prompt-rail-preview"), true);
+  assert.equal(css.includes("#08789F"), true);
+  assert.equal(css.includes("#8FAED4"), true);
+  assert.equal(css.includes("html.taxamask-embed-light *::-webkit-scrollbar-thumb"), true);
+  assert.equal(css.includes("html.taxamask-embed-light .settings-row-actions button"), true);
+  assert.equal(css.includes(".taxamask-embed .model-config-card"), true);
+  assert.equal(css.includes("border-radius: 16px !important"), true);
+  assert.equal(css.includes(".taxamask-embed .sidebar"), true);
+  assert.equal(css.includes(".taxamask-embed .preview"), true);
   assert.equal(css.includes(".settings-field-stack textarea"), true);
   assert.equal(css.includes("color-scheme: light !important"), true);
   assert.equal(css.includes("#15191d"), false);

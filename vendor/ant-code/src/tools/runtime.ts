@@ -47,8 +47,8 @@ import {
   webFetchTool,
   webSearchTool
 } from "./web-tools.ts";
+import { collectShellArtifacts } from "./artifacts.ts";
 import { createWorkflowState, planUpdateTool, recordFileChange, recordValidation, todoReadTool, todoWriteTool } from "./workflow-tools.ts";
-
 const HANDLERS = Object.freeze({
   read_file: readFileTool,
   list_files: listFilesTool,
@@ -149,6 +149,7 @@ type SkillRecord = {
 type HookRunResult = {
   ok?: boolean;
   blocked?: boolean;
+  requiresApproval?: boolean;
   blockingError?: { message?: string; code?: string; [key: string]: unknown };
   results?: Array<{
     blocked?: boolean;
@@ -206,6 +207,7 @@ export type ToolRuntimeOptions = {
   onBackgroundAgentEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   onBackgroundTerminalEvent?: (event: Record<string, unknown>) => void | Promise<void>;
   visualEvidence?: import("../core/visual-evidence.ts").VisualEvidenceStore | null;
+  readToolEvidence?: (input: Record<string, unknown>) => Promise<unknown>;
 };
 
 export function createToolRuntime(options: ToolRuntimeOptions) {
@@ -350,7 +352,7 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
         const execution = await executeWebFetchTool(options, input, definition);
         const fetchResult = asResultRecord(execution);
         if (fetchResult.ok === true) {
-          recordToolEffect(workflowState, name, input, isPlainObject(fetchResult.result) ? fetchResult.result : EMPTY_RECORD);
+          recordToolEffect(workflowState, name, input, isPlainObject(fetchResult.result) ? fetchResult.result : EMPTY_RECORD, options.cwd);
         }
         return finishTool(options, name, input, definition, options.signal?.aborted && fetchResult.interrupted !== true
           ? interruptedToolExecution(name, input, definition, fetchResult)
@@ -397,6 +399,11 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
       }
 
       const handler = lookupHandler(name);
+      if (name === "tool_result_read") {
+        return finishTool(options, name, input, definition, options.readToolEvidence
+          ? await options.readToolEvidence(input)
+          : { ok: false, error: { code: "EVIDENCE_UNAVAILABLE", message: "Tool evidence is unavailable in this context." } });
+      }
       if (name === "todo_read") {
         return finishTool(options, name, input, definition, { ok: true, result: todoReadTool({ workflow: workflowState }) });
       }
@@ -477,13 +484,13 @@ export function createToolRuntime(options: ToolRuntimeOptions) {
           });
         }
         if (options.signal?.aborted || resultFields.interrupted === true) {
-          recordToolEffect(workflowState, name, input, resultFields);
+          recordToolEffect(workflowState, name, input, resultFields, options.cwd);
           if (name === "write_file" || (name === "edit_file" && resultFields.edited !== false)) {
             await emitFileChangedHook(options, name, input, resultFields);
           }
           return finishTool(options, name, input, definition, interruptedToolExecution(name, input, definition, resultFields));
         }
-        recordToolEffect(workflowState, name, input, resultFields);
+        recordToolEffect(workflowState, name, input, resultFields, options.cwd);
         if (name === "write_file" || (name === "edit_file" && resultFields.edited !== false)) {
           await emitFileChangedHook(options, name, input, resultFields);
         }
@@ -1077,16 +1084,6 @@ async function finishTool(options: ToolRuntimeOptions, name: string, input: Reco
   return execution;
 }
 
-function summarizeHookBlock(hookResult: unknown) {
-  const result = (hookResult ?? EMPTY_RECORD) as HookRunResult;
-  const blocking = result.results?.find((item) => item.blocked);
-  return {
-    event: blocking?.event ?? "tool.before",
-    name: blocking?.hook ?? null,
-    message: blocking?.message ?? result.blockingError?.message ?? "blocked by hook"
-  };
-}
-
 function approvalRequestFromHookBlock(
   hookResult: HookRunResult,
   toolName: string,
@@ -1117,6 +1114,16 @@ function approvalRequestFromHookBlock(
       hookEvent: blocking?.event ?? "tool.before",
       taxamask
     }
+  };
+}
+
+function summarizeHookBlock(hookResult: unknown) {
+  const result = (hookResult ?? EMPTY_RECORD) as HookRunResult;
+  const blocking = result.results?.find((item) => item.blocked);
+  return {
+    event: blocking?.event ?? "tool.before",
+    name: blocking?.hook ?? null,
+    message: blocking?.message ?? result.blockingError?.message ?? "blocked by hook"
   };
 }
 
@@ -1337,17 +1344,17 @@ async function startBackgroundAgentTool(
     ? input.taskId.trim()
     : `task-${crypto.randomUUID()}`;
   const groupId = normalizeGroupId(input.groupId) ?? `group-${crypto.randomUUID()}`;
-  const waitFor = pickEnum(
+  let waitFor = pickEnum(
     input.waitForGroup,
     ["all", "any", "none"] as const,
     pickEnum(options.config?.agents?.backgroundWakeup?.defaultWaitFor, ["all", "any", "none"] as const, "all") ?? "all"
   ) ?? "all";
-  const wakeParent = input.wakeParent !== false && options.config?.agents?.backgroundWakeup?.autoQueueParentPrompt !== false;
+  let wakeParent = input.wakeParent !== false && options.config?.agents?.backgroundWakeup?.autoQueueParentPrompt !== false;
   const wakeReason = typeof input.wakeReason === "string" && input.wakeReason.trim()
     ? input.wakeReason.trim()
     : "后台子任务完成后继续主控编排";
   const groupStore = createAgentTaskGroupStore({ cwd: options.cwd });
-  await groupStore.ensureGroup({
+  const ensuredGroup = await groupStore.ensureGroup({
     id: groupId,
     parentSessionId: options.parentSessionId ?? null,
     status: "running",
@@ -1361,6 +1368,12 @@ async function startBackgroundAgentTool(
       background: true
     }
   });
+  if (!ensuredGroup.ok) {
+    return { ok: false, error: ensuredGroup.error };
+  }
+  const wakePolicyMerged = ensuredGroup.group.waitFor !== waitFor || ensuredGroup.group.wakeParent !== wakeParent;
+  waitFor = ensuredGroup.group.waitFor as "all" | "any" | "none";
+  wakeParent = ensuredGroup.group.wakeParent;
   await runHooks({
     config: options.config,
     cwd: options.cwd,
@@ -1459,7 +1472,7 @@ async function startBackgroundAgentTool(
     taskId,
     groupId,
     taskStatus: "running",
-    outputSummary: `后台子智能体 ${profile.name} 已启动；group=${groupId}，完成后将${wakeParent ? "自动唤醒主控" : "记录结果" }。`,
+    outputSummary: `后台子智能体 ${profile.name} 已启动；group=${groupId}，完成后将${wakeParent && waitFor !== "none" ? "自动唤醒主控" : "记录结果" }。${wakePolicyMerged ? "同组唤醒设置已合并，保留已开启的唤醒并采用更严格的等待条件。" : ""}`,
     result: {
       taskId,
       groupId,
@@ -1467,7 +1480,8 @@ async function startBackgroundAgentTool(
       status: "running",
       background: true,
       waitForGroup: waitFor,
-      wakeParent
+      wakeParent,
+      wakePolicyMerged
     }
   };
 }
@@ -1533,8 +1547,8 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group.status,
-    waitFor: state.waitFor,
-    wakeParent: state.wakeParent,
+    waitFor: group.waitFor,
+    wakeParent: group.wakeParent,
     completed: summary.completed,
     summary: summary.summary
   });
@@ -1578,8 +1592,8 @@ async function finalizeBackgroundAgentTool(options: ToolRuntimeOptions, state: {
     taskId: state.taskId,
     profile: state.profile.name,
     status: group?.status,
-    waitFor: state.waitFor,
-    wakeParent: state.wakeParent,
+    waitFor: group?.waitFor,
+    wakeParent: group?.wakeParent,
     wakePrompt,
     summary: group?.summary
   });
@@ -1633,10 +1647,18 @@ async function persistBackgroundAgentResultIfNeeded(
     heartbeatAt: now,
     progressAt: now,
     latestProgress: interrupted
-      ? "后台子智能体已中断"
+      ? (typeof result.output === "string" && result.output.trim() ? "子智能体已中断，已保留工具记录和草稿" : "后台子智能体已中断")
       : ok
         ? (partial ? "子智能体阶段性暂停，可继续" : "子智能体已完成")
         : String(error?.message ?? "后台子智能体异常结束"),
+    ...(typeof result.output === "string" && result.output.trim()
+      ? {
+        outputSummary: result.output.split(/\r?\n/).slice(0, 8).join("\n"),
+        output: result.output
+      }
+      : {}),
+    ...(Array.isArray(result.tools) ? { toolCalls: result.tools } : {}),
+    ...(typeof result.continuationPrompt === "string" ? { continuationPrompt: result.continuationPrompt } : {}),
     error: ok ? null : error
   });
 }
@@ -1854,7 +1876,7 @@ function lookupHandler(name: string): BuiltinHandler | undefined {
  * @param {Record<string, any>} input
  * @param {Record<string, any>} result
  */
-function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>, name: string, input: Record<string, unknown>, result: Record<string, unknown>) {
+function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>, name: string, input: Record<string, unknown>, result: Record<string, unknown>, cwd: string = "") {
   if (name === "write_file") {
     recordFileChange(workflowState, {
       toolName: name,
@@ -1885,6 +1907,18 @@ function recordToolEffect(workflowState: ReturnType<typeof createWorkflowState>,
       stderrTruncated: result.stderrTruncated,
       error: result.error
     });
+    for (const artifact of collectShellArtifacts(cwd, {
+      command: input.command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      durationMs: result.durationMs
+    })) {
+      recordFileChange(workflowState, {
+        toolName: name,
+        path: artifact.path,
+        created: artifact.created
+      });
+    }
   }
 }
 

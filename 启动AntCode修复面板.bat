@@ -21,26 +21,25 @@ if not exist "%DASHBOARD_ENTRY%" (
     exit /b 1
 )
 
-if defined TAXAMASK_NODE_EXE (
-    if exist "%TAXAMASK_NODE_EXE%" set "NODE_EXE=%TAXAMASK_NODE_EXE%"
-)
+if defined TAXAMASK_NODE_EXE call :AcceptNode "%TAXAMASK_NODE_EXE%"
 
 for %%N in (
+    "%CONDA_PREFIX%\node.exe"
     "%ANT_CODE_ROOT%\node.exe"
     "%PROJECT_ROOT%\node.exe"
+    "%USERPROFILE%\anaconda3\envs\taxamask\node.exe"
+    "%USERPROFILE%\miniconda3\envs\taxamask\node.exe"
     "%ProgramFiles%\nodejs\node.exe"
     "%ProgramFiles(x86)%\nodejs\node.exe"
     "%LocalAppData%\Programs\nodejs\node.exe"
 ) do (
-    if not defined NODE_EXE if exist "%%~N" set "NODE_EXE=%%~fN"
+    if not defined NODE_EXE call :AcceptNode "%%~N"
 )
 
 if not defined NODE_EXE (
     for %%C in (node.exe node) do (
-        if not defined NODE_EXE (
-            for /f "delims=" %%F in ('where %%C 2^>nul') do (
-                if not defined NODE_EXE set "NODE_EXE=%%F"
-            )
+        for /f "delims=" %%F in ('where %%C 2^>nul') do (
+            if not defined NODE_EXE call :AcceptNode "%%F"
         )
     )
 )
@@ -56,16 +55,17 @@ if not defined NODE_EXE (
     exit /b 1
 )
 
-"%NODE_EXE%" -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit((major>22||(major===22&&minor>=18))?0:1)"
-if errorlevel 1 (
-    echo Node.js 22.18 or newer is required.
-    echo Current Node executable:
-    echo %NODE_EXE%
-    echo.
-    "%NODE_EXE%" -v
-    pause
-    exit /b 1
-)
+goto NodeReady
+
+:AcceptNode
+if "%~1"=="" exit /b 1
+if not exist "%~1" exit /b 1
+"%~1" -e "const [major,minor]=process.versions.node.split('.').map(Number); process.exit((major>22||(major===22&&minor>=18))?0:1)" >nul 2>nul
+if errorlevel 1 exit /b 1
+set "NODE_EXE=%~f1"
+exit /b 0
+
+:NodeReady
 
 set "LAB_AGENT_PACKAGE_ROOT=%ANT_CODE_ROOT%"
 set "LAB_AGENT_CONFIG=%PROJECT_ROOT%\AntSleap\config\taxamask_ant_code.config.json"

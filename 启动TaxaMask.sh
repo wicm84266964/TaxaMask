@@ -89,6 +89,14 @@ if [[ " ${QTWEBENGINE_CHROMIUM_FLAGS:-} " != *" --disable-gpu "* ]]; then
   export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:-} --disable-gpu"
 fi
 
+echo "Preparing Agent Center Node.js in the Python environment..."
+if ! "$PYTHON_EXE" "$SCRIPT_DIR/scripts/ensure_agent_node.py"; then
+  echo
+  echo "Agent Center Node.js was not prepared. The workbench can still open,"
+  echo "but the embedded agent needs Node.js 22.18 or newer inside this Python environment."
+  echo
+fi
+
 echo "Starting TaxaMask with:"
 echo "$PYTHON_EXE"
 if [[ -n "$PYTHON_SOURCE" ]]; then

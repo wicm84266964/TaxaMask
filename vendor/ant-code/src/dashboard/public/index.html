@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ant Code Dashboard</title>
     <link rel="stylesheet" href="/assets/vendor/katex.min.css" />
-    <link rel="stylesheet" href="/assets/styles.css?v=taxamask-light-composer" />
+    <link rel="stylesheet" href="/assets/styles.css?v=taxamask-menu-hover" />
   </head>
   <body data-dashboard-view="conversation">
     <div class="atmosphere" aria-hidden="true"></div>
@@ -23,7 +23,10 @@
         <button class="primary-action" id="new-task" type="button">新任务</button>
         <div class="sidebar-section">
           <div class="section-label">当前项目</div>
-          <div class="project-path" id="project-path">加载中</div>
+          <div class="project-path-row">
+            <div class="project-path" id="project-path" title="加载中">加载中</div>
+            <button class="project-path-copy" id="copy-project-path" type="button" title="复制项目路径" aria-label="复制项目路径" disabled>复制</button>
+          </div>
         </div>
         <div class="sidebar-section grow">
           <div class="section-row">
@@ -34,7 +37,17 @@
               <button class="icon-button" id="refresh-sessions" type="button" title="刷新" aria-label="刷新会话">↻</button>
             </div>
           </div>
-          <div class="thread-list" id="thread-list"></div>
+          <label class="thread-search">
+            <span class="visually-hidden">搜索会话标题，按回车搜索对话记录</span>
+            <input id="session-search" type="search" placeholder="搜索标题，回车搜记录" autocomplete="off" enterkeyhint="search" />
+          </label>
+          <div class="content-search-results hidden" id="content-search-results" aria-live="polite"></div>
+          <div class="thread-scroller" id="thread-scroller">
+            <div class="thread-list" id="thread-list"></div>
+            <div class="thread-scrollbar" id="thread-scrollbar" role="scrollbar" aria-controls="thread-list" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-label="拖动查看更多会话" tabindex="0" hidden>
+              <div class="thread-scrollbar-thumb" id="thread-scrollbar-thumb"></div>
+            </div>
+          </div>
         </div>
         <div class="sidebar-footer">
           <button class="shutdown-button" id="shutdown-button" type="button">关闭 Dashboard</button>
@@ -43,14 +56,14 @@
 
       <main class="workspace">
         <header class="workspace-header">
-          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="仅此电脑可打开。本地网关未连接。点击重新连接" aria-label="本地网关未连接，点击重新连接">
+          <button class="connection-status" id="connection-status" type="button" data-state="idle" title="正在读取本地网关配置" aria-label="正在读取本地网关配置">
             <span class="connection-dot" aria-hidden="true"></span>
-            <span class="connection-label">本地网关未连接</span>
+            <span class="connection-label">正在读取配置</span>
           </button>
           <div class="header-actions">
             <button class="header-settings" id="settings-button" type="button" aria-label="打开设置" aria-controls="settings-view" aria-pressed="false" title="设置">
               <svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M10.2 3.4h3.6l.4 2.1a6.8 6.8 0 0 1 1.7.96l2-.9 1.8 3.12-1.6 1.5c.1.5.16 1 .16 1.52s-.06 1.02-.16 1.52l1.6 1.5-1.8 3.12-2-.9a6.8 6.8 0 0 1-1.7.96l-.4 2.1h-3.6l-.4-2.1a6.8 6.8 0 0 1-1.7-.96l-2 .9-1.8-3.12 1.6-1.5A6.6 6.6 0 0 1 8 12c0-.52.06-1.02.16-1.52l-1.6-1.5 1.8-3.12 2 .9a6.8 6.8 0 0 1 1.7-.96l.4-2.1ZM12 9.4A2.6 2.6 0 1 0 12 14.6 2.6 2.6 0 0 0 12 9.4Z"/>
+                <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M10.253 6.103 10.296 2.807h3.408l.043 3.296 1.188.492 2.361-2.301 2.41 2.41-2.301 2.361.492 1.188 3.296.043v3.408l-3.296.043-.492 1.188 2.301 2.361-2.41 2.41-2.361-2.301-1.188.492-.043 3.296h-3.408l-.043-3.296-1.188-.492-2.361 2.301-2.41-2.41 2.301-2.361-.492-1.188L2.807 13.704v-3.408l3.296-.043.492-1.188L4.294 6.704l2.41-2.41 2.361 2.301.492-1.188Zm1.747 2.547a3.35 3.35 0 1 0 0 6.7 3.35 3.35 0 0 0 0-6.7Z"/>
               </svg>
               <span class="header-settings-label">设置</span>
             </button>
@@ -109,10 +122,22 @@
               </div>
               <div class="empty-kicker">Ant Code · Local</div>
               <div class="empty-title">我将全力配合你的工作</div>
-              <div class="empty-copy">过程折叠。结果展开。文件留在右侧。</div>
+              <div class="empty-copy" id="empty-copy">过程折叠。结果展开。</div>
             </div>
           </section>
           <button class="transcript-jump hidden" id="transcript-jump" type="button">回到底部</button>
+          <nav class="prompt-rail hidden" id="prompt-rail" aria-label="已发送提示" hidden>
+            <div class="prompt-rail-frame" id="prompt-rail-frame">
+              <div class="prompt-rail-scroller" id="prompt-rail-scroller">
+                <div class="prompt-rail-marks" id="prompt-rail-marks"></div>
+              </div>
+              <div class="prompt-rail-preview hidden" id="prompt-rail-preview" role="tooltip" hidden>
+                <div class="prompt-rail-index"></div>
+                <div class="prompt-rail-prompt"></div>
+                <div class="prompt-rail-response"></div>
+              </div>
+            </div>
+          </nav>
         </div>
 
         <section class="composer-shell">
@@ -126,7 +151,6 @@
               <button type="button" id="shutdown-confirm">确认关闭</button>
             </div>
           </div>
-          <div class="approval-panel hidden" id="approval-panel"></div>
           <div class="question-panel hidden" id="question-panel"></div>
           <div class="live-status hidden" id="live-status">
             <button class="live-main" id="activity-toggle" type="button" aria-expanded="false" aria-controls="live-subtasks" disabled>
@@ -135,6 +159,7 @@
             </button>
             <div class="live-subtasks" id="live-subtasks"></div>
           </div>
+          <div class="approval-panel hidden" id="approval-panel"></div>
           <div class="trust-panel hidden" id="trust-panel"></div>
           <div class="permission-confirm-panel hidden" id="permission-confirm-panel"></div>
           <div class="permission-confirm-panel hidden" id="goal-confirm-panel"></div>
@@ -163,8 +188,8 @@
             <label class="visually-hidden" for="prompt-input">任务需求</label>
             <span class="visually-hidden" id="prompt-description">按 Enter 发送，按 Shift 加 Enter 换行</span>
             <textarea id="prompt-input" rows="2" aria-describedby="prompt-description" placeholder="输入任务需求，例如：整理这批实验数据并生成一份简洁报告"></textarea>
-            <input id="attachment-input" class="hidden" type="file" accept="image/*" multiple />
-            <button class="attach-button" id="attach-button" type="button" title="添加图片" aria-label="添加图片">
+            <input id="attachment-input" class="hidden" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.json,.html" multiple />
+            <button class="attach-button" id="attach-button" type="button" title="添加图片或文档" aria-label="添加图片或文档">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path fill="currentColor" d="M16.5 6.5v8.2a4.5 4.5 0 1 1-9 0V7.8a3.2 3.2 0 1 1 6.4 0v6.6a1.9 1.9 0 1 1-3.8 0V8.2h1.7v6.2a.2.2 0 1 0 .4 0V7.8a1.5 1.5 0 1 0-3 0v6.9a3.2 3.2 0 1 0 6.4 0V6.5a4.8 4.8 0 1 0-9.6 0v8.2a6.2 6.2 0 1 0 12.4 0V6.5h-1.9Z"/>
               </svg>
@@ -186,7 +211,7 @@
         <header class="preview-header">
           <div>
             <div class="section-label">产物与文件</div>
-            <div class="preview-subtitle">图片、文本、Markdown、PDF</div>
+            <div class="preview-subtitle">生成的图、报表和导出文件会自动预览</div>
           </div>
           <button class="icon-button" id="collapse-preview" type="button" title="收起预览" aria-label="收起文件预览">›</button>
         </header>
@@ -225,6 +250,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=cache-hit" type="module"></script>
+    <script src="/assets/app.js?v=taxamask-2.0.24" type="module"></script>
   </body>
 </html>

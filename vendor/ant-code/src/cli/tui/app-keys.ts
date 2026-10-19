@@ -22,6 +22,7 @@ import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { listConfiguredModels, type LabModel } from "../../model-gateway/models.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../../model-gateway/thinking-budget.ts";
 import { resolveWorkspaceTrust, trustWorkspace } from "../../permissions/workspace-trust.ts";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
 import { createSessionStore } from "../../storage/session-store.ts";
 import { getAntCodeVersion } from "../../version.ts";
 import {
@@ -672,9 +673,7 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
               env: props.env
             });
             const result = await store.cleanupExpiredSessions(
-              sessionRef.current.config.transcript?.retentionDays === undefined
-                ? 30
-                : sessionRef.current.config.transcript.retentionDays
+              resolveTranscriptRetentionDays(sessionRef.current.config.transcript?.retentionDays)
             );
             addEntry("session", "metadata 清理", `已删除 ${result.deleted.length} 条过期记录。`);
             await loadSessionRecords();
@@ -755,9 +754,15 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
       return;
     }
     if (isCtrlKey(inputValue, key, "l")) {
-      setEntries([]);
+      setEntries([withEntryIdentity({
+        kind: "session",
+        title: "已清屏",
+        body: "只隐藏当前可见记录，会话文件未删除。",
+        at: new Date().toLocaleTimeString()
+      })]);
       setTranscriptOffset(0);
       setStreamOffset(0);
+      setActivity((value) => ({ ...value, status: "已清屏" }));
       return;
     }
     const canScrollConversation = current.mode === "input"
@@ -833,19 +838,6 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
       setHistoryIndex(null);
       return;
     }
-    if (key.shift && key.tab) {
-      cyclePermissionMode(current, "ink-shift-tab");
-      return;
-    }
-    if (key.tab) {
-      setSideView((value) => {
-        const next = nextSideView(value);
-        setActivity((currentActivity) => ({ ...currentActivity, status: `panel ${next}` }));
-        return next;
-      });
-      setSidePanelOffset(0);
-      return;
-    }
     if (current.mode === "approval") {
       handleApprovalInput(inputValue, key, current, sessionApprovals.current, addEntry, setActivity, setMode, setPendingApproval, setApprovalChoiceIndex);
       return;
@@ -859,6 +851,19 @@ export function useTuiAppKeys(s: ReturnType<typeof useTuiAppTurn>) {
         replaceQuestionDraft,
         updateQuestionDraft
       });
+      return;
+    }
+    if (key.shift && key.tab) {
+      cyclePermissionMode(current, "ink-shift-tab");
+      return;
+    }
+    if (key.tab) {
+      setSideView((value) => {
+        const next = nextSideView(value);
+        setActivity((currentActivity) => ({ ...currentActivity, status: `panel ${next}` }));
+        return next;
+      });
+      setSidePanelOffset(0);
       return;
     }
     if (current.modelPickerOpen) {

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { renderPdfBatches, type PdfVisionDocument } from "../tools/pdf-render.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -10,6 +11,7 @@ import {
 import { formatGatewayError, normalizeGatewayError } from "../model-gateway/errors.ts";
 import { createLabModelGateway } from "../model-gateway/client.ts";
 import { listConfiguredModels, listRoutingModels } from "../model-gateway/models.ts";
+import { inferModelSupportsImages, resolveModelSupportsImages } from "../model-gateway/vision-capabilities.ts";
 import { runHooks } from "../hooks/runner.ts";
 import { createMcpRuntime } from "../mcp/runtime.ts";
 import { appendThinkingPreview, limitThinkingPreview } from "../model-gateway/thinking-budget.ts";
@@ -84,6 +86,8 @@ export function buildTurnMessages(session: AgentSession, userMessage: SessionMes
 export async function prepareVisionAttachmentsForTurn(options: {
   session: AgentSession;
   attachments?: unknown;
+  pdfDocuments?: PdfVisionDocument[];
+  forceVisionAnalysis?: boolean;
   prompt?: string;
   gateway?: unknown;
   signal?: AbortSignal;
@@ -93,32 +97,55 @@ export async function prepareVisionAttachmentsForTurn(options: {
     antEventNormalizer?: ReturnType<typeof createAntEventNormalizer>;
   };
   metadata?: SessionTurnMetadata;
-}) {
+}): Promise<{ ok: boolean; attachments?: InputImageAttachment[]; analysisText?: string; status?: string; output?: string }> {
   const attachments = normalizeInputAttachments(options.attachments);
+  if (options.pdfDocuments?.length) {
+    const reports: string[] = [];
+    let reportChars = 0;
+    try {
+      if (!resolveVisionAgentModel(options.session.config)) {
+        const rendered: InputImageAttachment[] = [];
+        for (const document of options.pdfDocuments) {
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
+          for await (const batch of renderPdfBatches(document, { signal: options.signal })) {
+            rendered.push(...batch.images);
+            await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "completed" });
+          }
+        }
+        return { ok: true, attachments: rendered, analysisText: "" };
+      }
+      for (const document of options.pdfDocuments) {
+        await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, stage: "rendering" });
+        for await (const batch of renderPdfBatches(document, { signal: options.signal })) {
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "analyzing" });
+          const prepared = await prepareVisionAttachmentsForTurn({
+            ...options, pdfDocuments: undefined, forceVisionAnalysis: true, attachments: batch.images,
+            prompt: `${options.prompt ?? ""}\nPDF: ${document.name}; pages ${batch.pageStart}-${batch.pageEnd} of ${batch.totalPages}. Analyze only these supplied pages, cite page numbers, preserve table/figure values relevant to the request, and mark unreadable details. These may be the first pages of a scan and are not necessarily the abstract. Do not claim to have read other pages.`
+          });
+          if (!prepared.ok) return prepared;
+          const report = `PDF ${document.name}, pages ${batch.pageStart}-${batch.pageEnd} of ${batch.totalPages}:\n${prepared.analysisText}`;
+          reportChars += report.length;
+          if (reportChars > 240_000) throw new Error("PDF visual reports exceed the context budget; select a smaller page range and retry.");
+          reports.push(report);
+          await emitEvent(options.eventOptions, { type: "pdf_vision_progress", name: document.name, pageStart: batch.pageStart, pageEnd: batch.pageEnd, totalPages: batch.totalPages, stage: "completed" });
+        }
+      }
+      const images = await prepareVisionAttachmentsForTurn({ ...options, pdfDocuments: undefined });
+      if (!images.ok) return images;
+      return { ...images, analysisText: [...reports, images.analysisText].filter(Boolean).join("\n\n") };
+    } catch (error) {
+      const interrupted = options.signal?.aborted;
+      const output = interrupted ? "PDF 视觉识别已取消，未完成的页面没有被当作已识别。" : `PDF 视觉识别失败，未生成完整报告：${error instanceof Error ? error.message : String(error)}`;
+      await emitEvent(options.eventOptions, { type: "pdf_vision_error", interrupted, output });
+      return { ok: false, status: interrupted ? "interrupted" : "vision_error", output };
+    }
+  }
   if (attachments.length === 0) {
     return { ok: true, attachments, analysisText: "" };
   }
-  if (modelSupportsImages(options.session.config, options.session.model)) {
-    return { ok: true, attachments, analysisText: "" };
-  }
-
   const visionModel = resolveVisionAgentModel(options.session.config);
   if (!visionModel) {
-    const output = [
-      "当前主模型不支持图片输入，且当前网关配置里没有可用的视觉模型。",
-      "请切换到带“视觉”标签的模型，或在同一个网关/Key 下配置一个视觉子智能体模型后重试。",
-      "当前架构只允许一个网关/Key 生效，因此不会跨网关调用其他厂商模型做图片分析。"
-    ].join("\n");
-    await emitEvent(options.eventOptions, {
-      type: "vision_unavailable",
-      model: options.session.model,
-      attachmentCount: attachments.length,
-      outputBytes: Buffer.byteLength(output, "utf8")
-    });
-    if (options.metadata) {
-      options.metadata.gatewayErrors.push("VISION_MODEL_NOT_CONFIGURED");
-    }
-    return { ok: false, status: "vision_unavailable", output };
+    return { ok: true, attachments, analysisText: "" };
   }
 
   await emitEvent(options.eventOptions, {
@@ -158,7 +185,10 @@ export async function prepareVisionAttachmentsForTurn(options: {
     return { ok: false, status: "vision_error", output };
   }
 
-  const analysisText = formatAssistantOutput(response.data).trim();
+  const analysisText = response.data.text.trim();
+  if (!analysisText) {
+    return { ok: false, status: "vision_error", output: "视觉模型未返回有效识别内容，请重试或检查视觉模型配置。" };
+  }
   await emitEvent(options.eventOptions, {
     type: "vision_analysis_complete",
     model: response.data.model ?? visionModel.id,
@@ -179,7 +209,7 @@ export function buildVisionAnalysisMessage(prompt: string, attachments: InputIma
       {
         type: "text",
         text: [
-          "你是 Ant Code visual-verifier 视觉复核子智能体。当前主模型不支持图片输入，请你先处理用户上传的图片，输出可供另一个文本模型继续工作的中文视觉证据报告。",
+          "你是 Ant Code visual-verifier 视觉复核子智能体。请先处理用户上传的图片或 PDF 渲染页面，输出可供主智能体继续工作的中文视觉证据报告。",
           "职责：把截图/图片当作证据，识别任务类型（UI/前端截图、代码或错误截图、表格/图表、文档、前后对比等），提取可见事实、OCR 文字、界面元素、布局状态、异常现象和不确定点。",
           "前端/UI 任务需重点复核：布局完整性、响应式视口、重叠/遮挡/裁切、对齐/间距、可读性/对比度、加载/错误/空状态、交互线索与用户验收目标是否一致。",
           "输出结构：target、visualEvidence、findings、result、residualRisks、recommendedFollowup。发现问题时 findings 优先；没有问题时明确 pass/uncertain。",
@@ -219,14 +249,11 @@ export function resolveVisionAgentModel(config: LabAgentConfig) {
   const models = listConfiguredModels(config);
   const routingModels = listRoutingModels(config);
   const configured = String(vision.model ?? "").trim();
-  if (configured) {
-    const folded = configured.toLowerCase();
-    const model = [...models, ...routingModels].find((item) => (
-      item.id === configured || item.label?.toLowerCase() === folded
-    ));
-    return modelSupportsImagesEntry(model) ? model : null;
-  }
-  return models.find(modelSupportsImagesEntry) ?? null;
+  if (!configured) return null;
+  const folded = configured.toLowerCase();
+  return [...models, ...routingModels].find((item) => (
+    item.id === configured || item.label?.toLowerCase() === folded
+  )) ?? { id: configured };
 }
 
 
@@ -235,16 +262,19 @@ export function modelSupportsImages(config: LabAgentConfig, modelId: unknown) {
   if (!id) {
     return false;
   }
-  const model = listConfiguredModels(config).find((item) => item.id === id);
-  return modelSupportsImagesEntry(model);
+  const model = listConfiguredModels(config).find((item) => item.id === id)
+    ?? listRoutingModels(config).find((item) => item.id === id);
+  if (modelSupportsImagesEntry(model)) {
+    return true;
+  }
+  return inferModelSupportsImages(id);
 }
 
-/** @param {Record<string, any> | null | undefined} model */
-
-
-/** @param {Record<string, any> | null | undefined} model */
-export function modelSupportsImagesEntry(model: { modalities?: unknown } | null | undefined) {
-  return Array.isArray(model?.modalities) && model.modalities.includes("image");
+export function modelSupportsImagesEntry(model: { id?: unknown; modalities?: unknown } | null | undefined) {
+  return resolveModelSupportsImages({
+    id: model?.id,
+    modalities: model?.modalities
+  });
 }
 
 
@@ -283,18 +313,90 @@ export function normalizeUserTurnMessage(message: SessionMessage | string | Reco
 }
 
 
+export function mergePersistableImageSummaries(messages: SessionMessage[] = [], persistableTurn: SessionMessage[] = []): SessionMessage[] {
+  const persistableUser = persistableTurn.find((message) => message?.role === "user");
+  if (!persistableUser) {
+    return messages;
+  }
+  const summaryBlocks = Array.isArray(persistableUser.content)
+    ? persistableUser.content.filter((block) => Boolean(block) && typeof block === "object" && "type" in block && block.type === "image")
+    : [];
+  if (summaryBlocks.length === 0) {
+    return messages;
+  }
+  const index = messages.findIndex((message) => message?.role === "user");
+  if (index < 0) {
+    return messages;
+  }
+  const live = messages[index];
+  const liveContent = Array.isArray(live.content)
+    ? live.content
+    : (live.content ? [{ type: "text", text: String(live.content) }] : []);
+  if (liveContent.some((block) => Boolean(block) && typeof block === "object" && "type" in block && block.type === "image")) {
+    return messages;
+  }
+  const next = messages.slice();
+  next[index] = {
+    ...live,
+    content: [...liveContent, ...summaryBlocks],
+    ...(persistableUser.attachments ? { attachments: persistableUser.attachments } : {})
+  };
+  return next;
+}
+
 export function persistableUserTurnMessage(prompt: string, attachments: unknown = []): SessionMessage {
   const normalized = normalizeInputAttachments(attachments);
-  if (normalized.length === 0) {
-    return { role: "user", content: prompt };
+  const documents = Array.isArray(attachments)
+    ? attachments.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.type === "document")
+    : [];
+  const documentBlocks = documents.map((item) => ({
+    type: "text",
+    text: `[文档附件：${String(item.name ?? "document")}]`
+  }));
+  const chips = persistableAttachmentChips(attachments);
+  const message: SessionMessage = normalized.length === 0 && documentBlocks.length === 0
+    ? { role: "user", content: prompt }
+    : {
+        role: "user",
+        content: [
+          ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
+          ...documentBlocks,
+          ...normalized.map(imageAttachmentSummaryBlock)
+        ]
+      };
+  if (chips.length > 0) {
+    message.attachments = chips;
   }
-  return {
-    role: "user",
-    content: [
-      ...(String(prompt ?? "").trim() ? [{ type: "text", text: String(prompt ?? "") }] : []),
-      ...normalized.map(imageAttachmentSummaryBlock)
-    ]
-  };
+  return message;
+}
+
+export function persistableAttachmentChips(attachments: unknown = []): NonNullable<SessionMessage["attachments"]> {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  const chips: NonNullable<SessionMessage["attachments"]> = [];
+  for (const item of attachments) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const type = record.type === "document" ? "document" : record.type === "image" ? "image" : null;
+    if (!type) {
+      continue;
+    }
+    const storedPath = String(record.path ?? "").trim().replace(/\\/g, "/");
+    chips.push({
+      type,
+      name: String(record.name ?? type).trim().slice(0, 160) || type,
+      mimeType: String(record.mimeType ?? record.mime_type ?? "").trim(),
+      size: nonNegativeInteger(record.size ?? record.bytes ?? record.sizeBytes, 0) ?? 0,
+      ...(storedPath ? { path: storedPath } : {})
+    });
+    if (chips.length >= 10) {
+      break;
+    }
+  }
+  return chips;
 }
 
 
@@ -358,6 +460,15 @@ export function attachmentMetadataList(attachments: unknown = []) {
 }
 
 
+export function liveModelMessages(messages: unknown = []): SessionMessage[] {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+  return messages.filter((message): message is SessionMessage => (
+    Boolean(message) && typeof message === "object" && (message as SessionMessage).role !== "system"
+  ));
+}
+
 export function messagesForModelContext(messages: unknown = []): SessionMessage[] {
   if (!Array.isArray(messages)) {
     return [];
@@ -366,7 +477,10 @@ export function messagesForModelContext(messages: unknown = []): SessionMessage[
     if (!message || typeof message !== "object") {
       return [];
     }
-    const { interruptedDraft: _interruptedDraft, ...rest } = message;
+    if ("thinkingProcess" in message && message.thinkingProcess === true) {
+      return [];
+    }
+    const { interruptedDraft: _interruptedDraft, attachments: _attachments, ...rest } = message;
     return [rest];
   });
 }

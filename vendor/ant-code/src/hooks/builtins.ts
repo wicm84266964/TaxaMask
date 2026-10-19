@@ -129,7 +129,7 @@ function denyTaxaMaskSourceWrites(context: Record<string, unknown>) {
     return {
       ok: true,
       message: decision.allowed
-        ? `TaxaMask source guard: approved ${decision.scope} write to ${safePathLabel(decision.target)}`
+        ? `TaxaMask source guard: approved ${decision.scope} write to ${String(decision.target ?? "").trim() || "the requested path"}`
         : "TaxaMask source guard: no guarded write detected"
     };
   }

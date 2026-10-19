@@ -255,7 +255,7 @@ Prerequisites:
 - Git, or a GitHub ZIP download.
 - Conda or another Python environment manager.
 - Python 3.12.
-- Node.js 22.18 or newer for the Agent Center dashboard.
+- Node.js 22.18 or newer for the Agent Center dashboard. The setup command below places it in the Python environment, so Windows does not depend on whichever `node.exe` happens to be first on PATH.
 
 Clone the maintained main branch:
 
@@ -296,13 +296,13 @@ Then install the base dependencies:
 pip install -r requirements.txt
 ```
 
-Install the Agent Center dependencies:
+Prepare Agent Center Node.js inside the active Python environment, then install its packages:
 
 ```bash
-cd vendor/ant-code
-npm ci
-cd ../..
+python scripts/ensure_agent_node.py --npm-ci
 ```
+
+On Windows this writes `node.exe` next to the environment's `python.exe`. A Node 22.14 install in `Program Files` is not used, because the embedded agent requires 22.18 or newer. `启动TaxaMask.bat` runs the same preparation before opening the workbench.
 
 Optional SAM-assisted 2D annotation requires a SAM checkpoint placed at:
 

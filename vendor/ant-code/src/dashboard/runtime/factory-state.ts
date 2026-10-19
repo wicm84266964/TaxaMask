@@ -40,6 +40,7 @@ export type DashboardFactoryState = {
   rerunWithSessionConfigLock: (input: DashboardRequestInput, rerun: (lockedInput: DashboardRequestInput) => Promise<unknown>) => unknown;
   runtime: DashboardRuntimeApi;
   activeSweepTimer: ReturnType<typeof setInterval>;
+  scheduleTickTimer: ReturnType<typeof setInterval>;
 };
 
 export type DashboardRuntimeApi = {
@@ -54,6 +55,7 @@ export type DashboardRuntimeApi = {
   saveModelConfig(input?: DashboardRequestInput): Promise<unknown>;
   probeGateway(input?: DashboardRequestInput): Promise<unknown>;
   probeModelCapabilities(input?: DashboardRequestInput, request?: { signal?: AbortSignal }): Promise<unknown>;
+  probeVisionCapability(input?: DashboardRequestInput, request?: { signal?: AbortSignal }): Promise<unknown>;
   deleteModelConfig(input?: DashboardRequestInput): Promise<unknown>;
   deleteGatewayProfile(input?: DashboardRequestInput): Promise<unknown>;
   switchGatewayProfile(input?: DashboardRequestInput): Promise<unknown>;
@@ -61,6 +63,7 @@ export type DashboardRuntimeApi = {
   trustStatus(): Promise<unknown>;
   trustWorkspace(): Promise<unknown>;
   listSessionRecords(): Promise<unknown>;
+  searchSessionContent?(query: unknown): Promise<unknown>;
   readSession(selector: unknown): Promise<unknown>;
   readTranscriptPage(input?: DashboardRequestInput): Promise<unknown>;
   deleteSession(input?: DashboardRequestInput): Promise<unknown>;
@@ -82,4 +85,12 @@ export type DashboardRuntimeApi = {
   sweepIdleSessions(): Promise<unknown>;
   shutdown(input?: DashboardRequestInput): Promise<unknown>;
   sessionFiles(sessionId: string): unknown;
+  importModelSource(input?: DashboardRequestInput): Promise<unknown>;
+  saveAgentRouting(input?: DashboardRequestInput): Promise<unknown>;
+  saveProviderAgentModels(input?: DashboardRequestInput): Promise<unknown>;
+  listSchedules(): Promise<unknown>;
+  createSchedule(input?: DashboardRequestInput): Promise<unknown>;
+  pauseSchedule(id: string): Promise<unknown>;
+  resumeSchedule(id: string): Promise<unknown>;
+  deleteSchedule(id: string): Promise<unknown>;
 };

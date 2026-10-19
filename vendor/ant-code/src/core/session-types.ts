@@ -35,7 +35,9 @@ export const OUTPUT_HEALTH_MAX_RETRIES = 1;
 export const OUTPUT_HEALTH_RETRY_REQUIRED_REASONS = new Set([
   "missing_terminal_signal",
   "repetitive_thinking_loop",
-  "reasoning_only_length"
+  "reasoning_only_length",
+  "reasoning_only_empty",
+  "promised_tool_without_call"
 ]);
 export const TRANSCRIPT_MEMORY_MESSAGES = 50;
 export const DEFAULT_RESUME_CONTEXT_MESSAGES = 200;
@@ -56,6 +58,14 @@ export type CreateSessionOptions = {
   hooksTrusted?: boolean;
 };
 
+export type SessionAttachmentChip = {
+  type: "image" | "document";
+  name: string;
+  mimeType?: string;
+  size?: number;
+  path?: string;
+};
+
 export type SessionMessage = {
   role: string;
   content?: unknown;
@@ -66,10 +76,14 @@ export type SessionMessage = {
   toolCalls?: Array<{ id?: string; name?: string; input?: unknown }>;
   toolCallId?: string;
   interruptedDraft?: boolean;
+  thinkingProcess?: boolean;
+  attachments?: SessionAttachmentChip[];
 };
 
 export type AgentSession = {
   id: string;
+  /** Optional routing reset; does not change the local session identity. */
+  gatewaySessionAffinity?: string;
   cwd: string;
   startedAt: string;
   mode: "interactive" | "print";

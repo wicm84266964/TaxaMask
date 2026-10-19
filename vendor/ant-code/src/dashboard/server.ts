@@ -6,7 +6,7 @@ import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDashboardRuntime } from "./sessions.ts";
-import { previewFile, readRawFile } from "./files.ts";
+import { previewFile, readRawFile, resolveSystemOpenFile } from "./files.ts";
 
 type DashboardRuntime = ReturnType<typeof createDashboardRuntime>;
 type JsonObject = Record<string, unknown>;
@@ -18,6 +18,7 @@ type DashboardServerOptions = {
   publicDir?: string;
   onShutdown?: () => void;
   requestShutdown?: () => void;
+  openLocalPath?: (filePath: string) => void | Promise<void>;
 };
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -51,6 +52,18 @@ const CONTENT_SECURITY_POLICY = [
   "img-src 'self' data:",
   "font-src 'self' data:",
   "connect-src 'self'"
+].join("; ");
+
+// PDF iframe preview needs the framed resource to allow same-origin embedding.
+// Chrome's built-in viewer also treats the plugin as an object, so object-src
+// must not stay at 'none' on the PDF response itself.
+const EMBEDDABLE_PDF_CONTENT_SECURITY_POLICY = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "object-src 'self'",
+  "frame-ancestors 'self'",
+  "form-action 'none'",
+  "script-src 'none'"
 ].join("; ");
 
 /**
@@ -345,6 +358,17 @@ function applySecurityHeaders(res: http.ServerResponse) {
   res.setHeader("referrer-policy", "no-referrer");
 }
 
+function applyEmbeddableRawFileHeaders(
+  res: http.ServerResponse,
+  result: { contentType?: unknown; downloadOnly?: unknown }
+) {
+  if (result.downloadOnly || result.contentType !== "application/pdf") {
+    return;
+  }
+  res.setHeader("content-security-policy", EMBEDDABLE_PDF_CONTENT_SECURITY_POLICY);
+  res.setHeader("x-frame-options", "SAMEORIGIN");
+}
+
 class RequestError extends Error {
   status: number;
   code: string;
@@ -506,9 +530,11 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
       sessionStatus: "sessionStatus" in status ? status.sessionStatus : null,
       models: "models" in status ? status.models : [],
       agentModelTiers: "agentModelTiers" in status ? status.agentModelTiers : {},
+      agentRouting: "agentRouting" in status ? status.agentRouting : null,
       visionAgent: "visionAgent" in status ? status.visionAgent : null,
       gatewayConfig: "gatewayConfig" in status ? status.gatewayConfig : null,
       gatewayProfiles: "gatewayProfiles" in status ? status.gatewayProfiles : [],
+      officialSources: "officialSources" in status ? status.officialSources : [],
       settings: "settings" in status ? status.settings : null,
       configV2: "configV2" in status ? status.configV2 : null,
       configRevisions: "configRevisions" in status
@@ -548,6 +574,27 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
     const result = await options.runtime.probeGateway(body);
     return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/model-vision/probe") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const controller = new AbortController();
+    const abort = () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new Error("Dashboard vision probe client disconnected"));
+      }
+    };
+    req.once("aborted", abort);
+    res.once("close", abort);
+    try {
+      const result = await options.runtime.probeVisionCapability(body, { signal: controller.signal });
+      if (!res.destroyed && !res.writableEnded) {
+        return sendJson(res, responseStatus(result, 200, 400), result);
+      }
+      return undefined;
+    } finally {
+      req.off("aborted", abort);
+      res.off("close", abort);
+    }
   }
   if (req.method === "POST" && url.pathname === "/api/model-capabilities/probe") {
     const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
@@ -612,8 +659,33 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     options.requestShutdown?.();
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/sources/agents") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.saveProviderAgentModels(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/agent-routing") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.saveAgentRouting(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (req.method === "POST" && url.pathname === "/api/sources/import") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const result = await options.runtime.importModelSource(body);
+    return sendJson(res, responseStatus(result, 200, 400), result);
+  }
+  if (url.pathname === "/api/schedules" || url.pathname.startsWith("/api/schedules/")) {
+    return sendJson(res, 404, { ok: false, error: "TaxaMask 内嵌智能体不提供定时任务。" });
+  }
   if (req.method === "GET" && url.pathname === "/api/sessions") {
     return sendJson(res, 200, { ok: true, sessions: await options.runtime.listSessionRecords() });
+  }
+  if (req.method === "GET" && url.pathname === "/api/sessions/search") {
+    if (typeof options.runtime.searchSessionContent !== "function") {
+      return sendJson(res, 501, { ok: false, error: "内容搜索不可用" });
+    }
+    const result = await options.runtime.searchSessionContent(url.searchParams.get("q") ?? "");
+    return sendJson(res, responseStatus(result, 200, 400), result);
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/transcript")) {
     const id = decodeURIComponent(url.pathname.slice("/api/sessions/".length, -"/transcript".length));
@@ -698,6 +770,24 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     const result = options.runtime.resolveQuestion(questionId, body);
     return sendJson(res, responseStatus(result, 200, 400), result);
   }
+  if (req.method === "POST" && url.pathname === "/api/files/open") {
+    const body = isJsonObject(requestBody) ? requestBody : EMPTY_JSON;
+    const sessionId = String(body.sessionId ?? "");
+    const cwd = await resolveFileRequestCwd(options, sessionId);
+    if (!cwd.ok || !("cwd" in cwd) || typeof cwd.cwd !== "string") {
+      return sendJson(res, "status" in cwd && typeof cwd.status === "number" ? cwd.status : 400, cwd);
+    }
+    const result = await resolveSystemOpenFile(cwd.cwd, String(body.path ?? ""));
+    if (!result.ok || !("path" in result) || typeof result.path !== "string") {
+      return sendJson(res, "status" in result && typeof result.status === "number" ? result.status : 400, result);
+    }
+    try {
+      await launchLocalPath(options, result.path);
+    } catch {
+      return sendJson(res, 500, { ok: false, error: "无法用系统应用打开文件" });
+    }
+    return sendJson(res, 200, { ok: true });
+  }
   if (req.method === "GET" && url.pathname === "/api/files") {
     const sessionId = url.searchParams.get("sessionId") ?? "";
     const cwd = await resolveFileRequestCwd(options, sessionId);
@@ -716,6 +806,7 @@ async function routeRequest(req: http.IncomingMessage, res: http.ServerResponse,
     if (!result.ok || !("contentType" in result) || !("bytes" in result)) {
       return sendJson(res, "status" in result && typeof result.status === "number" ? result.status : 400, result);
     }
+    applyEmbeddableRawFileHeaders(res, result);
     res.writeHead(200, {
       "content-type": result.contentType,
       "content-disposition": contentDispositionHeader(
@@ -1115,6 +1206,52 @@ function listen(server: http.Server, host: string, port: number) {
 
 function isJsonObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function launchLocalPath(options: DashboardServerOptions, filePath: string) {
+  if (typeof options.openLocalPath === "function") {
+    await options.openLocalPath(filePath);
+    return;
+  }
+  await openPathWithSystem(filePath);
+}
+
+function openPathWithSystem(filePath: string) {
+  return new Promise<void>((resolve, reject) => {
+    const platform = process.platform;
+    const child = platform === "win32"
+      ? spawn("powershell.exe", [
+          "-NoProfile",
+          "-NonInteractive",
+          "-WindowStyle", "Hidden",
+          "-Command",
+          "Start-Process -FilePath $env:ANT_CODE_OPEN_PATH"
+        ], {
+          env: { ...process.env, ANT_CODE_OPEN_PATH: filePath },
+          stdio: "ignore",
+          windowsHide: true
+        })
+      : spawn(platform === "darwin" ? "open" : "xdg-open", [filePath], {
+          detached: true,
+          stdio: "ignore"
+        });
+    const timer = setTimeout(() => {
+      child.unref();
+      resolve();
+    }, 8000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code) {
+        reject(new Error("系统应用打开失败"));
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 function openBrowser(url: string) {

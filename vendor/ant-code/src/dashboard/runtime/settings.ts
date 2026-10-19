@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { resolveTranscriptRetentionDays } from "../../config/retention.ts";
+import { gatewayProfileOwner } from "./public-config.ts";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, type Hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -39,6 +41,7 @@ import { clearSessionContext, compactSessionContextWithModel, createContextWindo
 import { createLabModelGateway } from "../../model-gateway/client.ts";
 import { redactGatewayText } from "../../model-gateway/errors.ts";
 import { listConfiguredModels, normalizeAgentModelTiers, normalizeReasoningEfforts, resolveModelSelection, type LabModel } from "../../model-gateway/models.ts";
+import { inferModelSupportsImages } from "../../model-gateway/vision-capabilities.ts";
 import {
   inferCatalogReasoning,
   normalizeCapabilityEfforts,
@@ -96,6 +99,14 @@ export function normalizeDashboardSettingsInput(input: DashboardRequestInput, co
   const section = String(input.section ?? input.category ?? "").trim().toLowerCase();
   const saveTarget = normalizeModelConfigSaveTarget(input.saveTarget ?? input.scope ?? input.target ?? "project");
   const values = isPlainObject(input.settings) ? input.settings : input;
+  if (section === "source-credential") {
+    const profile = gatewayProfilesFromConfig(config).find((item) => item.id === String(values.profileId ?? ""));
+    if (!profile || !parseConfigUrl(profile.gatewayUrl)) return { ok: false, status: 400, error: "凭据所属来源不存在" };
+    if (saveTarget === "global" && gatewayProfileOwner(config, profile.id)?.type === "project") {
+      return { ok: false, status: 400, error: "项目凭据只能设为当前项目的生效凭据" };
+    }
+    return { ok: true, section, saveTarget, changedFields: ["profileId"], values: { profileId: profile.id, url: profile.gatewayUrl } };
+  }
   if (![
     "transcript",
     "network",
@@ -128,7 +139,7 @@ export function normalizeDashboardSettingsInput(input: DashboardRequestInput, co
     }
     const managedError = changedManagedSetting([
       ["LAB_AGENT_TRANSCRIPT_ENABLED", enabled, config.transcript?.enabled !== false, "历史记录开关"],
-      ["LAB_AGENT_TRANSCRIPT_RETENTION_DAYS", retentionDays, config.transcript?.retentionDays === undefined ? 30 : config.transcript.retentionDays, "历史记录保留期限"],
+      ["LAB_AGENT_TRANSCRIPT_RETENTION_DAYS", retentionDays, resolveTranscriptRetentionDays(config.transcript?.retentionDays), "历史记录保留期限"],
       ["LAB_AGENT_TRANSCRIPT_ENCRYPTION", encryption, String(config.transcript?.encryption ?? "off"), "历史记录加密模式"]
     ], env);
     if (managedError) return managedError;
@@ -225,6 +236,13 @@ export function buildDashboardSettingsConfig(targetConfig: Record<string, unknow
   const target = isPlainObject(targetConfig) ? targetConfig : {};
   const values = isPlainObject(normalized.values) ? normalized.values : {};
   const section = String(normalized.section ?? "");
+  if (section === "source-credential") {
+    const lab = isPlainObject(target.lab) ? target.lab : {};
+    return { ...target, lab: { ...lab, sourceCredentialSelections: {
+      ...(isPlainObject(lab.sourceCredentialSelections) ? lab.sourceCredentialSelections : {}),
+      [String(values.url)]: String(values.profileId)
+    } } };
+  }
   const changedFields = new Set(Array.isArray(normalized.changedFields)
     ? normalized.changedFields.map(String)
     : DASHBOARD_SETTINGS_FIELDS[section] ?? []);
@@ -456,6 +474,20 @@ export function normalizeModelConfigInput(input: DashboardRequestInput, config: 
     return { ok: false, status: 400, error: "请输入有效的模型 ID" };
   }
   const label = String(input.label ?? "").trim();
+  if (label.length > 160 || /[\r\n\t\0]/.test(label)) {
+    return { ok: false, status: 400, error: "模型备注最多 160 个字符，不能包含换行或控制字符" };
+  }
+  const editingProfileId = String(input.providerId ?? input.profileId ?? input.gatewayProfileId ?? "").trim();
+  const createsProvider = isPlainObject(config.configV2) && config.configV2.enabled === true;
+  const duplicateModels = gatewayProfilesFromConfig(config).filter((profile) => (
+    profile.id !== editingProfileId
+    && (createsProvider || Boolean(editingProfileId) || profile.gatewayProtocol !== gatewayProtocol)
+    && profile.gatewayUrl === gatewayUrl
+    && profile.models.some((model) => model.id === modelId)
+  ));
+  if (duplicateModels.length > 0 && (!label || label === modelId)) {
+    return { ok: false, status: 400, error: "同一模型来源下已存在同名主模型，请填写模型备注（例如：科研分析、代码开发）后再保存" };
+  }
   const contextTokens = positiveIntegerOrNull(input.contextTokens);
   const modalities = normalizeModelInputModalities(input);
   const agentModelTiersProvided = Object.prototype.hasOwnProperty.call(input, "agentModelTiers")
@@ -903,6 +935,9 @@ export function normalizeModelInputModalities(input: DashboardRequestInput) {
     }
   }
   if (input.vision === true || input.imageInput === true || input.multimodal === true) {
+    modalities.add("image");
+  }
+  if (inferModelSupportsImages(input.modelId ?? input.id)) {
     modalities.add("image");
   }
   return Array.from(modalities);

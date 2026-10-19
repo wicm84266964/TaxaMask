@@ -9,6 +9,7 @@ export * from "./session-error.ts";
 export * from "./session-resume.ts";
 
 import crypto from "node:crypto";
+import { toolSummaryState } from "./tool-summary.ts";
 import { buildInitialContext } from "../context/builder.ts";
 import { loadConfig, type LabAgentConfig } from "../config/load-config.ts";
 import {
@@ -128,6 +129,9 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
   );
   const session = {
     id: String(resumed?.id ?? crypto.randomUUID()),
+    ...(typeof resumed?.gatewaySessionAffinity === "string" && resumed.gatewaySessionAffinity.trim()
+      ? { gatewaySessionAffinity: resumed.gatewaySessionAffinity.trim() }
+      : {}),
     cwd: options.cwd,
     startedAt: String(resumed?.startedAt ?? new Date().toISOString()),
     mode: options.mode,
@@ -157,11 +161,13 @@ export async function createSession(options: CreateSessionOptions): Promise<Agen
     usage,
     lastProviderUsage: usage.last ?? null,
     title: resumed?.title ?? null,
+    titleSource: resumed?.titleSource ?? (resumed?.title ? "prompt" : null),
     turnCount: resumed?.turnCount ?? 0,
     goal: normalizeSessionGoal(resumed?.goal),
     resumedFrom: resumed,
     visualEvidence: createVisualEvidenceStore()
   };
+  await toolSummaryState(session as unknown as AgentSession, options.env);
   await runHooks({
     config,
     cwd: options.cwd,

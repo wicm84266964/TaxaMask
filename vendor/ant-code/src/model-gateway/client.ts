@@ -1,4 +1,6 @@
+import { fetchGateway } from "../net/loopback-fetch.ts";
 import { decideNetworkAccess } from "../permissions/network-policy.ts";
+import { sourceCredentialFailureMessage, sourceHasAlternateCredentials } from "../config/source-credentials.ts";
 import { isGatewayStreamInterruptedError, normalizeGatewayError, redactGatewayText } from "./errors.ts";
 import {
   createOpenAIChatCompletionRequest,
@@ -16,6 +18,7 @@ import {
   parseAnthropicMessagesStream
 } from "./anthropic-messages.ts";
 import { findModelMetadata } from "./models.ts";
+import { selectableReasoningEffortIds } from "./reasoning-capabilities.ts";
 import { createGatewayRequest, normalizeGatewayResponse, type NormalizedGatewayResponse } from "./protocol.ts";
 import { parseGatewayStream } from "./streaming.ts";
 import { emitGatewayEvent, isGatewayEventCallbackError } from "./event-callback.ts";
@@ -88,7 +91,10 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
     /**
      * @param {{ messages: Array<Record<string, any>>; tools?: Array<Record<string, any>>; toolResults?: Array<Record<string, any>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, any>) => void | Promise<void> }} request
      */
-    async sendChat(request: { messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>; toolResults?: Array<Record<string, unknown>>; sessionId?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, unknown>) => void | Promise<void> }): Promise<GatewayChatResult> {
+    async sendChat(request: { messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>; toolResults?: Array<Record<string, unknown>>; sessionId?: string; sessionAffinity?: string; stream?: boolean; signal?: AbortSignal; onEvent?: (event: Record<string, unknown>) => void | Promise<void> }): Promise<GatewayChatResult> {
+      if (config.lab.sourceCredentialSelectionRequired) {
+        throw new Error("请先在设置页为当前 URL 来源选择生效凭据；未发送模型请求。");
+      }
       if (!config.lab.gatewayUrl) {
         return {
           ok: false,
@@ -147,9 +153,9 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
         const startedAt = Date.now();
         const attemptAbort = createGatewayAttemptAbort(request.signal, timeoutMs);
         try {
-          response = await fetch(config.lab.gatewayUrl, {
+          response = await fetchGateway(config.lab.gatewayUrl, {
             method: "POST",
-            headers: createHeaders(config, request.sessionId, protocol),
+            headers: createHeaders(config, request.sessionAffinity?.trim() || request.sessionId, protocol),
             body: JSON.stringify(gatewayRequest),
             signal: attemptAbort.signal
           });
@@ -196,6 +202,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
 
         const responseHeaderMs = Date.now() - startedAt;
         if (!response.ok) {
+          const retryAfter = response.headers.get("retry-after");
           let errorBody;
           try {
             errorBody = await boundedResponseText(response, {
@@ -239,7 +246,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
               attempt,
               maxAttempts,
               retryHistory,
-              delayMs: retryDelayMs(attempt),
+              delayMs: retryDelayMs(attempt, retryAfter),
               error,
               stage: "http_body"
             });
@@ -253,11 +260,16 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
           } finally {
             attemptAbort.cleanup();
           }
+          const canSwitchSourceCredential = sourceHasAlternateCredentials(config);
+          const credentialFailure = response.status === 401 || response.status === 403;
           const error = normalizeGatewayError(null, {
             code: "GATEWAY_HTTP_ERROR",
-            message: `Gateway returned HTTP ${response.status}`,
+            message: credentialFailure
+              ? sourceCredentialFailureMessage(canSwitchSourceCredential, response.status)
+              : `Gateway returned HTTP ${response.status}`,
             status: response.status,
             protocol,
+            canSwitchSourceCredential,
             details: {
               body: errorBody.body,
               bodyTruncated: errorBody.truncated,
@@ -285,7 +297,7 @@ export function createLabModelGateway(config: import("../config/load-config.ts")
             attempt,
             maxAttempts,
             retryHistory,
-            delayMs: retryDelayMs(attempt),
+            delayMs: retryDelayMs(attempt, retryAfter),
             error,
             stage: "http"
           });
@@ -688,10 +700,33 @@ function isMimoModel(config: import("../config/load-config.ts").LabAgentConfig) 
   return /mimo/i.test(String(config?.modelAlias ?? ""));
 }
 
-/**
- * @param {number} attempt
- */
-function retryDelayMs(attempt: number) {
+export function parseRetryAfterMs(value: unknown, maxMs: number = MAX_RETRY_DELAY_MS) {
+  if (value == null) {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  if (/^\d+$/.test(text)) {
+    const ms = Number(text) * 1000;
+    if (!Number.isFinite(ms) || ms < 0) {
+      return null;
+    }
+    return Math.min(maxMs, ms);
+  }
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) {
+    return null;
+  }
+  return Math.min(maxMs, Math.max(0, at - Date.now()));
+}
+
+export function retryDelayMs(attempt: number, retryAfterHeader?: string | null) {
+  const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+  if (retryAfterMs != null) {
+    return retryAfterMs;
+  }
   const rawDelay = BASE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1));
   const jitter = 0.9 + (Math.random() * 0.2);
   return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, Math.round(rawDelay * jitter)));
@@ -1010,13 +1045,13 @@ function resolveReasoningEffort(config: import("../config/load-config.ts").LabAg
   }
   const current = String(config.modelAlias ?? "").trim();
   const model = findModelMetadata(config, current, { includeRouting: true });
-  const efforts = Array.isArray(model?.reasoningEfforts) ? model.reasoningEfforts : [];
+  const efforts = selectableReasoningEffortIds(current, model?.reasoningEfforts);
   const requested = String(config.reasoningEffort ?? "").trim().toLowerCase();
-  if (requested && efforts.some((effort) => effort.id === requested)) {
+  if (requested && efforts.includes(requested)) {
     return requested;
   }
   const fallback = String(model?.defaultReasoningEffort ?? "").trim().toLowerCase();
-  return efforts.some((effort) => effort.id === fallback) ? fallback : null;
+  return efforts.includes(fallback) ? fallback : null;
 }
 
 /**

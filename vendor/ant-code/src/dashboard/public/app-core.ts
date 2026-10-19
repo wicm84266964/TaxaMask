@@ -277,6 +277,8 @@ export type DashboardSessionStatus = {
   [key: string]: unknown;
 };
 
+export type AgentRoute = { provider: string; model: string };
+
 export type DashboardApiResult = {
   ok?: boolean;
   error?: string;
@@ -291,7 +293,10 @@ export type DashboardApiResult = {
   models?: DashboardModelOption[];
   gatewayConfig?: DashboardGatewayConfig;
   gatewayProfiles?: DashboardGatewayProfile[];
+  officialSources?: Array<{ id: string; label: string; envKey: string; keyConfigured: boolean }>;
+  modelCount?: number;
   agentModelTiers?: unknown;
+  agentRouting?: { cheap?: AgentRoute | null; default?: AgentRoute | null; strong?: AgentRoute | null; vision?: AgentRoute | null };
   visionAgent?: unknown;
   settings?: Record<string, unknown>;
   session?: {
@@ -510,6 +515,8 @@ export type DashboardStreamEvent = {
   status?: string;
   item?: { id?: string; kind?: string; preview?: string; [key: string]: unknown };
   id?: string;
+  sessionId?: string;
+  title?: string;
   allowed?: boolean;
   interrupted?: boolean;
   current?: { preview?: string; [key: string]: unknown };
@@ -580,6 +587,7 @@ export type DashboardUiState = {
   };
   goalSubmitting: boolean;
   pendingApproval: DashboardApproval | null;
+  approvalQueue: DashboardApproval[];
   approvalSubmitting: boolean;
   pendingQuestion: DashboardPendingQuestion | null;
   questionSubmitting: boolean;
@@ -594,9 +602,20 @@ export type DashboardUiState = {
   sessionsRefreshTimer: ReturnType<typeof setTimeout> | null;
   sessionsRefreshDueAt: number;
   sidebarCollapsed: boolean;
+  sessionSearchQuery: string;
+  contentSearch: {
+    query: string;
+    status: "idle" | "loading" | "done" | "error";
+    hits: Array<{ sessionId: string; title: string; role: "user" | "assistant"; excerpt: string; position: number }>;
+    unreadable: number;
+    truncated: boolean;
+    error: string;
+    pendingJump: { sessionId: string; excerpt: string; position: number; role: "user" | "assistant" } | null;
+  };
   deletingSessions: Set<unknown>;
   deleteConfirmSessionId: string;
   files: DashboardFile[];
+  previewPath: string;
   liveTitle: string;
   liveActivities: Map<string | undefined, DashboardActivity>;
   backgroundSubagents: Map<string | undefined, DashboardActivity>;
@@ -615,6 +634,8 @@ export type DashboardUiState = {
     type?: string;
     data?: string;
     previewUrl?: string;
+    pageStart?: number;
+    pageEnd?: number;
   }>;
   workflow: {
     todos?: Array<{ status?: string; content?: string; title?: string }>;
@@ -627,6 +648,9 @@ export type DashboardUiState = {
   gatewayConfig: DashboardGatewayConfig | null;
   gatewayProfiles: DashboardGatewayProfile[];
   agentModelTiers: Record<string, string>;
+  agentRouting: { cheap: AgentRoute | null; default: AgentRoute | null; strong: AgentRoute | null; vision: AgentRoute | null };
+  officialSources: Array<{ id: string; label: string; envKey: string; keyConfigured: boolean }>;
+  schedules: Array<Record<string, unknown>>;
   visionAgent: DashboardVisionAgent | null;
   modelPanelOpen: boolean;
   applyAgentDefaultsOnSwitch: boolean;
@@ -704,6 +728,17 @@ export type DashboardUiState = {
   previewResizeStartWidth: number | null;
   transcriptFollowing: boolean;
   newReplyAvailable: boolean;
+  promptRail: {
+    turns: Array<{ id: string; prompt: string; response: string; node: HTMLElement }>;
+    hoverIndex: number;
+    activeIndex: number;
+    nextId: number;
+    pointerInside: boolean;
+    responseOpen: boolean;
+    labelIndex: number;
+    labelTimer: ReturnType<typeof setTimeout> | null;
+    highlightTimer: ReturnType<typeof setTimeout> | null;
+  };
   modalContext: {
     modal: HTMLElement;
     returnFocus?: Element | null;
@@ -748,6 +783,7 @@ export const state: DashboardUiState = {
   },
   goalSubmitting: false,
   pendingApproval: null,
+  approvalQueue: [],
   approvalSubmitting: false,
   pendingQuestion: null,
   questionSubmitting: false,
@@ -762,9 +798,20 @@ export const state: DashboardUiState = {
   sessionsRefreshTimer: null,
   sessionsRefreshDueAt: 0,
   sidebarCollapsed: false,
+  sessionSearchQuery: "",
+  contentSearch: {
+    query: "",
+    status: "idle",
+    hits: [],
+    unreadable: 0,
+    truncated: false,
+    error: "",
+    pendingJump: null
+  },
   deletingSessions: new Set(),
   deleteConfirmSessionId: "",
   files: [],
+  previewPath: "",
   liveTitle: "",
   liveActivities: new Map<string, DashboardActivity>(),
   backgroundSubagents: new Map(),
@@ -783,6 +830,9 @@ export const state: DashboardUiState = {
   gatewayConfig: /** @type {any} */ (null),
   gatewayProfiles: /** @type {any[]} */ ([]),
   agentModelTiers: {},
+  agentRouting: { cheap: null, default: null, strong: null, vision: null },
+  officialSources: [],
+  schedules: [],
   visionAgent: /** @type {any} */ (null),
   modelPanelOpen: false,
   applyAgentDefaultsOnSwitch: true,
@@ -857,6 +907,17 @@ export const state: DashboardUiState = {
   previewResizeStartWidth: /** @type {number | null} */ (null),
   transcriptFollowing: true,
   newReplyAvailable: false,
+  promptRail: {
+    turns: [],
+    hoverIndex: -1,
+    activeIndex: -1,
+    nextId: 0,
+    pointerInside: false,
+    responseOpen: false,
+    labelIndex: -1,
+    labelTimer: null,
+    highlightTimer: null
+  },
   modalContext: null,
   shutdownActivity: null,
   shutdownStatusVersion: 0,
@@ -865,7 +926,13 @@ export const state: DashboardUiState = {
 
 export const els = {
   projectPath: document.querySelector("#project-path"),
+  copyProjectPath: document.querySelector("#copy-project-path"),
   threadList: document.querySelector("#thread-list"),
+  threadScroller: document.querySelector("#thread-scroller"),
+  threadScrollbar: document.querySelector("#thread-scrollbar"),
+  threadScrollbarThumb: document.querySelector("#thread-scrollbar-thumb"),
+  sessionSearch: document.querySelector("#session-search"),
+  contentSearchResults: document.querySelector("#content-search-results"),
   refreshSessions: document.querySelector("#refresh-sessions"),
   collapseSidebar: document.querySelector("#collapse-sidebar"),
   sessionsStatus: document.querySelector("#sessions-status"),
@@ -875,6 +942,11 @@ export const els = {
   workflowStrip: document.querySelector("#workflow-strip"),
   transcript: document.querySelector("#transcript"),
   transcriptJump: document.querySelector("#transcript-jump"),
+  promptRail: document.querySelector("#prompt-rail"),
+  promptRailFrame: document.querySelector("#prompt-rail-frame"),
+  promptRailScroller: document.querySelector("#prompt-rail-scroller"),
+  promptRailMarks: document.querySelector("#prompt-rail-marks"),
+  promptRailPreview: document.querySelector("#prompt-rail-preview"),
   emptyState: document.querySelector("#empty-state"),
   promptInput: document.querySelector("#prompt-input"),
   attachmentInput: document.querySelector("#attachment-input"),
@@ -907,6 +979,8 @@ export const els = {
   lightboxCanvas: document.querySelector("#lightbox-canvas"),
   lightboxTable: document.querySelector("#lightbox-table"),
   collapsePreview: document.querySelector("#collapse-preview"),
+  scheduleList: document.querySelector("#schedule-list"),
+  refreshSchedules: document.querySelector("#refresh-schedules"),
   shutdownButton: document.querySelector("#shutdown-button"),
   headerShutdownButton: document.querySelector("#header-shutdown-button"),
   shutdownPanel: document.querySelector("#shutdown-panel"),
@@ -960,12 +1034,17 @@ export const EVENT_STALE_AFTER_MS = 35_000;
 export const EVENT_CONNECT_TIMEOUT_MS = 10_000;
 export const EVENT_RECONNECT_MAX_ATTEMPTS = 6;
 export const DASHBOARD_REQUEST_TIMEOUT_MS = 15_000;
+export const DASHBOARD_TURN_START_TIMEOUT_MS = 60_000;
 export const DASHBOARD_API_VERSION = "dashboard.v2";
 export const DASHBOARD_LIFECYCLE_TIMEOUT_MS = 5_000;
 export const DASHBOARD_SHUTDOWN_TIMEOUT_MS = 15_000;
 export const DASHBOARD_INTERRUPT_TIMEOUT_MS = 5_000;
 export const MAX_IMAGE_ATTACHMENTS = 6;
 export const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_DOCUMENT_ATTACHMENTS = 4;
+export const MAX_DOCUMENT_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+export const DOCUMENT_EXTENSIONS = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".markdown", ".csv", ".json", ".html", ".htm"]);
+export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 export const CURRENT_SESSION_STORAGE_KEY = "ant-code-dashboard-current-session";
 export const DASHBOARD_CLIENT_STORAGE_KEY = "ant-code-dashboard-client-id";
 export const PREVIEW_WIDTH_STORAGE_KEY = "ant-code-dashboard-preview-width";

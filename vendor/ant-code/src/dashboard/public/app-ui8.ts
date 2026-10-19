@@ -1,9 +1,10 @@
+import { toolLabel } from "../../tools/labels.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { hydrateRichContent } from "./rich-renderers.ts";
 import { visibleTranscriptRole } from "./transcript.ts";
 import { MANUAL_AGENT_MODEL_VALUE, state, els, MODE_DESCRIPTIONS, LOCAL_FILE_EXTENSIONS, FILE_REFERENCE_PATTERN, TRANSCRIPT_DOM_LIMIT, EVENT_STALE_AFTER_MS, EVENT_CONNECT_TIMEOUT_MS, EVENT_RECONNECT_MAX_ATTEMPTS, DASHBOARD_REQUEST_TIMEOUT_MS, DASHBOARD_API_VERSION, DASHBOARD_LIFECYCLE_TIMEOUT_MS, DASHBOARD_SHUTDOWN_TIMEOUT_MS, DASHBOARD_INTERRUPT_TIMEOUT_MS, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, CURRENT_SESSION_STORAGE_KEY, DASHBOARD_CLIENT_STORAGE_KEY, PREVIEW_WIDTH_STORAGE_KEY, PREVIEW_WIDTH_DEFAULT, PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX, PREVIEW_WORKSPACE_MIN , emptySessionStatus, emptyBackgroundSubagent } from "./app-core.ts";
 import type { DashboardConfigSource, DashboardReasoningEffort, DashboardTurnChangeStats, DashboardScopedDefaultSelection, DashboardVisionAgent, DashboardReasoningDiscovery, DashboardReasoningCapabilityCandidate, DashboardGatewayProbeModel, DashboardGatewayProbeResult, DashboardLifecycleActivity, DashboardSettings, DashboardFile, DashboardTableSheet, DashboardTablePreview, DashboardLightboxItem, DashboardQuestionChoice, DashboardPendingQuestion, DashboardApproval, DashboardGatewayTransport, DashboardScopedRequest, DashboardFetchOptions, DashboardModelSource, DashboardSessionStatus, DashboardApiResult, DashboardActivity, DashboardModelOption, DashboardGatewayProfile, DashboardGatewayConfig, DashboardModelSelection, DashboardPendingGuide, DashboardStreamEvent, DashboardUiState , DashboardSessionSummary } from "./app-core.ts";
-import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
+import { eventTargetOf, eventElement, isPlainObject, modelSourceOf, errorMessageOf, init, bootstrapDashboard, observeRunStatus, updateRunStatusTone, bindEvents, normalizedResponsiveView, composerHeightFor, previewWidthBounds, clampedPreviewWidth, permissionIndexForKey, focusTrapTarget, shouldFollowTranscript, scheduleAnimationFrameOnce, cancelScheduledAnimationFrame, appendPlainDraftDelta, renderFinalAssistantBody, selectTranscriptNodesToRemove, responsiveLayoutMode, restorePreviewWidth, setPreviewWidth, syncPreviewResizeHandle, beginPreviewResize, updatePreviewResize, finishPreviewResize, handlePreviewResizeKeydown, setResponsiveView, syncResponsiveNavigation, setResponsiveSurfaceInert, handleResponsiveFileNavigation, syncVisualViewport, resizePromptInput, handlePermissionModeKeydown, requestPermissionMode, defaultGoalMaxAutoContinues, emptyGoalSnapshot, applyGoalSnapshot, renderGoalControls, renderGoalStatusBar, requestGoalMode, showGoalConfirm, hideGoalConfirm, showGoalTextPanel, hideGoalTextPanel, enableGoalWithObjective, submitGoalAction, adoptGoalRunResult, showPermissionConfirm, hidePermissionConfirm, updateContextActions, announceStatus, modalFocusableElements, activateModal, collectModalBackground, focusModalInitialTarget, deactivateModal, restoreModalAttribute, handleGlobalKeydown, closeActiveModal, loadTrust, loadSessions, restoreInitialSession, latestBackgroundSessionId, initialSessionId, rememberCurrentSession, renderSessions, sessionMeta, sessionStatusView, toggleSidebar, setSidebarCollapsed, sessionsNeedRefresh, scheduleSessionsRefresh, handleSessionAction, openSession, restoreBackgroundSnapshot, deleteSession, setSessionsRefreshState, copySessionId, newTask, rememberNewTaskModelState, restoreNewTaskModelState, refreshNewTaskModelState, addAttachmentFiles, readImageAttachment, renderAttachmentStrip, attachmentPayload, clearAttachments, sendPrompt, composerHasOutboundContent, stableTurnRequest, dashboardRequestId, dashboardClientId, statusUrl, interruptTurn, guideTurn, cancelQueuedTurn, cancelBackgroundSubagent, backgroundCancelKey, connectEvents, ensureEventsConnected, disconnectEvents, closeEventSource, markEventConnectionAlive, armEventConnectTimer, armEventStaleTimer, scheduleEventReconnect, reconnectEventsManually, clearEventReconnectTimer, clearEventConnectTimer, clearEventStaleTimer, setConnectionState, resetEventReplayState, rememberEventCursor, handleDashboardEvent, shouldSkipDashboardEvent, beginEventTurn, renderTranscriptMessages, renderSessionFailure, setTranscriptPaging, renderTranscriptHistoryStatus, removeTranscriptHistoryStatus, transcriptFirstContentNode, handleTranscriptScroll, loadOlderTranscript, renderWorkflowPanel, renderWorkflowStrip, currentWorkflowItem, workflowSection, workflowItem, normalizeWorkflowStatus, summarizeWorkflow, appendMessage, createMessageNode, appendTranscriptNode, trimTranscriptWindow, isProtectedTranscriptNode, renderTranscriptWindowMarker, captureTranscriptViewportAnchor, restoreTranscriptViewportAnchor, transcriptNodeTop, restoreTranscriptNodeAnchor, resetTranscriptWindow, appendAssistantDraft, scheduleDraftRender, renderAssistantDraft, appendActivity, appendContextBoundary, contextBoundaryText, handleActivity, isBackgroundSubagentActivity, handleBackgroundSubagentActivity, clearBackgroundSubagentStatus, reconcileBackgroundSubagentSnapshot, backgroundSubagentDisplayStatus, backgroundSubagentVisible, updateLiveActivity, removeLiveActivity, setLiveTitle, toggleLiveStatusDetails, updateLiveStatus, liveStatusTitle, primaryLiveActivity, gatewayRetryChipText, renderBackgroundSubagentStatus, backgroundSubagentCompactLabel, backgroundSubagentTitle, backgroundSubagentMeta, backgroundSubagentCancellable, resetLiveStatus, backgroundSubagentCounts, idleRunStatus, applyIdleRunStatus, updateRunStatusForBackground, updateSessionStatus, updateTurnChangeStats, resetTurnChangeStats, normalizeChangeStats, renderComposerStatus, modelStatusHtml, unresolvedModelStatusHtml, handleModelStatusActivate, handleModelStatusKeydown, toggleModelPanel, hideModelPanel, showSettingsWorkspace, refreshSettingsConfiguration, hideSettingsWorkspace, showModelConfigPanel, hideModelConfigPanel, renderModelPanel, modelCapabilityLabels, handleModelPanelClick, handleModelPanelChange, renderSettingsView, syncSettingsRail, modelSettingsHtml, transcriptSettingsHtml, transcriptRetentionOptionsHtml, networkSettingsHtml, networkModeOptionHtml, agentSettingsHtml, reliabilitySettingsHtml, settingsSectionHeading, settingsToggleHtml, managedFieldHtml, settingsDisabled, settingsFormActions, settingsFeedbackHtml, settingsGatewayProfileHtml, gatewayProfileReadonlyLabel, providerModelKey, scopedDefaultModelLabel, settingsModelHtml, handleSettingsRailClick, initializeSettingsFormTracking, handleSettingsFormChange, settingsControlValue, changedSettingsFields, canonicalSettingsField, setSettingsFormSaving, renderSettingsFeedbackInPlace, saveSettingsConfig, handleSettingsClick, protocolDisplayName, agentModelPickerHtml, renderModelConfigPanel, handleModelConfigPanelClick, handleModelConfigInput, handleModelConfigChange, markModelConfigCredentialChanged, markModelConfigEndpointChanged, handleModelConfigModelIdChanged, markReasoningCapabilityManual, clearReasoningCapabilityControls, syncGatewayUrlHint, gatewayUrlPlaceholder, gatewayUrlHint, syncReasoningDefaultOptions, probeGateway, isCurrentModelConfigRequest, currentGatewayProbeResult, currentGatewayCatalogModels, modelConfigGatewayProfile, modelConfigEndpointChanged, modelConfigAgentModelsSnapshot, initializeAgentModelPickerSnapshot, syncAgentModelPickersForEndpoint, uniqueAgentModelCandidates, appendAgentModelOptions, renderAgentModelPickers, updateAgentModelPickerManualStatus, handleAgentModelSelection, renderGatewayProbeResult, applyProbedModel, applyGatewayDiscoveredModel, applySuggestedGatewayUrl, gatewayCredentialAction, normalizeGatewayProbeModels, normalizeReasoningDiscovery, reasoningCapabilityCandidate, applyReasoningCapabilityCandidate, ensureReasoningEffortOptions, applyPendingReasoningCapabilities, reasoningCapabilityIsActionable, renderReasoningCapabilityStatus, reasoningCapabilityStatusText, reasoningDiscoveryStatusText, probeModelCapabilities, setFormControlsSaving, setModelConfigFormSaving, renderModelConfigFailure, clearModelConfigFailure, manualAgentModelIds, saveModelConfig, saveDefaultModelSelection, switchModel, handleReasoningEffortChange, switchReasoningEffort, deleteGatewayProfile, deleteModel, updateConfigRevisions, normalizeScopedDefaultSelection, configScope, configMutationMetadata, isConfigRevisionConflict, configRevisionConflictMessage, refreshConfigRevisionsAfterConflict, normalizeGatewayConfig, normalizeDashboardSettings, mergeGatewayConfig, normalizeGatewayProfiles, normalizeConfigSource, normalizeModels, normalizeModelSource, normalizeReasoningEfforts, normalizedReasoningEffort, isDisabledReasoningEffort, configuredReasoningEffort, reasoningEffortFallbackLabel, localizedReasoningEffortLabel, reasoningEffortCatalog, reasoningEffortLabel, resolveAtomicModelSelection, currentModelSelection, currentSessionNeedsModelSelection, currentGatewayProfile, gatewayProfileById, settingsInspectedGatewayProfile, modelSourceLabel, markCurrentModel, currentModelInfo, modelDisplayName, normalizeAgentModelTiers, normalizeVisionAgent, firstVisionModelId, hasAgentModelTiers, agentModelTiersSummary, gatewaySummary, modelSaveTargetLabel, gatewaySourceNote, environmentGatewayDefaultNote, sourceBadge, lockClosedDashboard, normalizeLifecycleActivity, shutdownRequestBody, shutdownResultIsClosed, lifecycleActivitySummary, renderShutdownActivity, renderFiles, currentImageFiles, openFile, renderOfficePreview, officePreviewMeta, officePreviewBodyHtml, renderTablePreview, normalizeTablePreview, tablePreviewMeta, renderCompactTableHtml, renderExpandedTableHtml, renderTableHtml, tableTruncationNote, maxVisibleColumns, columnLabel, renderSheetPreviewHtml, renderSheetCellHtml, resetPreview, fencedDataForFile, dataLanguageForExtension, showImageLightbox, showTableLightbox, renderLightboxImage, bindTableLightboxControls, moveLightbox, hideLightbox, setPermissionMode, clearTranscript, cancelTranscriptAnimationFrames, clearAssistantDraftTimers, hideEmptyState, showError, showNotice, renderBootstrapLoading, renderBootstrapFailure, dashboardPayloadError, bootstrapFailurePresentation, clearBootstrapStatus, scrollTranscript, isTranscriptNearBottom, syncTranscriptFollowState, followTranscript, updateTranscriptJump, beginScopedRequest, isCurrentScopedRequest, finishScopedRequest, cancelScopedRequest, isAbortError, getJson, postJson, deleteJson, dashboardFetch, responseJson, dashboardJsonHeaders, dashboardCsrfToken, messageText, messageDisplayText, userMessageDisplayText, normalizeAttachmentMetadata, imageAttachmentLine, renderMessageText, renderLinkedText, bindRichContent, linkifyFileTextNodes, replaceFileReferences, isLikelyLocalFileReference, resolveDisplayFilePath, normalizeFileReferencePath, parentDirectory, filePreviewUrl, rawFileUrl, apiFileUrl, imagePreviewUrl, isSafeInlineBitmapUrl, normalizeRelativePath, isWorkspaceRelativeToBase, copyCodeBlock, previewText, formatNumber, formatBytes, escapeHtml, escapeAttribute, formatTime, formatRelativeTime } from "./app-barrel.ts";
 export function sourceLabel(source: DashboardConfigSource | string | null | undefined) {
   const type = typeof source === "string" ? source : String(source?.type ?? "");
   if (type === "project") return "当前项目";
@@ -149,6 +150,128 @@ export function collapseAssistantDrafts(finalText: unknown = "") {
   scrollTranscript({ onlyIfNearBottom: true });
 }
 
+const GUIDED_DRAFT_MARKER = "[引导接管前的草稿，非最终回复]";
+const INTERRUPTED_DRAFT_MARKER = "[中断草稿，非最终回复]";
+
+export function isSteerDraftReason(reason: unknown) {
+  return String(reason ?? "").trim() === "guided";
+}
+
+export function keepInterruptedAssistantDrafts(options: { steered?: boolean } = {}) {
+  const steered = options.steered === true;
+  for (const draft of state.assistantDrafts.values()) {
+    cancelScheduledAnimationFrame(draft, "renderFrame");
+    renderAssistantDraft(draft, { force: true });
+    const node = draft.node;
+    if (node instanceof HTMLElement) {
+      markInterruptedDraftNode(node, Number.isFinite(draft.round) ? Number(draft.round) : null, { steered });
+    }
+  }
+  state.assistantDrafts.clear();
+}
+
+export function markInterruptedDraftNode(node: HTMLElement, round: number | null = null, options: { steered?: boolean } = {}) {
+  const steered = options.steered === true;
+  node.classList.toggle("interrupted", !steered);
+  node.classList.toggle("guided", steered);
+  const label = node.querySelector(".message-label");
+  if (label) {
+    label.textContent = interruptedDraftLabel(round, steered);
+  }
+}
+
+export function interruptedDraftLabel(round: number | null, steered: boolean) {
+  const prefix = Number.isInteger(round) ? `思考 · 第 ${round} 轮` : "思考";
+  return steered ? `${prefix} · 引导已接管` : `${prefix} · 已中断 · 非最终回复`;
+}
+
+export function isThinkingProcessMessage(message: unknown) {
+  return isPlainObject(message) && message.thinkingProcess === true && visibleTranscriptRole(String(message.role ?? "")) === "assistant";
+}
+
+export function createThinkingProcessNode(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const body = String(messageDisplayText(record.content) ?? "").trim();
+  const node = document.createElement("details");
+  node.className = "draft-summary";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <summary>
+      <span class="status-dot"></span>
+      <span>思考过程</span>
+      <span class="draft-summary-meta">${body ? "已收起" : "已收起 · 已汇入最终回复"}</span>
+    </summary>
+    <div class="draft-summary-list"></div>
+  `;
+  const list = node.querySelector(".draft-summary-list");
+  if (body && list) {
+    const item = document.createElement("section");
+    item.className = "draft-summary-item";
+    const title = document.createElement("div");
+    title.className = "draft-summary-title";
+    title.textContent = "草稿";
+    const bodyNode = document.createElement("div");
+    bodyNode.className = "message-body draft-plain-text";
+    bodyNode.textContent = body;
+    item.append(title, bodyNode);
+    list.append(item);
+  } else if (list) {
+    const note = document.createElement("div");
+    note.className = "draft-summary-note";
+    note.textContent = "本轮流式草稿已合并到最终回复，没有额外过程内容。";
+    list.append(note);
+  }
+  return node;
+}
+
+export function isInterruptedDraftMessage(message: unknown) {
+  if (!isPlainObject(message) || visibleTranscriptRole(String(message.role ?? "")) !== "assistant") {
+    return false;
+  }
+  if (message.interruptedDraft === true) {
+    return true;
+  }
+  const text = messageDisplayText(message.content);
+  return text.startsWith(INTERRUPTED_DRAFT_MARKER) || text.startsWith(GUIDED_DRAFT_MARKER);
+}
+
+export function isSteerDraftMessage(message: unknown) {
+  if (!isPlainObject(message)) {
+    return false;
+  }
+  return String(messageDisplayText(message.content) ?? "").includes(GUIDED_DRAFT_MARKER);
+}
+
+export function interruptedDraftDisplayText(content: unknown) {
+  return String(messageDisplayText(content) ?? "")
+    .replace(/^\[引导接管前的草稿，非最终回复\]\s*/u, "")
+    .replace(/^\[中断草稿，非最终回复\]\s*/u, "")
+    .replace(/^原因：[^\n]*\s*/u, "")
+    .replace(/^本轮在给出可见正文前被引导接管。\s*/u, "")
+    .replace(/^本轮在给出可见正文前被上游断开。\s*/u, "")
+    .trim();
+}
+
+export function createInterruptedDraftNode(message: unknown) {
+  const record = isPlainObject(message) ? message : {};
+  const steered = isSteerDraftMessage(record);
+  const body = interruptedDraftDisplayText(record.content);
+  const node = document.createElement("article");
+  node.className = steered ? "message assistant draft-message guided" : "message assistant draft-message interrupted";
+  node.setAttribute("aria-live", "off");
+  node.innerHTML = `
+    <div class="message-label">${interruptedDraftLabel(null, steered)}</div>
+    <div class="message-body draft-plain-text"></div>
+  `;
+  const bodyNode = node.querySelector(".message-body");
+  if (bodyNode) {
+    bodyNode.textContent = body || (steered
+      ? "本轮在给出可见正文前被引导接管。"
+      : "本轮在给出可见正文前被上游断开。模型内部思考没有作为最终回复展示。");
+  }
+  return node;
+}
+
 export function isMeaningfulCompletedActivity(activity: DashboardActivity) {
   if (activity.toolName === "agent_run") {
     return true;
@@ -181,17 +304,36 @@ export function normalizeComparableText(text: unknown) {
 
 export function showApproval(approval: DashboardApproval | null | undefined) {
   if (!approval) return;
+  if (state.pendingApproval?.id && approval.id && state.pendingApproval.id === approval.id) {
+    renderApprovalPanel(approval);
+    return;
+  }
+  if (state.pendingApproval) {
+    if (approval.id && !state.approvalQueue.some((item) => item.id === approval.id)) {
+      state.approvalQueue.push(approval);
+    }
+    refreshApprovalQueueLabel();
+    updateLiveStatus();
+    return;
+  }
+  renderApprovalPanel(approval);
+}
+
+export function renderApprovalPanel(approval: DashboardApproval) {
   state.pendingApproval = approval;
   state.approvalSubmitting = false;
+  mountApprovalPanelOverlay();
   els.approvalPanel.classList.remove("hidden");
   els.approvalPanel.setAttribute("tabindex", "-1");
   els.approvalPanel.setAttribute("role", "dialog");
   els.approvalPanel.setAttribute("aria-modal", "true");
   els.approvalPanel.setAttribute("aria-labelledby", "approval-title");
+  const queued = state.approvalQueue.length;
   els.approvalPanel.innerHTML = `
-    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(approval.toolName)}</div>
+    <div class="approval-title" id="approval-title">需要权限确认 · ${escapeHtml(toolLabel(approval.toolName))}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}</div>
     <div class="approval-preview">${escapeHtml([
       approval.reason,
+      queued > 0 ? `还有 ${queued} 个权限请求排队。` : "",
       approval.sensitive ? "敏感信息强确认：批准后相关内容可能进入模型上下文。" : "",
       approval.outsideWorkspace ? "目标位于工作区外，需要明确确认。" : "",
       ...(Array.isArray(approval.preview) ? approval.preview : [])
@@ -208,7 +350,8 @@ export function showApproval(approval: DashboardApproval | null | undefined) {
   });
   activateModal(els.approvalPanel, { initialFocus: "button[data-action='allow-once']" });
   revealInteractionPanel(els.approvalPanel, "button[data-action]");
-  announceStatus(`需要确认 ${approval.toolName ?? "工具"} 权限`);
+  updateLiveStatus();
+  announceStatus(`需要确认 ${toolLabel(approval.toolName)} 权限`);
 }
 
 export async function resolveApproval(action: unknown) {
@@ -226,16 +369,71 @@ export async function resolveApproval(action: unknown) {
     showError(result.error ?? "权限确认提交失败");
     return;
   }
-  hideApproval();
-  els.runStatus.textContent = state.running ? "运行中" : "处理中";
+  hideApproval({ approvalId: approval.id });
+  els.runStatus.textContent = state.pendingApproval ? "等待确认" : state.running ? "运行中" : "处理中";
 }
 
-export function hideApproval() {
+export function hideApproval(options: { approvalId?: unknown } = {}) {
+  const approvalId = options.approvalId == null || options.approvalId === "" ? "" : String(options.approvalId);
+  if (approvalId) {
+    if (state.pendingApproval?.id && state.pendingApproval.id !== approvalId) {
+      state.approvalQueue = state.approvalQueue.filter((item) => item.id !== approvalId);
+      return;
+    }
+  } else {
+    state.approvalQueue = [];
+  }
   deactivateModal(els.approvalPanel);
   state.pendingApproval = null;
   state.approvalSubmitting = false;
+  const next = state.approvalQueue.shift();
+  if (next) {
+    renderApprovalPanel(next);
+    return;
+  }
+  restoreApprovalPanelHome();
   els.approvalPanel.classList.add("hidden");
   els.approvalPanel.innerHTML = "";
+  updateLiveStatus();
+}
+
+function refreshApprovalQueueLabel() {
+  const title = els.approvalPanel?.querySelector("#approval-title");
+  if (!title || !state.pendingApproval) {
+    return;
+  }
+  const queued = state.approvalQueue.length;
+  title.textContent = `需要权限确认 · ${toolLabel(state.pendingApproval.toolName)}${queued > 0 ? ` · 还有 ${queued} 个排队` : ""}`;
+}
+
+function mountApprovalPanelOverlay() {
+  if (!els.approvalPanel || !document.body) {
+    return;
+  }
+  if (els.approvalPanel.parentElement !== document.body) {
+    document.body.appendChild(els.approvalPanel);
+  }
+}
+
+function restoreApprovalPanelHome() {
+  if (!els.approvalPanel || !els.liveStatus?.parentNode) {
+    return;
+  }
+  if (els.approvalPanel.previousElementSibling !== els.liveStatus) {
+    els.liveStatus.after(els.approvalPanel);
+  }
+}
+
+export function clearPermissionWaitActivity() {
+  for (const [key, activity] of Array.from(state.liveActivities.entries())) {
+    if (activity.source === "permission" || activity.title === "等待权限确认") {
+      state.liveActivities.delete(key);
+    }
+  }
+  if (state.liveTitle === "等待权限确认") {
+    state.liveTitle = state.running ? "运行中" : "";
+  }
+  updateLiveStatus();
 }
 
 export function showQuestion(question: DashboardPendingQuestion | null | undefined) {
@@ -260,7 +458,7 @@ export function revealInteractionPanel(panel: HTMLElement | null | undefined, fo
   if (!panel || panel.classList.contains("hidden")) {
     return;
   }
-  panel.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  panel.scrollIntoView?.({ block: panel === els.approvalPanel ? "center" : "nearest", inline: "nearest" });
   const target = focusSelector ? panel.querySelector(focusSelector) : null;
   const focusTarget = target ?? panel;
   if (typeof focusTarget.focus === "function") {
@@ -718,8 +916,13 @@ export function updateSendButton() {
     return;
   }
   if (state.running) {
-    els.sendButton.textContent = "中断";
-    els.sendButton.title = "点击中断当前任务";
+    if (composerHasOutboundContent()) {
+      els.sendButton.textContent = "加入队列";
+      els.sendButton.title = "将当前输入加入队列，不中断正在运行的任务";
+    } else {
+      els.sendButton.textContent = "中断";
+      els.sendButton.title = "点击中断当前任务";
+    }
   } else {
     els.sendButton.textContent = "发送";
     els.sendButton.title = "发送";

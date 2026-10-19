@@ -238,6 +238,7 @@ python AntSleap/main.py
 需要注意两点：
 
 - 修复面板优先保证“能打开来修”，因此会跳过项目本地的 Ant-Code 配置文件；如果 `.lab-agent/config.json` 正常但里面存了你的模型/API 设置，修复面板里可能需要重新确认模型接口。
+- 新电脑安装依赖时，在已经激活的 Python 环境里运行 `python scripts/ensure_agent_node.py --npm-ci`。它会把 Node.js 22.18 或更新版本放进该环境，Windows 上就是 `python.exe` 旁边的 `node.exe`。这样不依赖 PATH 里先遇到哪一个 Node，也不会因为只找到 22.14 就改走 WSL。`启动TaxaMask.bat` 每次启动也会做同样的准备。
 - 如果 Node.js 不在常见位置，可以设置 `TAXAMASK_NODE_EXE` 指向具体 `node.exe`；如果默认端口被占用，可以设置 `TAXAMASK_ANTCODE_PORT`。
 
 ### 3.2 启动后你会看到什么

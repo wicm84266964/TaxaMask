@@ -466,7 +466,7 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertNotIn("Dark Mode", menu_texts)
             self.assertIn("Check / Relocate Project Images", menu_texts)
             self.assertIn("Import STL Rendered Views to Labeling Workbench", menu_texts)
-            self.assertIn("Open PDF Evidence Tools", menu_texts)
+            self.assertIn("Open Material Processing Center", menu_texts)
             self.assertNotIn("New STL Rendered-View Project", menu_texts)
             joined_menu_text = "\n".join(menu_texts)
             self.assertNotIn("T" + "IF", joined_menu_text)
@@ -3211,10 +3211,10 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
             self.assertEqual(window.tabs.count(), 1)
             window.open_pdf_evidence_tools()
             self.assertEqual(window.tabs.currentWidget(), window.pdf_widget)
-            self.assertEqual(window.tabs.tabText(window.tabs.currentIndex()), "PDF Evidence Tools")
+            self.assertEqual(window.tabs.tabText(window.tabs.currentIndex()), "Material Processing Center")
             self.assertEqual(window.tabs.count(), 2)
             self.assertEqual(window.pdf_widget.btn_start_center.text(), "Start Center")
-            self.assertEqual(window.pdf_widget.btn_ask_agent.text(), "Ask Agent")
+            self.assertEqual(window.pdf_widget.btn_ask_agent.text(), "Ask with current material state")
             self.assertIsNotNone(getattr(main_module, "LiteratureDescriptionDialog", None))
             self.assertEqual(window.pdf_widget.lbl_ext_db.text(), "Result Folder:")
             self.assertEqual(window.pdf_widget.btn_db.text(), "Choose Result Folder")
@@ -3269,6 +3269,28 @@ console.log(JSON.stringify({chinese, english, text, textWrites}));
                 PROJECT_ROOT / "TaxaMask_outputs" / "pdf_extraction" / "taxamask_literature.db",
             )
             context = window.pdf_widget.get_agent_context()
+            self.assertEqual(context["source_workbench"], "pdf_evidence")
+            self.assertEqual(context["workbench_import_allowed"], "yes")
+            self.assertEqual(context["active_material_page_id"], "literature_screening")
+            self.assertEqual(context["material_center_label"], "Material Processing Center")
+            self.assertEqual(context["intake_pathway_label"], "PDF literature evidence pathway")
+            window.pdf_widget.edit_ext_src.setText(str(result_dir))
+            window.pdf_widget.tabs.setCurrentIndex(0)
+            screening_context = window.pdf_widget.get_agent_context()
+            self.assertEqual(screening_context["active_material_page_id"], "literature_screening")
+            self.assertNotEqual(
+                screening_context["settings_question_focus"],
+                "stage_3_figure_extraction_review_and_import_ready_export",
+            )
+            window.pdf_widget.tabs.setCurrentIndex(1)
+            extraction_context = window.pdf_widget.get_agent_context()
+            self.assertEqual(extraction_context["active_material_page_id"], "data_extraction")
+            self.assertEqual(
+                extraction_context["settings_question_focus"],
+                "stage_3_figure_extraction_review_and_import_ready_export",
+            )
+            window.pdf_widget.tabs.setCurrentIndex(0)
+            window.pdf_widget.edit_ext_src.clear()
             self.assertEqual(
                 context["settings_question_focus"],
                 "stage_0_confirm_existing_pdfs_or_discovery_mode",

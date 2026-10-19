@@ -795,6 +795,12 @@ class MainWindowShellMixin:
             self.pdf_widget.agent_requested,
             self.shell_coordinator.open_agent,
         )
+        if hasattr(self.pdf_widget, "material_page_changed"):
+            self.shell_signal_router.connect_once(
+                "pdf.material_page",
+                self.pdf_widget.material_page_changed,
+                self.remember_material_page_context,
+            )
         if hasattr(self.pdf_widget, "set_theme"):
             self.pdf_widget.set_theme(self.current_theme)
         return self.pdf_widget

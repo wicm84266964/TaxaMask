@@ -308,7 +308,7 @@ class MainWindowVlmMixin:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle(tr("VLM Pre-Annotate", self.current_lang))
-            box.setText(tr("Configure the Multimodal LLM API in PDF Evidence Tools first.", self.current_lang))
+            box.setText(tr("Configure the Multimodal LLM API in the Material Processing Center first.", self.current_lang))
             open_button = box.addButton(tr("Open API settings", self.current_lang), QMessageBox.AcceptRole)
             box.addButton(QMessageBox.Cancel)
             box.exec()

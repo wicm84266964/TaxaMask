@@ -214,11 +214,11 @@ class MainWindowStartCenterMixin:
             )
         self.start_pdf_card = self._build_workflow_card(
             "startPdfEvidenceCard",
-            "PDF evidence workflow",
-            "Use Agent first to confirm the target taxon, screening rules, figure extraction scope, evidence indexes, candidate review, and safe import.",
-            "Plan PDF workflow with Agent",
+            "Material processing center",
+            "The intake pathway currently connected to the workbench is PDF literature evidence: screening, figure extraction, review, and safe import. Later intake methods can be added here by the embedded agent.",
+            "Plan material processing with Agent",
             self.open_agent_for_pdf_workflow,
-            "Open PDF tools",
+            "Open material processing center",
             self.open_pdf_evidence_tools,
         )
         rail_layout.addWidget(self.start_pdf_card)

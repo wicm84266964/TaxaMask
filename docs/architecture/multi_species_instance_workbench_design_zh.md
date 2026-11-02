@@ -1,7 +1,8 @@
 # 多物种、多个体标注工作台设计稿
 
-设计版本：0.3  
-日期：2026-11-02  
+设计版本：0.3
+
+日期：2026-11-02
 状态：一期功能已在本地开发工作区实现，正在形成验收基线；本稿保留设计提案与验收目标，不能据此认定全部细节已通过。实际实现、差异和验证范围见[实现与验证记录](../validation/instance_workbench_validation_zh.md)，操作见[使用说明](../instance_workbench_zh.md)。外部模型和智能体最终契约见 `docs/contracts/instance_*_contract_zh.md`。
 
 ## 1. 要解决的研究任务

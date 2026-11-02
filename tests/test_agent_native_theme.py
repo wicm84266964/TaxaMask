@@ -16,6 +16,8 @@ class AgentNativeThemeTests(unittest.TestCase):
     def test_settings_buttons_and_theme_switch_use_native_css(self):
         app = QApplication.instance() or QApplication([])
         view = QWebEngineView()
+        view.resize(900, 700)
+        view.show()
         css = (Path(__file__).resolve().parents[1] / "vendor/ant-code/src/dashboard/public/styles.css").read_text(encoding="utf-8")
         loaded = []
         view.loadFinished.connect(loaded.append)
@@ -53,6 +55,19 @@ class AgentNativeThemeTests(unittest.TestCase):
                 owner.web_view = view
                 owner._apply_web_view_background_color = lambda: None
                 TaxaMaskAgentPanel._sync_web_embed_theme(owner)
+                # WebEngine renders asynchronously; macOS can still expose the
+                # previous frame when the first JavaScript sample completes.
+                expected_class = "taxamask-embed-" + owner._embed_theme_name()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    active = evaluate('document.documentElement.classList.contains(' + json.dumps(expected_class) + ')')
+                    colors = json.loads(evaluate(sample))
+                    if active and (theme != "classic_dark" or
+                                   not any(color in colors for color in ("rgb(30, 49, 77)", "rgb(64, 95, 136)"))):
+                        break
+                    app.processEvents()
+                    time.sleep(.02)
+                self.assertTrue(active, "Browser did not apply the requested theme")
                 colors = json.loads(evaluate(sample))
                 if theme == "classic_dark":
                     self.assertNotIn("rgb(30, 49, 77)", colors)

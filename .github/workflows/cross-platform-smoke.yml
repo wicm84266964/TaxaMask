@@ -52,6 +52,12 @@ jobs:
           pip install -r requirements-torch-cpu.txt
           pip install -r requirements.txt
 
+      - name: Run instance workbench and theme regressions
+        run: |
+          python -m unittest tests.test_instance_workbench tests.test_instance_interfaces tests.test_instance_canvas_interactions
+          python -m unittest tests.test_shared_theme_controls tests.test_tif_workbench_style
+          python -m unittest tests.test_agent_native_theme
+
       - name: Run lightweight tests
         run: |
           python -m unittest tests.test_config_cleanup tests.test_platform_open tests.test_poppler_discovery tests.test_runtime_device tests.test_generic_export_schema tests.test_window_geometry tests.test_path_identity tests.test_agent_context_routes tests.test_embedded_taxonomy_paper_finder tests.test_embedded_skill_bundles tests.test_gui_smoke
@@ -59,12 +65,6 @@ jobs:
 
       - name: Run v2.4.10 release regressions
         run: python scripts/run_validation_suite.py --suite v2410_release_audit --timeout 300
-
-      - name: Run instance workbench and theme regressions
-        run: |
-          python -m unittest tests.test_instance_workbench tests.test_instance_interfaces tests.test_instance_canvas_interactions
-          python -m unittest tests.test_shared_theme_controls tests.test_tif_workbench_style
-          python -m unittest tests.test_agent_native_theme
 
       - name: Run v2.5.0 storage release regressions
         run: python scripts/run_validation_suite.py --suite v250_release_audit --timeout 300

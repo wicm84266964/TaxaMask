@@ -6,7 +6,9 @@ from .safe_io import AdvisoryFileLock
 
 def run_model_job(project_root, callback):
     root = Path(project_root).resolve()
-    lock = AdvisoryFileLock(root / ".instance-model.lock", trusted_root=root, timeout=0.1)
+    # POSIX advisory locks also guard the immediate parent directory. Keep model
+    # jobs separate from the project writer lock while serializing all model jobs.
+    lock = AdvisoryFileLock(root / ".instance-model" / "active.lock", trusted_root=root, timeout=0.1)
     try:
         if not lock.acquire():
             raise TimeoutError("instance_model_busy")

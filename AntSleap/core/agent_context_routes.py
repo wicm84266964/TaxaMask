@@ -298,6 +298,16 @@ def enrich_agent_context(context):
     """Attach compact routing hints to an Ask Agent context dictionary."""
 
     enriched = dict(context or {})
+    if _route_key(enriched) == "species_instances":
+        enriched.update(
+            diagnostic_route="species_instances",
+            diagnostic_focus="独立多物种多个体工作台。先用实例 CLI inspect/validate 检查，不复用部位命令。",
+            source_code_refs="tools/agentic/instance_workbench.py; AntSleap/core/instance_agent.py",
+            llm_context_refs="docs/contracts/instance_agent_contract_zh.md; docs/contracts/instance_backend_contract_zh.md",
+            safety_notes="通过实例接口提交草稿；禁止确认人工真值、改写旧部位项目或绕过请求修订检查。模型预测不是物种鉴定证据。",
+            suggested_agent_action="先读取接口说明，inspect 获取 project_id/revision/image_id/category_id；写入仅提交 propose_instances 请求，等待工作台返回结果。训练和预测使用独立实例 CLI。",
+        )
+        return enriched
     route = deepcopy(AGENT_CONTEXT_ROUTES.get(_route_key(enriched), {}))
     if not route:
         return enriched

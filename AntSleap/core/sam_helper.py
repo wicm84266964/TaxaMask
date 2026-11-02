@@ -384,6 +384,39 @@ class SAMWorker(QObject):
         except Exception as e:
             self.prompt_failed.emit(f"SAM point prompt failed: {e}")
 
+    def predict_instance_masks(self, image_path, *, box=None, points=None, labels=None):
+        """Lossless instance API; leave the legacy per-part polygon signal intact."""
+        if self.model is None:
+            raise RuntimeError("SAM model is not loaded")
+        from PIL import Image, ImageOps
+        from .instance_project import encode_mask
+        options = {}
+        if box is not None:
+            options["bboxes"] = [box]
+        if points:
+            if len(points) != len(labels or []):
+                raise ValueError("SAM point/label count mismatch")
+            # One object with multiple foreground/background prompts, not one object per point.
+            options.update(points=[points], labels=[labels])
+        if not options:
+            raise ValueError("SAM prompt required")
+        with Image.open(image_path) as source:
+            image = np.asarray(ImageOps.exif_transpose(source).convert("RGB"))
+        results = self.model.predict(image[..., ::-1].copy(), verbose=False, device=self.device, **options)
+        masks = []
+        for result in results:
+            if result.masks is None:
+                continue
+            for tensor in result.masks.data:
+                a = tensor.detach().cpu().numpy()
+                if a.shape != image.shape[:2]:
+                    a = cv2.resize(a, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+                if np.any(a > .5):
+                    masks.append(encode_mask(a > .5))
+        if not masks:
+            raise ValueError("SAM returned no usable mask")
+        return masks
+
     @Slot(str, float, float, float, float)
     def predict_box(self, image_path, x1, y1, x2, y2):
         """

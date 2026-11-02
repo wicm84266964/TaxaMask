@@ -1671,6 +1671,9 @@ class ProjectManager:
         with open(path, 'r', encoding='utf-8') as f:
             loaded_data = json.load(f)
 
+        if loaded_data.get("project_type") == "species_instances_2d":
+            raise ValueError("物种与个体项目必须通过独立工作台打开，不能作为部位项目加载")
+
         if self._is_sqlite_manifest_payload(loaded_data):
             from .project_sqlite_loader import load_2d_sqlite_project_manifest
 

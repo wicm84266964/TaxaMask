@@ -26,8 +26,8 @@ class MainWindowShellMixin:
         self.resize(self.startup_size)
         self.config = config_factory()
         self.current_lang = self.config.get("language", "en")
-        self.current_theme = normalize_theme(self.config.get("theme", "dark"))
-        if self.config.get("theme", "dark") != self.current_theme:
+        self.current_theme = normalize_theme(self.config.get("theme", "classic_dark"))
+        if self.config.get("theme", "classic_dark") != self.current_theme:
             self.config.set("theme", self.current_theme)
         self.tif_workflow_enabled = _env_flag_enabled(EXPERIMENTAL_TIF_WORKFLOW_ENV)
         self.project = project_factory()
@@ -785,6 +785,8 @@ class MainWindowShellMixin:
                 from ui.pdf_processing_widget import PdfProcessingWidget
             widget_factory = PdfProcessingWidget
         self.pdf_widget = widget_factory(self.current_lang)
+        if hasattr(self.pdf_widget, "instance_material_import_requested"):
+            self.pdf_widget.instance_material_import_requested.connect(self.import_materials_to_instances)
         self.shell_signal_router.connect_once(
             "pdf.start_center",
             self.pdf_widget.start_center_requested,

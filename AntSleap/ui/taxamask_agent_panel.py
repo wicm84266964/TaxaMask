@@ -874,6 +874,8 @@ exec "$@"
         return True
 
     def _embed_theme_name(self):
+        if self.current_theme == "classic_dark":
+            return "native"
         return "light" if get_theme_config(self.current_theme)["is_light"] else "dark"
 
     def _remove_web_bootstrap_script(self):
@@ -907,6 +909,10 @@ exec "$@"
             return
 
     def _web_embed_style_source(self):
+        if self.current_theme == "classic_dark":
+            # Dashboard already owns its native black/gold palette and embed layout.
+            # Do not activate its TaxaMask blue-dark selectors or inject a second skin.
+            return ""
         c = get_theme_config(self.current_theme)
         if c["is_light"]:
             page_background = c["bg_main"]
@@ -1017,6 +1023,7 @@ exec "$@"
             danger_soft_background = "rgba(255, 133, 133, 0.08)"
             danger_soft_border = "rgba(255, 133, 133, 0.34)"
         color_scheme = "light" if c["is_light"] else "dark"
+        overlay_tint = "0, 0, 0" if self.current_theme == "classic_dark" else "16, 32, 51"
         return f"""
       :root {{
         color-scheme: {color_scheme} !important;
@@ -1175,7 +1182,7 @@ exec "$@"
         background: {long_control_background} !important;
         border-color: {workspace_border} !important;
         color: {text_color} !important;
-        box-shadow: 0 8px 24px rgba(16, 32, 51, 0.18) !important;
+        box-shadow: 0 8px 24px rgba({overlay_tint}, 0.18) !important;
       }}
       .taxamask-embed .transcript-jump:hover,
       .taxamask-embed .history-loader:hover {{
@@ -1508,7 +1515,7 @@ exec "$@"
         color: {text_color} !important;
       }}
       .taxamask-embed .model-config-backdrop {{
-        background: rgba(16, 32, 51, 0.18) !important;
+        background: rgba({overlay_tint}, 0.18) !important;
       }}
       .taxamask-embed .md-code-frame,
       .taxamask-embed .md-draft-plain,
@@ -1870,9 +1877,9 @@ exec "$@"
     const root = document.documentElement;
     if (root) {
       root.classList.add("taxamask-embed");
-      root.classList.remove("taxamask-embed-light", "taxamask-embed-dark");
+      root.classList.remove("taxamask-embed-light", "taxamask-embed-dark", "taxamask-embed-native");
       root.classList.add("taxamask-embed-" + taxamaskTheme);
-      root.style.colorScheme = taxamaskTheme;
+      root.style.colorScheme = taxamaskTheme === "light" ? "light" : "dark";
     }
     document.body?.classList.add("taxamask-embed-body");
     if (!document.head) return;
@@ -1950,9 +1957,9 @@ exec "$@"
               const root = document.documentElement;
               if (root) {{
                 root.classList.add("taxamask-embed");
-                root.classList.remove("taxamask-embed-light", "taxamask-embed-dark");
+                root.classList.remove("taxamask-embed-light", "taxamask-embed-dark", "taxamask-embed-native");
                 root.classList.add("taxamask-embed-" + theme);
-                root.style.colorScheme = theme;
+                root.style.colorScheme = theme === "light" ? "light" : "dark";
               }}
               document.body?.classList.add("taxamask-embed-body");
               if (!document.head) return false;

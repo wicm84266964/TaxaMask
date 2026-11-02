@@ -88,6 +88,9 @@ class MainWindowModelManagementMixin:
         return ""
 
     def _active_project_bound_background_task(self):
+        instances = getattr(self, "instance_workbench", None)
+        if instances is not None and (instances.busy or instances.process is not None):
+            return "物种与个体后台任务"
         tif_task_label = self._active_tif_project_bound_task()
         if tif_task_label:
             return tif_task_label

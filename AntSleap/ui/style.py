@@ -8,7 +8,7 @@ from typing import Final, TypedDict
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFontDatabase, QPalette
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox, QPushButton, QToolButton, QWidget
 
 BUTTON_ROLE_COMMIT: Final[str] = "commit"
 BUTTON_ROLE_RUN: Final[str] = "run"
@@ -26,6 +26,7 @@ SURFACE_ROLE_CANVAS: Final[str] = "canvas"
 
 THEME_DARK: Final[str] = "dark"
 THEME_LIGHT: Final[str] = "light"
+THEME_CLASSIC_DARK: Final[str] = "classic_dark"
 
 NEON_BLUE: Final[str] = "#6F8FB8"
 NEON_BLUE_HOVER: Final[str] = "#89A7CC"
@@ -54,6 +55,8 @@ def normalize_theme(theme: str | None = "dark") -> str:
     clean = str(theme or THEME_DARK).strip().lower()
     if clean in {"light", "lite", "bright"}:
         return THEME_LIGHT
+    if clean == THEME_CLASSIC_DARK:
+        return THEME_CLASSIC_DARK
     return THEME_DARK
 
 
@@ -103,6 +106,19 @@ def register_windows_scholarly_ui_fonts() -> None:
 
 def get_theme_config(theme: str = "dark") -> ThemeConfig:
     theme = normalize_theme(theme)
+    if theme == THEME_CLASSIC_DARK:
+        # Keep the saved theme key while matching the Ant Code dashboard palette.
+        config = get_theme_config(THEME_DARK)
+        config.update(bg_main="#0a0a0a", bg_surface="#161616", bg_surface_alt="#1c1c1c",
+                      bg_panel="#111111", bg_input="#1c1c1c", bg_hover="#242424", bg_pressed="#111111",
+                      text_main="#f5f5f5", text_soft="#d8d8d8", text_dim="#9a9a9a",
+                      accent="#e8c547", accent_hover="#c9a227", accent_soft="#302919",
+                      border="#2a2a2a", border_strong="#3a3a3a", glow_border="#c9a227",
+                      selection="#302919", success="#8fd89c", warning="#f6c86f", error="#ff8585")
+        for key in tuple(config):
+            if key.endswith("_gradient"):
+                config[key] = config[key.removesuffix("_gradient")]
+        return config
     is_light = theme == THEME_LIGHT
     return {
         "is_light": is_light,
@@ -184,11 +200,13 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
         bg = c["accent"]
         border = c["accent"]
         text = "#FFFFFF"
+        if theme == THEME_CLASSIC_DARK:
+            text = c["bg_main"]
         hover_bg = c["accent_hover"]
         pressed_bg = c["accent_hover"]
         hover_border = c["accent_hover"]
         pressed_border = c["accent_hover"]
-        if not is_light:
+        if theme == THEME_DARK:
             bg = "qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6F8FB8, stop:0.42 #405F88, stop:1 #223B64)"
             bg_property = "background"
             border = "#7898BE"
@@ -226,7 +244,7 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
     extra_block = f"\n        {extras.strip()}" if extras and extras.strip() else ""
 
     return f"""
-    QPushButton {{
+    QPushButton, QToolButton {{
         {bg_property}: {bg};
         border: 1px solid {border};
         color: {text};
@@ -234,20 +252,34 @@ def get_button_style_for_theme(role: str, extras: str = "", theme: str = "dark")
         padding: 7px 16px;
         font-weight: 600;{extra_block}
     }}
-    QPushButton:hover {{
+    QPushButton:hover, QToolButton:hover {{
         {hover_bg_property}: {hover_bg};
         border-color: {hover_border};
     }}
-    QPushButton:pressed {{
+    QPushButton:pressed, QToolButton:pressed {{
         {pressed_bg_property}: {pressed_bg};
         border-color: {pressed_border};
     }}
-    QPushButton:disabled {{
+    QPushButton:disabled, QToolButton:disabled {{
         background-color: {disabled_bg};
         color: {disabled_color};
         border: 1px solid {disabled_bg};
     }}
+    {menu_arrow_stylesheet(theme)}
     """
+
+
+def arrow_asset(theme, direction="down"):
+    variant = "light" if normalize_theme(theme) == THEME_LIGHT else "dark"
+    return os.path.join(os.path.dirname(__file__), "..", "assets", "ui", f"chevron-{direction}-{variant}.svg").replace("\\", "/")
+
+
+def menu_arrow_stylesheet(theme):
+    return f'''QPushButton::menu-indicator, QToolButton::menu-indicator {{
+        image: url("{arrow_asset(theme)}"); width: 12px; height: 12px;
+        subcontrol-origin: padding; subcontrol-position: right center; right: 8px;
+    }}
+    QPushButton:has-menu, QToolButton[popupMode="0"], QToolButton[popupMode="1"], QToolButton[popupMode="2"] {{ padding-right: 28px; }}'''
 
 
 def semantic_button_style(role: str, extras: str = "") -> str:
@@ -285,7 +317,7 @@ def refresh_themed_buttons(root: QWidget | QApplication | None = None, theme: st
     else:
         buttons = [root, *root.findChildren(QWidget)]
     for widget in buttons:
-        if not isinstance(widget, QPushButton):
+        if not isinstance(widget, (QPushButton, QToolButton)):
             continue
         role = widget.property("themeButtonRole")
         if not isinstance(role, str) or not role:
@@ -704,7 +736,7 @@ QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected
     font-weight: 700;
 }
 
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: %INPUT_GRADIENT%;
     border: 1px solid %BORDER%;
     border-radius: 8px;
@@ -746,11 +778,29 @@ QPlainTextEdit#MutedLogConsole {
 
 QComboBox::drop-down,
 QSpinBox::up-button,
-QSpinBox::down-button {
+QSpinBox::down-button,
+QDoubleSpinBox::up-button,
+QDoubleSpinBox::down-button {
     border: none;
     width: 18px;
     background: transparent;
 }
+
+QComboBox { padding-right: 28px; }
+QComboBox::down-arrow { image: url("%DOWN_ARROW%"); width: 12px; height: 12px; }
+QSpinBox, QDoubleSpinBox { padding: 5px 24px 5px 8px; }
+QSpinBox QLineEdit, QDoubleSpinBox QLineEdit {
+    padding: 0; border: none; border-radius: 0; background: transparent;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right; width: 20px; margin: 2px 2px 0 0;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; margin: 0 2px 2px 0;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url("%UP_ARROW%"); width: 10px; height: 10px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url("%DOWN_ARROW%"); width: 10px; height: 10px; }
+QToolButton::menu-arrow { image: url("%DOWN_ARROW%"); width: 12px; height: 12px; }
 
 QComboBox QAbstractItemView {
     background: %SURFACE_GRADIENT%;
@@ -836,7 +886,7 @@ QRadioButton#toolChip:hover, QRadioButton#scaleToolRadio:hover {
 QRadioButton#toolChip:checked, QRadioButton#scaleToolRadio:checked {
     background-color: %ACCENT%;
     border-color: %ACCENT%;
-    color: #FFFFFF;
+    color: %ON_ACCENT%;
 }
 
 QPushButton {
@@ -993,6 +1043,9 @@ def get_theme_stylesheet(theme: str = "dark") -> str:
     theme = normalize_theme(theme)
     config = get_theme_config(theme)
     vars = {
+        "%ON_ACCENT%": config["bg_main"] if theme == THEME_CLASSIC_DARK else "#FFFFFF",
+        "%DOWN_ARROW%": arrow_asset(theme),
+        "%UP_ARROW%": arrow_asset(theme, "up"),
         "%BG%": config["bg_main"],
         "%BG_GRADIENT%": config["bg_main_gradient"],
         "%SURFACE%": config["bg_surface"],
@@ -1020,7 +1073,7 @@ def get_theme_stylesheet(theme: str = "dark") -> str:
     res = COMMON_BASE
     for k, v in vars.items():
         res = res.replace(k, v)
-    return res
+    return res + menu_arrow_stylesheet(theme)
 
 
 def build_theme_palette(theme: str = "dark") -> QPalette:

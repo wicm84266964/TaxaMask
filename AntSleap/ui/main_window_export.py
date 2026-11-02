@@ -6,6 +6,8 @@ except ImportError:
 
 class MainWindowExportMixin:
     def export_dataset(self):
+        if getattr(self, "active_project_kind", "image") == "instances":
+            return self.instance_workbench.guard(self.instance_workbench.export)
         dlg = ExportDialog(self, self.current_lang, default_dir=self._default_2d_export_dir())
         if dlg.exec():
             self._flush_pending_project_save(defer_for_navigation=False)

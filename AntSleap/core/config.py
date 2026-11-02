@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "train_weight_decay": 1e-4, # L2 Regularization (Higher = Less Overfitting)
     "train_from_scratch": False, # If True, resets weights before training
     "runtime_device": "auto", # auto | cpu | cuda
-    "theme": "dark",
+    "theme": "classic_dark",
     "known_relocated_roots": [],
     "model_backend": "builtin_locator_sam",
     "external_backend": {

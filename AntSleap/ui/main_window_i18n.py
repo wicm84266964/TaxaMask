@@ -457,6 +457,8 @@ TRANSLATIONS = {
         "Theme": "主题",
         "Dark Mode": "深色模式",
         "Dark Mode (Deep Space Neon)": "深色模式（深空霓虹）",
+        "Dark Mode (Classic)": "深色模式（黑金）",
+        "Choose Deep Space Neon, Classic Dark, or Light Mode for all workbenches.": "所有工作台共用主题，可选择深空霓虹、黑金或浅色模式。",
         "Light Mode": "浅色模式",
         "File": "文件",
         "Settings": "设置",

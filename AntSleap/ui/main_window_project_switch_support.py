@@ -18,6 +18,62 @@ NEW_PROJECT_RECOVERY_CLOCK_SKEW_SECONDS = 5 * 60
 
 
 class MainWindowProjectSwitchSupportMixin:
+    def _ensure_tab_visible(self, widget, title):
+        if not hasattr(self, "tabs") or widget is None:
+            return
+        if self.tabs.indexOf(widget) < 0:
+            self.tabs.addTab(widget, title)
+
+    def _remove_tab_if_present(self, widget):
+        if not hasattr(self, "tabs") or widget is None:
+            return
+        index = self.tabs.indexOf(widget)
+        if index >= 0:
+            self.tabs.removeTab(index)
+
+    def _apply_project_mode_tabs(self):
+        if not hasattr(self, "tabs"):
+            return
+        for name in ("shortcut_undo", "shortcut_redo", "shortcut_save"):
+            shortcut = getattr(self, name, None)
+            if shortcut is not None:
+                shortcut.setEnabled(getattr(self, "active_project_kind", "image") != "instances")
+        instance_workbench = getattr(self, "instance_workbench", None)
+        if getattr(self, "active_project_kind", "image") == "instances":
+            for widget in (self.start_center_widget, self.workbench_widget, self.blink_lab,
+                           getattr(self, "tif_workbench", None), getattr(self, "pdf_widget", None)):
+                self._remove_tab_if_present(widget)
+            self._ensure_tab_visible(instance_workbench, "物种与个体标注")
+            self.tabs.setCurrentWidget(instance_workbench)
+            return
+        self._remove_tab_if_present(instance_workbench)
+        if getattr(self, "active_project_kind", "image") == "start":
+            for widget in (
+                self.workbench_widget,
+                self.blink_lab,
+                getattr(self, "tif_workbench", None),
+                getattr(self, "pdf_widget", None),
+            ):
+                self._remove_tab_if_present(widget)
+            self._ensure_tab_visible(self.start_center_widget, tr("Start Center", self.current_lang))
+            self.tabs.setCurrentWidget(self.start_center_widget)
+            return
+        if getattr(self, "active_project_kind", "image") == "tif":
+            self._ensure_tif_workbench()
+            self._remove_tab_if_present(self.start_center_widget)
+            self._remove_tab_if_present(self.workbench_widget)
+            self._remove_tab_if_present(self.blink_lab)
+            self._remove_tab_if_present(getattr(self, "pdf_widget", None))
+            self._ensure_tab_visible(self.tif_workbench, tr("TIF Volume Workbench", self.current_lang))
+            self.tabs.setCurrentWidget(self.tif_workbench)
+            return
+        self._remove_tab_if_present(self.start_center_widget)
+        self._remove_tab_if_present(getattr(self, "tif_workbench", None))
+        self._remove_tab_if_present(self.blink_lab)
+        self._ensure_tab_visible(self.workbench_widget, tr("Labeling Workbench", self.current_lang))
+        if self.tabs.currentWidget() is None or self.tabs.currentWidget() is getattr(self, "tif_workbench", None):
+            self.tabs.setCurrentWidget(self.workbench_widget)
+
     def _close_active_tif_workbench_for_project_switch(self):
         active_kind = getattr(self, "active_project_kind", "start")
         if active_kind == "start":
@@ -1228,6 +1284,10 @@ class MainWindowProjectSwitchSupportMixin:
         if active_kind == "start":
             active_kind = getattr(self, "last_workbench_kind", "image")
         source_kind = getattr(self, "active_project_source_kind", active_kind)
+        if active_kind == "instances":
+            workbench = getattr(self, "instance_workbench", None)
+            project = getattr(workbench, "project", None)
+            return str(project.path) if project else ""
         if active_kind == "tif":
             return getattr(self.tif_project, "current_project_path", None) or ""
         if active_kind == "image":

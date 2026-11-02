@@ -223,6 +223,16 @@ class MainWindowStartCenterMixin:
         )
         rail_layout.addWidget(self.start_pdf_card)
         rail_layout.addWidget(self.start_image_card)
+        self.start_instance_card = self._build_workflow_card(
+            "startInstanceWorkflowCard",
+            "物种与个体标注",
+            "标注同一图片中的多个个体与物种，使用 SAM 描边，整理检测、分类与实例分割数据集。",
+            "进入物种与个体工作台",
+            self.enter_instance_workflow,
+            "新建物种与个体项目",
+            self.new_instance_project,
+        )
+        rail_layout.addWidget(self.start_instance_card)
         if self.start_tif_card is not None:
             rail_layout.addWidget(self.start_tif_card)
         rail_layout.addStretch(1)
@@ -400,11 +410,62 @@ class MainWindowStartCenterMixin:
 
     def _show_start_center(self):
         active_kind = getattr(self, "active_project_kind", "start")
-        if active_kind in {"image", "tif"}:
+        if active_kind in {"image", "tif", "instances"}:
             self.last_workbench_kind = active_kind
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
         self._update_start_center_texts()
+        if active_kind == "instances":
+            self.create_menus()
+
+    def _ensure_instance_workbench(self):
+        if getattr(self, "instance_workbench", None) is None:
+            from AntSleap.ui.instance_workbench import InstanceWorkbench
+            self.instance_workbench = InstanceWorkbench(self)
+            self.instance_workbench.return_requested.connect(self._show_start_center)
+            self.instance_workbench.project_opened.connect(self._instance_project_opened)
+            self.instance_workbench.agent_requested.connect(self.open_agent_from_context)
+        return self.instance_workbench
+
+    def _instance_project_opened(self, path):
+        self.config.set("last_project_path", path)
+        self.active_project_entry_path = path
+        self.config.save()
+
+    def enter_instance_workflow(self):
+        if not self._ensure_project_switch_available():
+            return
+        self._flush_pending_project_save(defer_for_navigation=False)
+        workbench = self._ensure_instance_workbench()
+        self.active_project_kind = "instances"
+        self.last_workbench_kind = "instances"
+        self._apply_project_mode_tabs()
+        self.tabs.setCurrentWidget(workbench)
+        self.create_menus()
+
+    def new_instance_project(self):
+        self.enter_instance_workflow()
+        if getattr(self, "active_project_kind", None) == "instances":
+            self.instance_workbench.guard(self.instance_workbench.new_project)
+
+    def import_materials_to_instances(self, database):
+        from AntSleap.core.instance_material_import import reviewed_candidates, import_reviewed_materials
+        workbench = self._ensure_instance_workbench()
+        def perform():
+            candidates = reviewed_candidates(database)
+            if not candidates:
+                raise ValueError("没有人工标记为 import_ready 的图片，请先在材料复核页面检查")
+            if workbench.project is None:
+                workbench.open_project()
+                if workbench.project is None:
+                    return
+            if QMessageBox.question(self, "确认导入目标", f"将 {len(candidates)} 张已复核材料导入物种与个体项目：{workbench.project.name}？\n仅导入图片与来源，物种名作为来源建议，不生成训练标签。") != QMessageBox.Yes:
+                return
+            destination, report = import_reviewed_materials(workbench.project, database, candidates)
+            workbench.refresh()
+            workbench.log.appendPlainText(f"材料导入 {len(report['imported'])} 张，报告：{destination}")
+            self.enter_instance_workflow()
+        workbench.guard(perform)
 
     def _update_start_center_texts(self):
         if not hasattr(self, "start_center_widget"):
@@ -720,6 +781,8 @@ class MainWindowStartCenterMixin:
 
     def _agent_current_workflow_label(self):
         kind = getattr(self, "active_project_kind", "start")
+        if kind == "instances":
+            return "物种与个体标注"
         if kind == "tif":
             return tr("TIF Volume Workflow", self.current_lang)
         if kind == "image":
@@ -727,7 +790,10 @@ class MainWindowStartCenterMixin:
         return tr("Start Center", self.current_lang)
 
     def _agent_current_project_label(self):
-        if getattr(self, "active_project_kind", "start") == "tif":
+        if getattr(self, "active_project_kind", "start") == "instances":
+            project = getattr(getattr(self, "instance_workbench", None), "project", None)
+            path = str(project.path) if project else ""
+        elif getattr(self, "active_project_kind", "start") == "tif":
             path = getattr(self.tif_project, "current_project_path", "") or ""
         elif getattr(self, "active_project_kind", "start") == "image":
             path = self._active_recent_project_path() or getattr(self.project, "current_project_path", "") or ""

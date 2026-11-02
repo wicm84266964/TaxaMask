@@ -35,6 +35,9 @@
 
 ## 待实施设计
 
+- [多物种、多个体标注工作台设计稿](multi_species_instance_workbench_design_zh.md)
+  - 2026-11-02，设计版本 0.3，一期完整交付设计。主界面独立入口、实例模型、类别确认、SAM 掩膜、三任务导入导出与训练预测、外部模型设置及智能体接口已在本地实现。具体差异与已完成/待完成验证见[实现与验证记录](../validation/instance_workbench_validation_zh.md)，操作见[使用说明](../instance_workbench_zh.md)。
+
 - [交互、标注确认状态与展示一致性修复设计稿](interaction_truth_status_review_design_zh.md)
   - 2026-09-13 巡检问题与拟修方案，当前为设计版本 0.2。区分源码证据、待运行核查和计划验收；0.2 收紧了 SAM 来源、首屏状态分层、批次拆分和启动项目口径。尚未实施。
 

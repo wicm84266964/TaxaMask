@@ -32,6 +32,8 @@ except ModuleNotFoundError as exc:
 
 def _tif_canvas_background(theme="dark"):
     theme = normalize_theme(theme)
+    if theme == "classic_dark":
+        return get_theme_config(theme)["bg_main"]
     return "#111A2B" if theme == "light" else "#07101D"
 
 

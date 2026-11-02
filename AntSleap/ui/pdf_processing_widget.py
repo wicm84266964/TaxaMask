@@ -2756,6 +2756,7 @@ class PdfProcessingWidget(QWidget):
     start_center_requested = Signal()
     agent_requested = Signal(dict)
     material_page_changed = Signal(dict)
+    instance_material_import_requested = Signal(str)
 
     def __init__(self, current_lang="en", parent=None):
         super().__init__(parent)
@@ -4110,6 +4111,12 @@ class PdfProcessingWidget(QWidget):
         self.btn_export_jsonl.clicked.connect(self.export_jsonl)
         apply_semantic_button_style(self.btn_export_jsonl, BUTTON_ROLE_COMMIT)
         u_layout.addWidget(self.btn_export_jsonl)
+        self.btn_instance_material_import = QPushButton("导入到物种与个体工作台")
+        self.btn_instance_material_import.setToolTip("仅导入人工标记为 import_ready 的图片；不会自动生成物种真值")
+        self.btn_instance_material_import.clicked.connect(
+            lambda: self.instance_material_import_requested.emit(self._resolve_extract_db_path(self.edit_db_path.text()))
+        )
+        u_layout.addWidget(self.btn_instance_material_import)
         
         l_ext.addWidget(util_group)
         l_ext.addStretch()

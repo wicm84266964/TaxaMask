@@ -60,6 +60,12 @@ jobs:
       - name: Run v2.4.10 release regressions
         run: python scripts/run_validation_suite.py --suite v2410_release_audit --timeout 300
 
+      - name: Run instance workbench and theme regressions
+        run: |
+          python -m unittest tests.test_instance_workbench tests.test_instance_interfaces tests.test_instance_canvas_interactions
+          python -m unittest tests.test_shared_theme_controls tests.test_tif_workbench_style
+          python -m unittest tests.test_agent_native_theme
+
       - name: Run v2.5.0 storage release regressions
         run: python scripts/run_validation_suite.py --suite v250_release_audit --timeout 300
 

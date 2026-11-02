@@ -115,6 +115,10 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         self.open_project_path(last_project)
 
     def closeEvent(self, event):
+        instance_workbench = getattr(self, "instance_workbench", None)
+        if instance_workbench is not None and not instance_workbench.can_close():
+            event.ignore()
+            return
         if getattr(self, "image_import_thread", None) is not None and self.image_import_thread.isRunning():
             QMessageBox.information(
                 self,
@@ -169,6 +173,8 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         if recent_project_path:
             self.config.set("last_project_path", recent_project_path)
         self.config.save()
+        if instance_workbench is not None:
+            instance_workbench.shutdown()
         event.accept()
         os._exit(0)
 
@@ -328,6 +334,19 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
     def _apply_project_mode_tabs(self):
         if not hasattr(self, "tabs"):
             return
+        for name in ("shortcut_undo", "shortcut_redo", "shortcut_save"):
+            shortcut = getattr(self, name, None)
+            if shortcut is not None:
+                shortcut.setEnabled(getattr(self, "active_project_kind", "image") != "instances")
+        instance_workbench = getattr(self, "instance_workbench", None)
+        if getattr(self, "active_project_kind", "image") == "instances":
+            for widget in (self.start_center_widget, self.workbench_widget, self.blink_lab,
+                           getattr(self, "tif_workbench", None), getattr(self, "pdf_widget", None)):
+                self._remove_tab_if_present(widget)
+            self._ensure_tab_visible(instance_workbench, "物种与个体标注")
+            self.tabs.setCurrentWidget(instance_workbench)
+            return
+        self._remove_tab_if_present(instance_workbench)
         if getattr(self, "active_project_kind", "image") == "start":
             for widget in (
                 self.workbench_widget,
@@ -500,6 +519,8 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         return os.path.dirname(os.path.abspath(project_path)) if project_path else self._default_outputs_root()
 
     def backup_current_sqlite_project(self):
+        if getattr(self, "active_project_kind", "image") == "instances":
+            return self.instance_workbench.guard(self.instance_workbench.backup)
         manager = self._flush_active_sqlite_project_before_maintenance()
         if manager is None:
             QMessageBox.information(
@@ -543,6 +564,9 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         )
 
     def export_current_project_legacy_json(self):
+        if getattr(self, "active_project_kind", "image") == "instances":
+            QMessageBox.information(self, "物种与个体项目", "实例项目不能导出成旧部位项目；请使用数据集导出。")
+            return
         manager = self._flush_active_sqlite_project_before_maintenance()
         if manager is None:
             QMessageBox.information(
@@ -1128,6 +1152,13 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
     def open_project_path(self, path):
         if not self._ensure_project_switch_available():
             return
+        if str(path).lower().endswith(".instance.json"):
+            self._flush_pending_project_save(defer_for_navigation=False)
+            workbench = self._ensure_instance_workbench()
+            workbench.guard(lambda: workbench.open_path(path))
+            if workbench.project is not None and str(workbench.project.path).casefold() == canonical_path(path).casefold():
+                self.enter_instance_workflow()
+            return
         f = canonical_path(path)
         runtime_log_event("open_project_begin", path=f)
         self._flush_pending_project_save(defer_for_navigation=False)
@@ -1401,6 +1432,9 @@ class MainWindowProjectLifecycleMixin(MainWindowProjectSwitchSupportMixin):
         return "\n".join(lines) if lines else "-"
 
     def check_relocate_project_images(self):
+        if getattr(self, "active_project_kind", "image") == "instances":
+            QMessageBox.information(self, "物种与个体项目", "实例图片已复制到项目 media 目录。请保持项目目录完整；缺失材料可从原始来源重新导入。")
+            return
         health = self.project.get_image_path_health()
         message = tr("Project has {0}/{1} image paths available. Missing: {2}.", self.current_lang).format(
             health["existing_count"],

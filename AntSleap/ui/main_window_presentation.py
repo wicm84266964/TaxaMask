@@ -8,6 +8,20 @@ class MainWindowPresentationMixin:
     def create_menus(self):
         menubar = self.menuBar()
         menubar.clear()
+        if getattr(self, "active_project_kind", "image") == "instances":
+            workbench = self.instance_workbench
+            file_menu = menubar.addMenu(tr("File", self.current_lang))
+            for label, callback in [("返回主界面", self._show_start_center), ("新建物种与个体项目", workbench.new_project),
+                                    ("打开项目", self.open_project), ("备份当前实例项目", workbench.backup),
+                                    ("恢复实例备份", workbench.restore), ("导出数据集", workbench.export)]:
+                file_menu.addAction(label, lambda checked=False, cb=callback: workbench.guard(cb))
+            file_menu.addSeparator()
+            for label, callback in [("导入图片", workbench.import_images), ("导入文件夹", workbench.import_folder),
+                                    ("导入标注", workbench.import_annotations)]:
+                file_menu.addAction(label, lambda checked=False, cb=callback: workbench.guard(cb))
+            file_menu.addAction(tr("Open Material Processing Center", self.current_lang), self.open_pdf_evidence_tools)
+            self._create_shared_workflow_settings_menus(menubar, instances=True)
+            return
         file_menu = menubar.addMenu(tr("File", self.current_lang))
         file_menu.addAction(tr("Start Center", self.current_lang), self._show_start_center)
         file_menu.addAction(tr("New Project", self.current_lang), self.new_project)
@@ -22,21 +36,31 @@ class MainWindowPresentationMixin:
         file_menu.addAction(tr("Open Material Processing Center", self.current_lang), self.open_pdf_evidence_tools)
         file_menu.addAction(tr("Check / Relocate Project Images", self.current_lang), self.check_relocate_project_images)
         file_menu.addAction(tr("Export Dataset", self.current_lang), self.export_dataset)
+        self._create_shared_workflow_settings_menus(menubar)
+
+    def _create_shared_workflow_settings_menus(self, menubar, *, instances=False):
         workflow_menu = menubar.addMenu(tr("Workflow", self.current_lang))
         workflow_menu.addAction(tr("2D/STL Morphology Workflow", self.current_lang), self.enter_image_workflow)
+        workflow_menu.addAction("物种与个体标注", self.enter_instance_workflow)
+        workflow_menu.addAction("新建物种与个体项目", self.new_instance_project)
         workflow_menu.addAction(tr("Create 2D/STL project", self.current_lang), self.new_project)
         verify_current_action = workflow_menu.addAction(tr("Verify Current Image", self.current_lang))
         verify_current_action.setShortcut(QKeySequence("Ctrl+Enter"))
-        verify_current_action.triggered.connect(lambda checked=False: self.verify_current_image())
+        if instances:
+            verify_current_action.triggered.connect(lambda checked=False: self.instance_workbench.guard(lambda: self.instance_workbench.review("complete")))
+        else:
+            verify_current_action.triggered.connect(lambda checked=False: self.verify_current_image())
         if self._is_tif_workflow_enabled():
             workflow_menu.addAction(tr("TIF Volume Workflow", self.current_lang), self.enter_tif_workflow)
             workflow_menu.addAction(tr("Create TIF project", self.current_lang), self.new_tif_project)
-        workflow_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
+        if not instances:
+            workflow_menu.addAction(tr("Import STL Rendered Views to Labeling Workbench", self.current_lang), self.import_stl_rendered_views_action)
         settings_menu = menubar.addMenu(tr("Settings", self.current_lang))
         settings_menu.addAction(tr("General Settings", self.current_lang), self.open_general_settings)
         settings_menu.addAction(tr("2D/STL Model Settings", self.current_lang), self.open_stl_model_settings)
         if self._is_tif_workflow_enabled():
             settings_menu.addAction(tr("TIF Volume Model Settings", self.current_lang), self.open_tif_model_settings)
+        settings_menu.addAction("物种与个体模型设置", lambda: self._open_model_settings_from_agent("instances"))
 
     def on_global_labels_updated(self):
         """Called when the child expert session applies changes back to the global project."""
@@ -494,7 +518,7 @@ class MainWindowPresentationMixin:
         self.update_widget_themes()
         self.update_button_themes()
         refresh_themed_buttons(self, theme)
-        theme_label = tr("Light Mode", self.current_lang) if theme == "light" else tr("Dark Mode (Deep Space Neon)", self.current_lang)
+        theme_label = tr({"light": "Light Mode", "classic_dark": "Dark Mode (Classic)"}.get(theme, "Dark Mode (Deep Space Neon)"), self.current_lang)
         self.log(f"{tr('Theme', self.current_lang)}: {theme_label}")
 
     def update_widget_themes(self):

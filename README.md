@@ -36,7 +36,7 @@ The public interface centers on practical workflow entries: Agent Center for loc
 
 ## Core Workflows
 
-TaxaMask now has four connected research routes:
+TaxaMask has the following connected research routes. The development workspace also includes an independent [Species and Individuals workbench](docs/instance_workbench_zh.md), with per-individual species labels, SAM-assisted masks, detection/classification/segmentation adapters, external backend settings, and a draft-only agent interface. See its [validation record](docs/validation/instance_workbench_validation_zh.md) for current checks and limits; this is not a claim of biological recognition accuracy.
 
 ```text
 PDF evidence
@@ -63,6 +63,12 @@ TIF / CT internal morphology
   -> Blender-ready STL export from reviewed label volumes
   -> TIF backend dataset preparation, training, and prediction
   -> prediction review in draft label layers with raw_ai_prediction_backup
+
+Species and Individuals
+  -> multiple individuals and species per image
+  -> boxes, polygons, or SAM-assisted masks
+  -> human confirmation and image completeness review
+  -> grouped dataset export, training, and prediction review
 
 Agent Center
   -> workflow inspection

@@ -10,6 +10,8 @@ except ModuleNotFoundError as exc:
 
 def tif_canvas_background(theme="dark"):
     theme = normalize_theme(theme)
+    if theme == "classic_dark":
+        return get_theme_config(theme)["bg_main"]
     return "#111A2B" if theme == "light" else "#07101D"
 
 
@@ -17,7 +19,7 @@ def tif_workbench_theme(theme="dark"):
     c = get_theme_config(theme)
     is_light = bool(c["is_light"])
     canvas_bg = tif_canvas_background(theme)
-    return {
+    colors = {
         "root": c["bg_main"],
         "panel": c["bg_surface"],
         "panel_alt": c["bg_surface_alt"],
@@ -31,6 +33,7 @@ def tif_workbench_theme(theme="dark"):
         "button_pressed": "#E4EDF7" if is_light else "#101B2E",
         "button_disabled": c["bg_panel"],
         "primary": c["accent"],
+        "primary_text": c["bg_main"] if normalize_theme(theme) == "classic_dark" else "#FFFFFF",
         "primary_hover": c["accent_hover"],
         "primary_pressed": "#0369A1" if is_light else "#405F88",
         "secondary_checked": "#DCEFFA" if is_light else "#243D63",
@@ -57,6 +60,11 @@ def tif_workbench_theme(theme="dark"):
         "warning": c["warning"],
         "error": c["error"],
     }
+    if normalize_theme(theme) == "classic_dark":
+        colors.update(canvas_shell=c["bg_panel"], table_alt=c["bg_surface_alt"],
+                      button=c["bg_surface_alt"], button_hover=c["bg_hover"], button_pressed=c["bg_pressed"],
+                      primary_pressed=c["accent_hover"], secondary_checked=c["selection"], scrollbar_track=c["bg_panel"])
+    return colors
 
 
 TIF_WORKBENCH_STYLESHEET_TEMPLATE = """
@@ -280,7 +288,7 @@ TIF_WORKBENCH_STYLESHEET_TEMPLATE = """
             QPushButton[tifRole="primary"] {
                 background: {t['primary']};
                 border: 1px solid {t['glow_border']};
-                color: #FFFFFF;
+                color: {t['primary_text']};
             }
             QPushButton[tifRole="primary"]:hover {
                 background: {t['primary_hover']};

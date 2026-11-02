@@ -1228,6 +1228,10 @@ class MainWindowProjectSwitchSupportMixin:
         if active_kind == "start":
             active_kind = getattr(self, "last_workbench_kind", "image")
         source_kind = getattr(self, "active_project_source_kind", active_kind)
+        if active_kind == "instances":
+            workbench = getattr(self, "instance_workbench", None)
+            project = getattr(workbench, "project", None)
+            return str(project.path) if project else ""
         if active_kind == "tif":
             return getattr(self.tif_project, "current_project_path", None) or ""
         if active_kind == "image":

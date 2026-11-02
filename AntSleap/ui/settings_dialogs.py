@@ -68,7 +68,7 @@ class GeneralSettingsDialog(QDialog):
     def __init__(self, params, lang="en", parent=None):
         super().__init__(parent)
         self.lang = lang
-        self.current_theme = normalize_theme(params.get("theme", "dark"))
+        self.current_theme = normalize_theme(params.get("theme", "classic_dark"))
         self.setWindowTitle(tr("General Application Settings", lang))
         self.resize(620, 460)
         self.setStyleSheet(get_theme_stylesheet(self.current_theme))
@@ -102,12 +102,13 @@ class GeneralSettingsDialog(QDialog):
 
         self.theme_combo = NoWheelComboBox()
         self.theme_combo.addItem(tr("Dark Mode (Deep Space Neon)", lang), "dark")
+        self.theme_combo.addItem(tr("Dark Mode (Classic)", lang), "classic_dark")
         self.theme_combo.addItem(tr("Light Mode", lang), "light")
         theme_index = self.theme_combo.findData(self.current_theme)
         self.theme_combo.setCurrentIndex(theme_index if theme_index >= 0 else 0)
         form.addRow(QLabel(tr("Theme:", lang)), self.theme_combo)
 
-        theme_note = QLabel(tr("Dark Mode now uses the Deep Space Neon palette; Light Mode is available for bright workspaces.", lang))
+        theme_note = QLabel(tr("Choose Deep Space Neon, Classic Dark, or Light Mode for all workbenches.", lang))
         theme_note.setWordWrap(True)
         theme_note.setObjectName("mutedLabel")
         form.addRow(QLabel(""), theme_note)

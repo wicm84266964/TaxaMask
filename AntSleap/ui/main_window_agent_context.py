@@ -30,6 +30,9 @@ class MainWindowAgentContextMixin:
         allowed_keys = (
             "source_workbench",
             "project_type",
+            "project_id",
+            "image_id",
+            "instance_count",
             "project_source_kind",
             "project_path",
             "review_project_path",
@@ -374,16 +377,22 @@ class MainWindowAgentContextMixin:
             payload = self._collect_blink_agent_context()
         if not payload and hasattr(self, "tabs") and self.tabs.currentWidget() is self.tif_workbench:
             payload = self.tif_workbench.get_agent_context()
+        if not payload and getattr(self, "active_project_kind", "start") == "instances":
+            workbench = getattr(self, "instance_workbench", None)
+            if workbench is not None and workbench.project is not None:
+                payload = workbench.get_agent_context()
         if not payload:
             payload = self._collect_image_workbench_agent_context()
         payload = self._compact_agent_context(payload)
         if source_widget is getattr(self, "tif_workbench", None) and hasattr(self.tif_workbench, "prepare_for_agent_panel"):
             self.tif_workbench.prepare_for_agent_panel()
         active_kind = getattr(self, "active_project_kind", "start")
-        if active_kind in {"image", "tif"}:
+        if active_kind in {"image", "tif", "instances"}:
             self.last_workbench_kind = active_kind
         self.active_project_kind = "start"
         self._apply_project_mode_tabs()
+        if active_kind == "instances" and callable(getattr(self, "create_menus", None)):
+            self.create_menus()
         self._update_start_center_texts()
         if hasattr(self, "agent_panel"):
             self.agent_panel.set_context(payload, announce=True)
@@ -400,6 +409,9 @@ class MainWindowAgentContextMixin:
         self._show_start_center()
 
     def _open_workflow_from_agent(self, workflow):
+        if workflow in {"species_instances", "instances"}:
+            self.enter_instance_workflow()
+            return
         if workflow == "tif":
             if not self._is_tif_workflow_enabled():
                 self._show_tif_workflow_unavailable()
@@ -409,6 +421,10 @@ class MainWindowAgentContextMixin:
         self.shell_coordinator.enter_image()
 
     def _open_model_settings_from_agent(self, workflow):
+        if workflow in {"species_instances", "instances"}:
+            self.enter_instance_workflow()
+            self.instance_workbench.guard(self.instance_workbench.model_settings)
+            return
         if workflow == "tif":
             if not self._is_tif_workflow_enabled():
                 self._show_tif_workflow_unavailable()
@@ -418,6 +434,9 @@ class MainWindowAgentContextMixin:
         self.open_stl_model_settings()
 
     def enter_image_workflow(self):
+        instances = getattr(self, "instance_workbench", None)
+        if instances is not None and not instances.can_close():
+            return
         prompt = getattr(self, "_prompt_formal_2d_project_before_enter", None)
         if callable(prompt) and not prompt():
             self.log(tr("Stayed on Start Center. No annotations were written to the startup placeholder.", self.current_lang))
@@ -430,6 +449,9 @@ class MainWindowAgentContextMixin:
         self.log(tr("Opened 2D/STL workflow.", self.current_lang))
 
     def enter_tif_workflow(self):
+        instances = getattr(self, "instance_workbench", None)
+        if instances is not None and not instances.can_close():
+            return
         if not self._is_tif_workflow_enabled():
             self._show_tif_workflow_unavailable()
             return
